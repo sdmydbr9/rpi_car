@@ -1,5 +1,5 @@
 import RPi.GPIO as GPIO
-from flask import Flask, render_template, send_from_directory, jsonify
+from flask import Flask, render_template, send_from_directory, jsonify, request
 from flask_cors import CORS
 import os
 import subprocess
@@ -28,10 +28,18 @@ IN4 = 23  # Right Motor Direction B
 ENA = 18  # Left Motor Speed (PWM)
 ENB = 19  # Right Motor Speed (PWM)
 
+# --- IR OBSTACLE SENSORS (BCM Numbering) ---
+# Left Front IR: VCC → Pin 1, GND → Pin 9, OUT → Pin 29 (GPIO 5)
+# Right Front IR: VCC → Pin 17, GND → Pin 25, OUT → Pin 31 (GPIO 6)
+LEFT_IR = 5   # GPIO 5 - Left Front Obstacle Detection
+RIGHT_IR = 6  # GPIO 6 - Right Front Obstacle Detection
+AVOID_SWERVE_ANGLE = 85  # Degrees to swerve when obstacle detected (increased for aggressive steering)
+
 # --- PHYSICS TUNING ---
 ACCEL_RATE = 2.0    # How snappy the car speeds up (Higher = Faster)
 COAST_RATE = 0.5    # How slowly it stops when you let go of gas (Coasting)
 BRAKE_RATE = 1.5    # Brake deceleration rate (stops from 100 in ~3-4 seconds)
+EMERGENCY_BRAKE_RATE = 5.0  # Emergency brake deceleration (faster stop on obstacle)
 FREQ = 1000         # PWM Frequency (Hz)
 
 # ==========================================
@@ -61,8 +69,11 @@ check_and_build()
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
 
-# Setup Pins
+# Setup Motor Pins
 GPIO.setup([IN1, IN2, IN3, IN4, ENA, ENB], GPIO.OUT)
+
+# Setup IR Sensor Pins (Input)
+GPIO.setup([LEFT_IR, RIGHT_IR], GPIO.IN)
 
 # Setup PWM
 pwm_a = GPIO.PWM(ENA, FREQ)
@@ -82,40 +93,143 @@ car_state = {
     "direction": "stop",  # stop, forward, backward
     "turning": "straight",# straight, left, right
     "current_pwm": 0.0,   # The actual speed (0-100) right now
-    "steer_angle": 0      # NEW: Defaults to 0 (Straight)
+    "steer_angle": 0,      # Current steering angle
+    "left_obstacle": False, # IR sensor: obstacle detected on left
+    "right_obstacle": False, # IR sensor: obstacle detected on right
+    "ir_enabled": True,    # IR sensor toggle
+    "user_steer_angle": 0, # Store user's manual steering (preserved when avoiding)
+    "obstacle_avoidance_active": False,  # Track if currently avoiding
+    "speed_limit": 100,    # Manual speed limit (5-100), overrides gear speeds
+    "speed_limit_enabled": False  # Whether to use speed limit instead of gear
 }
 
 def physics_loop():
+    obstacle_state = "IDLE"  # IDLE, STOPPED, STEERING
+    stop_timer = 0           # Timer for 1-second stop (50 cycles = 1 second at 20ms)
+    steering_timer = 0       # Timer for steering duration
+    last_left_obstacle = False
+    last_right_obstacle = False
+    target_steer_angle = 0   # Target angle during steering phase
+    
     while True:
+        # --- CHECK IR SENSORS ---
+        # IR sensors are active LOW: 0 = obstacle detected, 1 = no obstacle
+        left_obstacle = not GPIO.input(LEFT_IR)   # Invert so True = obstacle
+        right_obstacle = not GPIO.input(RIGHT_IR) # Invert so True = obstacle
+        
+        car_state["left_obstacle"] = left_obstacle
+        car_state["right_obstacle"] = right_obstacle
+        
+        # Debug: Print only on state change (less spam)
+        if left_obstacle and not last_left_obstacle:
+            print("⚠️  LEFT OBSTACLE DETECTED!")
+        if right_obstacle and not last_right_obstacle:
+            print("⚠️  RIGHT OBSTACLE DETECTED!")
+        if not left_obstacle and last_left_obstacle:
+            print("✅ LEFT CLEAR")
+        if not right_obstacle and last_right_obstacle:
+            print("✅ RIGHT CLEAR")
+        
+        last_left_obstacle = left_obstacle
+        last_right_obstacle = right_obstacle
+        
         gear = car_state["gear"]
         gas = car_state["gas_pressed"]
         brake = car_state["brake_pressed"]
         current = car_state["current_pwm"]
-        angle = car_state["steer_angle"] # -90 to 90
-
-        # --- 1. BRAKING (Priority) ---
-        if brake:
-            # Brake: Quickly reduce speed to stop
-            target = 0
-            if current > target:
-                current -= BRAKE_RATE
-            if current < 0:
+        user_angle = car_state["user_steer_angle"]
+        
+        # --- OBSTACLE AVOIDANCE STATE MACHINE ---
+        if car_state["ir_enabled"] and gas and (left_obstacle or right_obstacle):
+            if obstacle_state == "IDLE":
+                # Trigger: Obstacle detected, enter STOPPED state
+                obstacle_state = "STOPPED"
+                stop_timer = 50  # 1 second (50 cycles × 20ms)
+                print("🚨 OBSTACLE(S) DETECTED - EMERGENCY STOP FOR 1 SECOND")
+                current = 0  # Immediately cut power
+                car_state["current_pwm"] = current
+            
+            elif obstacle_state == "STOPPED":
+                # In stopped state: keep speed at 0
                 current = 0
-            car_state["current_pwm"] = current
+                car_state["current_pwm"] = current
+                stop_timer -= 1
+                
+                if stop_timer <= 0:
+                    # Stop period complete, transition to STEERING
+                    obstacle_state = "STEERING"
+                    steering_timer = 0
+                    
+                    # Determine steering direction based on obstacles
+                    if left_obstacle and right_obstacle:
+                        # Both obstacles: alternate steering left/right
+                        target_steer_angle = 90  # Start steering right
+                        print("🚨 BOTH OBSTACLES - AUTO-STEERING RIGHT")
+                    elif left_obstacle:
+                        # Left obstacle: steer right 90°
+                        target_steer_angle = 90
+                        print("🚨 LEFT OBSTACLE - STEERING RIGHT 90°")
+                    else:  # right_obstacle
+                        # Right obstacle: steer left 90°
+                        target_steer_angle = -90
+                        print("🚨 RIGHT OBSTACLE - STEERING LEFT 90°")
+            
+            elif obstacle_state == "STEERING":
+                # In steering state: apply target angle
+                car_state["steer_angle"] = target_steer_angle
+                steering_timer += 1
+                
+                # Continue steering while obstacles present
+                if not (left_obstacle or right_obstacle):
+                    # All obstacles cleared, return to normal
+                    obstacle_state = "IDLE"
+                    car_state["steer_angle"] = user_angle
+                    print("✅ ALL OBSTACLES CLEARED - RESUMING NORMAL CONTROL")
+                elif left_obstacle and right_obstacle:
+                    # Both still present, auto-steer
+                    if steering_timer > 50:  # Switch direction every 1 second
+                        target_steer_angle = -target_steer_angle  # Toggle direction
+                        steering_timer = 0
+                        direction = "LEFT" if target_steer_angle < 0 else "RIGHT"
+                        print(f"🔄 BOTH OBSTACLES STILL PRESENT - STEERING {direction}")
         else:
-            # --- 2. THROTTLE PHYSICS ---
-            ranges = {"N": (0,0), "R": (0,80), "1": (0,40), "2": (40,60), "3": (60,80), "S": (80,100)}
-            min_s, max_s = ranges.get(gear, (0,40))
-            
-            target = max_s if (gas and gear != "N") else 0
-            if gas and current < min_s: current = min_s
-            
-            # Smooth Ramping
-            if current < target: current += ACCEL_RATE
-            elif current > target: current -= COAST_RATE
-            if current < 0: current = 0
-            
-            car_state["current_pwm"] = current
+            # No obstacles detected
+            if obstacle_state != "IDLE":
+                obstacle_state = "IDLE"
+            car_state["steer_angle"] = user_angle
+        
+        # Get the current steering angle (either from avoidance or user input)
+        angle = car_state["steer_angle"]
+        
+        # --- NORMAL THROTTLE PHYSICS (when not in obstacle avoidance) ---
+        if obstacle_state == "IDLE":
+            # Normal operation
+            if brake:
+                # Normal brake
+                target = 0
+                if current > target:
+                    current -= BRAKE_RATE
+                if current < 0:
+                    current = 0
+                car_state["current_pwm"] = current
+            else:
+                # Check if speed limit is being used instead of gear
+                if car_state["speed_limit_enabled"]:
+                    # Use speed limit (5-100%)
+                    target = car_state["speed_limit"] if (gas and gear != "N") else 0
+                else:
+                    # Use gear-based speeds (original behavior)
+                    ranges = {"N": (0,0), "R": (0,80), "1": (0,40), "2": (40,60), "3": (60,80), "S": (80,100)}
+                    min_s, max_s = ranges.get(gear, (0,40))
+                    target = max_s if (gas and gear != "N") else 0
+                    if gas and current < min_s: current = min_s
+                
+                # Smooth Ramping
+                if current < target: current += ACCEL_RATE
+                elif current > target: current -= COAST_RATE
+                if current < 0: current = 0
+                
+                car_state["current_pwm"] = current
 
         # --- 3. STEERING MIXER (The Magic) ---
         # We calculate separate speeds for Left and Right motors
@@ -155,7 +269,7 @@ def physics_loop():
         GPIO.output(IN1, l_a); GPIO.output(IN2, l_b)
         GPIO.output(IN3, r_a); GPIO.output(IN4, r_b)
 
-        time.sleep(0.05)
+        time.sleep(0.02)  # 20ms loop = 50Hz (2.5x faster reaction than 50ms)
 
 # Start the Engine (Thread)
 engine_thread = threading.Thread(target=physics_loop, daemon=True)
@@ -193,8 +307,8 @@ def set_gear(gear):
 def steer(angle):
     try:
         angle = int(angle)
-        # Store the exact angle (-90 left to +90 right)
-        car_state["steer_angle"] = angle
+        # Store user's steering input (preserved when avoiding obstacles)
+        car_state["user_steer_angle"] = angle
         # If angle is big enough, mark as turning
         if abs(angle) > 10:
             car_state["turning"] = "left" if angle < 0 else "right"
@@ -208,6 +322,44 @@ def steer(angle):
         return "OK"
     except ValueError:
         return "INVALID"
+
+@app.route("/speed_limit/<speed>")
+def set_speed_limit(speed):
+    """Sets the manual speed limit (5-100%)"""
+    try:
+        speed = int(speed)
+        if 5 <= speed <= 100:
+            car_state["speed_limit"] = speed
+            car_state["speed_limit_enabled"] = True  # Enable speed limit mode
+            print(f"⚡ Speed Limit: {speed}% | Mode: SPEED LIMIT (Gear ignored)")
+            return f"SPEED_LIMIT_{speed}"
+        else:
+            return "INVALID (must be 5-100)"
+    except ValueError:
+        return "INVALID"
+
+@app.route("/speed_limit_enable/<speed>")
+def enable_speed_limit(speed):
+    """Enables speed limit mode with specified speed"""
+    try:
+        speed = int(speed)
+        if 5 <= speed <= 100:
+            car_state["speed_limit"] = speed
+            car_state["speed_limit_enabled"] = True
+            print(f"✅ Speed Limit ENABLED: {speed}% | Mode: SPEED LIMIT (Gear ignored)")
+            return f"SPEED_LIMIT_ENABLED_{speed}"
+        else:
+            return "INVALID (must be 5-100)"
+    except ValueError:
+        return "INVALID"
+
+@app.route("/speed_limit_disable")
+def disable_speed_limit():
+    """Disables speed limit mode, reverts to gear-based speeds"""
+    car_state["speed_limit_enabled"] = False
+    car_state["speed_limit"] = 100  # Reset to max
+    print(f"❌ Speed Limit DISABLED | Mode: GEAR (Normal gear-based speeds)")
+    return "SPEED_LIMIT_DISABLED"
 
 @app.route("/<action>")
 def handle_action(action):
@@ -363,7 +515,9 @@ def telemetry():
     return jsonify({
         "rpm": fake_rpm,
         "speed": fake_speed,
-        "gear": car_state["gear"]
+        "gear": car_state["gear"],
+        "left_obstacle": car_state["left_obstacle"],
+        "right_obstacle": car_state["right_obstacle"]
     })
 
 @app.route("/system/status")
@@ -381,8 +535,127 @@ def system_status():
         "hotspot_active": hotspot_active,
         "cpu_temp": cpu_temp,
         "cpu_clock": cpu_clock,
-        "gpu_clock": gpu_clock
+        "gpu_clock": gpu_clock,
+        "ir_enabled": car_state["ir_enabled"]
     })
+
+@app.route("/ir/<state>")
+def set_ir(state):
+    """Toggle IR sensor on/off"""
+    if state.lower() == "on":
+        car_state["ir_enabled"] = True
+        print("✅ IR Sensors ENABLED")
+        return "IR_ON"
+    elif state.lower() == "off":
+        car_state["ir_enabled"] = False
+        print("❌ IR Sensors DISABLED")
+        return "IR_OFF"
+    return "INVALID"
+
+# --- SYSTEM SETTINGS ---
+
+@app.route("/system/reboot")
+def system_reboot():
+    """Reboots the Raspberry Pi system"""
+    print("🔄 SYSTEM REBOOT initiated!")
+    try:
+        subprocess.Popen(['sudo', 'reboot'])
+        return "REBOOT_INITIATED"
+    except Exception as e:
+        print(f"❌ Reboot failed: {e}")
+        return "REBOOT_FAILED"
+
+@app.route("/system/configure_hotspot", methods=['POST'])
+def configure_hotspot():
+    """Configures hotspot mode with SSID, password, and IP"""
+    try:
+        data = request.get_json()
+        ssid = data.get('ssid', 'RC-Car-Connect')
+        password = data.get('password', '')
+        ip = data.get('ip', '192.168.4.1')
+        
+        if not password:
+            return "HOTSPOT_CONFIG_FAILED: Password required"
+        
+        print(f"📡 Configuring hotspot...")
+        print(f"   SSID: {ssid}")
+        print(f"   IP: {ip}")
+        
+        # Create a shell script to configure hotspot
+        hotspot_script = f"""#!/bin/bash
+set -e
+
+echo "🔧 Setting up WiFi Hotspot..."
+
+# Disable WiFi
+sudo ifconfig wlan0 down 2>/dev/null || true
+
+# Install hostapd and dnsmasq if not already installed
+echo "📦 Installing hostapd and dnsmasq..."
+sudo apt-get update -qq
+sudo apt-get install -y -qq hostapd dnsmasq
+
+# Configure hostapd
+echo "⚙️ Configuring hostapd..."
+sudo tee /etc/hostapd/hostapd.conf > /dev/null <<'HOSTAPD'
+interface=wlan0
+driver=nl80211
+ssid={ssid}
+hw_mode=g
+channel=6
+wmm_enabled=0
+wpa=2
+wpa_passphrase={password}
+wpa_key_mgmt=WPA-PSK
+wpa_pairwise=CCMP
+rsn_pairwise=CCMP
+HOSTAPD
+
+# Configure dnsmasq
+echo "⚙️ Configuring dnsmasq..."
+sudo tee /etc/dnsmasq.conf > /dev/null <<'DNSMASQ'
+interface=wlan0
+dhcp-range={ip.rsplit('.', 1)[0]}.100,{ip.rsplit('.', 1)[0]}.200,12h
+address=/#/{ip}
+DNSMASQ
+
+# Bring interface up and configure IP
+echo "🔌 Bringing up wlan0..."
+sudo ifconfig wlan0 up
+sudo ifconfig wlan0 {ip} netmask 255.255.255.0
+
+# Start services
+echo "🚀 Starting hostapd and dnsmasq..."
+sudo systemctl start hostapd
+sudo systemctl start dnsmasq
+
+# Enable IP forwarding
+echo "🌉 Enabling IP forwarding..."
+sudo sysctl -w net.ipv4.ip_forward=1 > /dev/null
+
+echo "✅ Hotspot configured successfully!"
+echo "   Connect to: {ssid}"
+echo "   IP Address: {ip}"
+"""
+        
+        # Write the script
+        script_path = '/tmp/setup_hotspot.sh'
+        with open(script_path, 'w') as f:
+            f.write(hotspot_script)
+        
+        # Make it executable
+        os.chmod(script_path, 0o755)
+        
+        # Run the script in background
+        subprocess.Popen(['bash', script_path], 
+                        stdout=subprocess.DEVNULL, 
+                        stderr=subprocess.DEVNULL)
+        
+        print("✅ Hotspot configuration initiated")
+        return "HOTSPOT_CONFIG_INITIATED"
+    except Exception as e:
+        print(f"❌ Hotspot configuration failed: {e}")
+        return f"HOTSPOT_CONFIG_FAILED: {str(e)}"
 
 if __name__ == "__main__":
     try:

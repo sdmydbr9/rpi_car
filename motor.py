@@ -11,9 +11,17 @@ class CarSystem:
         self.IN1 = 17; self.IN2 = 27  # Left
         self.IN3 = 22; self.IN4 = 23  # Right
         self.ENA = 18; self.ENB = 19  # Speed
+        
+        # IR Obstacle Sensors
+        self.LEFT_IR = 5   # GPIO 5 - Left Front Obstacle Detection
+        self.RIGHT_IR = 6  # GPIO 6 - Right Front Obstacle Detection
+        self.AVOID_SWERVE_ANGLE = 85  # Degrees to swerve when obstacle detected (increased for aggressive steering)
 
-        # Setup
+        # Setup Motor Pins
         GPIO.setup([self.IN1, self.IN2, self.IN3, self.IN4, self.ENA, self.ENB], GPIO.OUT)
+        
+        # Setup IR Sensor Pins (Input)
+        GPIO.setup([self.LEFT_IR, self.RIGHT_IR], GPIO.IN)
 
         # PWM Init
         self.pwm_a = GPIO.PWM(self.ENA, 1000)
@@ -24,33 +32,119 @@ class CarSystem:
         # State Variables
         self.current_gear = 1
         self.steering_angle = 0
+        self.user_steering_angle = 0  # Manual input (preserved during avoidance)
         self.is_gas_pressed = False
         self.current_speed = 0  # Track current motor speed for acceleration
         self.acceleration_rate = 5  # Speed increase per update cycle (0-100 scale)
         self.last_update_time = time.time()
+        self.left_obstacle = False   # IR sensor state
+        self.right_obstacle = False  # IR sensor state
+        self.obstacle_avoidance_active = False  # Track if currently avoiding
+        self.last_left_obstacle = False  # Track state changes
+        self.last_right_obstacle = False
+        
+        # Obstacle Avoidance State Machine
+        self.avoidance_state = "IDLE"  # IDLE, STEERING
+        self.steering_timer = 0        # Timer for steering duration
+        self.target_steer_angle = 0    # Target angle during steering phase
         
         # Max Speed per Gear (0-100)
         self.GEAR_SPEEDS = {0: 0, 1: 30, 2: 50, 3: 75, 4: 100, -1: 60}  # -1 is reverse gear at 60%
+        
+        # Emergency Brake Settings
+        self.EMERGENCY_BRAKE_RATE = 5.0  # Fast deceleration on obstacle detection
+
+    def check_obstacles(self):
+        """Read IR sensors. IR sensors are active LOW: 0 = obstacle, 1 = no obstacle"""
+        # Invert the reading so True = obstacle detected
+        self.left_obstacle = not GPIO.input(self.LEFT_IR)
+        self.right_obstacle = not GPIO.input(self.RIGHT_IR)
+        
+        # Print only on state change
+        if self.left_obstacle and not self.last_left_obstacle:
+            print("⚠️  LEFT OBSTACLE DETECTED!")
+        if self.right_obstacle and not self.last_right_obstacle:
+            print("⚠️  RIGHT OBSTACLE DETECTED!")
+        if not self.left_obstacle and self.last_left_obstacle:
+            print("✅ LEFT CLEAR")
+        if not self.right_obstacle and self.last_right_obstacle:
+            print("✅ RIGHT CLEAR")
+        
+        self.last_left_obstacle = self.left_obstacle
+        self.last_right_obstacle = self.right_obstacle
 
     def update(self):
         """Calculates and applies motor speeds based on state"""
-        base_speed = self.GEAR_SPEEDS.get(self.current_gear, 0)
+        # Check obstacles first
+        self.check_obstacles()
         
-        # Deadman Switch: Stop if Gas released or Neutral
-        if not self.is_gas_pressed or self.current_gear == 0:
-            self.current_speed = 0
-            self._set_raw_motors(0, 0, False, False, False, False)
-            return
+        # --- OBSTACLE AVOIDANCE STATE MACHINE ---
+        if self.is_gas_pressed and (self.left_obstacle or self.right_obstacle):
+            if self.avoidance_state == "IDLE":
+                # Trigger: Obstacle detected, immediately start STEERING
+                self.avoidance_state = "STEERING"
+                self.steering_timer = 0
+                
+                # Determine steering direction based on obstacles
+                if self.left_obstacle and self.right_obstacle:
+                    # Both obstacles: steer right
+                    self.target_steer_angle = 90
+                    print("🚨 BOTH OBSTACLES - AUTO-STEERING RIGHT")
+                elif self.left_obstacle:
+                    # Left obstacle: steer right 90°
+                    self.target_steer_angle = 90
+                    print("🚨 LEFT OBSTACLE - STEERING RIGHT 90°")
+                else:  # right_obstacle
+                    # Right obstacle: steer left 90°
+                    self.target_steer_angle = -90
+                    print("🚨 RIGHT OBSTACLE - STEERING LEFT 90°")
+            
+            elif self.avoidance_state == "STEERING":
+                # In steering state: apply target angle
+                self.steering_angle = self.target_steer_angle
+                self.steering_timer += 1
+                
+                # Continue steering while obstacles present
+                if not (self.left_obstacle or self.right_obstacle):
+                    # All obstacles cleared, return to normal
+                    self.avoidance_state = "IDLE"
+                    self.steering_angle = self.user_steering_angle
+                    print("✅ ALL OBSTACLES CLEARED - RESUMING NORMAL CONTROL")
+                elif self.left_obstacle and self.right_obstacle:
+                    # Both still present, auto-steer
+                    if self.steering_timer > 50:  # Switch direction every 1 second
+                        self.target_steer_angle = -self.target_steer_angle  # Toggle direction
+                        self.steering_timer = 0
+                        direction = "LEFT" if self.target_steer_angle < 0 else "RIGHT"
+                        print(f"🔄 BOTH OBSTACLES STILL PRESENT - STEERING {direction}")
+        else:
+            # No obstacles detected
+            if self.avoidance_state != "IDLE":
+                self.avoidance_state = "IDLE"
+                self.steering_angle = self.user_steering_angle
+        
+        # --- NORMAL OPERATION (when not in obstacle avoidance) ---
+        if self.avoidance_state == "IDLE":
+            base_speed = self.GEAR_SPEEDS.get(self.current_gear, 0)
+            
+            # Deadman Switch: Stop if Gas released or Neutral
+            if not self.is_gas_pressed or self.current_gear == 0:
+                self.current_speed = 0
+                self._set_raw_motors(0, 0, False, False, False, False)
+                return
 
-        # Acceleration logic: gradually increase speed from 0 to target
-        if self.current_speed < base_speed:
-            self.current_speed += self.acceleration_rate
-            if self.current_speed > base_speed:
-                self.current_speed = base_speed
-        elif self.current_speed > base_speed:
-            self.current_speed -= self.acceleration_rate
+            # Normal acceleration logic
             if self.current_speed < base_speed:
-                self.current_speed = base_speed
+                self.current_speed += self.acceleration_rate
+                if self.current_speed > base_speed:
+                    self.current_speed = base_speed
+            elif self.current_speed > base_speed:
+                self.current_speed -= self.acceleration_rate
+                if self.current_speed < base_speed:
+                    self.current_speed = base_speed
+        else:
+            # During obstacle avoidance (STEERING): continue at current speed while steering
+            pass
 
         # Steering Physics (Mixing)
         # Intensity 0.0 to 1.0
@@ -82,7 +176,7 @@ class CarSystem:
         self.pwm_b.ChangeDutyCycle(int(speed_r))
 
     def set_steering(self, angle):
-        self.steering_angle = angle
+        self.user_steering_angle = angle
         self.update()
 
     def set_gear(self, gear):
