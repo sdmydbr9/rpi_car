@@ -84,6 +84,9 @@
   html, body, #root {
     @apply h-full w-full overflow-hidden;
     font-family: 'Rajdhani', sans-serif;
+    /* Support for zoom and browser scaling */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
   }
 
   body {
@@ -92,10 +95,50 @@
       linear-gradient(hsl(var(--grid-line) / 0.3) 1px, transparent 1px),
       linear-gradient(90deg, hsl(var(--grid-line) / 0.3) 1px, transparent 1px);
     background-size: 40px 40px;
+    /* Prevent font scaling issues with zoom */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Mobile viewport optimization */
+  @media (max-width: 640px) {
+    html {
+      font-size: 16px;
+    }
   }
 }
 
 @layer utilities {
+  /* Zoom/Scale Responsive Utilities */
+  .scale-responsive {
+    transform-origin: center;
+    transition: transform 0.1s ease-out;
+  }
+
+  /* Ensure viewport-relative sizes scale with zoom */
+  .vw-aware {
+    width: clamp(1rem, 100vw, 100vw);
+  }
+
+  .vh-aware {
+    height: clamp(1rem, 100vh, 100vh);
+  }
+
+  /* Mobile-first responsive shadows and effects */
+  @media (max-width: 640px) {
+    .glow-teal {
+      box-shadow: 
+        0 0 5px hsl(var(--primary) / 0.4),
+        0 0 10px hsl(var(--primary) / 0.2);
+    }
+    
+    .glow-red {
+      box-shadow: 
+        0 0 5px hsl(var(--destructive) / 0.4),
+        0 0 10px hsl(var(--destructive) / 0.2);
+    }
+  }
+
   /* Carbon Fiber Texture */
   .carbon-fiber {
     background-image: 

@@ -81,9 +81,9 @@ export const GearShifter = ({
       </div>
       <div className="text-[5px] sm:text-[7px] text-muted-foreground racing-text mt-0.5 mb-1">LIVE TELEMETRY</div>
       
-      {/* E-STOP and AUTO Mode Buttons */}
+      {/* Emergency Brake and AUTO Mode Buttons */}
       <div className="flex gap-0.5 mt-1 w-full">
-        {/* E-STOP Button */}
+        {/* Emergency Brake Button */}
         <button
           onClick={onEmergencyStop}
           className={`
@@ -96,7 +96,7 @@ export const GearShifter = ({
           `}
         >
           <OctagonX className="w-4 h-4 sm:w-5 sm:h-5" />
-          <span className="text-[5px] sm:text-xs font-bold racing-text leading-none">E-STOP</span>
+          <span className="text-[5px] sm:text-xs font-bold racing-text leading-none">EMERGENCY BRAKE</span>
         </button>
         
         {/* AUTO Button */}

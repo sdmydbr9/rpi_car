@@ -345,7 +345,7 @@ export const ImmersiveHUD = ({
         {/* Bottom Left - Brake Zone */}
         <div className="absolute bottom-4 left-4 pointer-events-auto z-20">
           <div className="flex flex-col items-start gap-2">
-            {/* E-Brake Toggle */}
+            {/* Emergency Brake Toggle */}
             <button
               onClick={handleEBrake}
               className={`px-3 py-1.5 rounded text-xs racing-text border transition-all ${
@@ -354,7 +354,7 @@ export const ImmersiveHUD = ({
                   : 'bg-background/40 backdrop-blur-md text-muted-foreground border-border/50 hover:border-destructive'
               }`}
             >
-              E-BRAKE {eBrakeActive ? 'ON' : 'OFF'}
+              EMERGENCY BRAKE {eBrakeActive ? 'ON' : 'OFF'}
             </button>
             
             {/* Brake Pedal */}

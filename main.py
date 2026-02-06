@@ -129,7 +129,8 @@ car_state = {
     "obstacle_avoidance_active": False,  # Track if currently avoiding
     "speed_limit": 100,    # Manual speed limit (5-100), overrides gear speeds
     "speed_limit_enabled": False,  # Whether to use speed limit instead of gear
-    "auto_accel_enabled": False  # Auto-acceleration mode (client-side for throttle)
+    "auto_accel_enabled": False,  # Auto-acceleration mode (client-side for throttle)
+    "emergency_brake_active": False  # Emergency brake: when ON, car cannot move
 }
 
 def physics_loop():
@@ -236,8 +237,12 @@ def physics_loop():
         
         # --- NORMAL THROTTLE PHYSICS (when not in obstacle avoidance) ---
         if obstacle_state == "IDLE":
+            # Check if emergency brake is active - if so, force speed to 0
+            if car_state["emergency_brake_active"]:
+                current = 0
+                car_state["current_pwm"] = 0
             # Normal operation
-            if brake:
+            elif brake:
                 # Normal brake
                 target = 0
                 if current > target:
@@ -462,7 +467,8 @@ def handle_action(action):
 
 @app.route("/emergency_stop")
 def emergency_stop():
-    """Immediately locks motors with magnetic braking (instant stop)"""
+    """Toggle emergency brake - when ON, car cannot move"""
+    car_state["emergency_brake_active"] = not car_state["emergency_brake_active"]
     car_state["current_pwm"] = 0
     car_state["gas_pressed"] = False
     car_state["brake_pressed"] = False
@@ -473,8 +479,9 @@ def emergency_stop():
         pwm_a.ChangeDutyCycle(100); pwm_b.ChangeDutyCycle(100)
     except Exception as e:
         pass  # GPIO not available
-    print("🚨 EMERGENCY STOP: Motors locked!")
-    return "EMERGENCY_STOP"
+    state = '🔴 ON' if car_state["emergency_brake_active"] else '🟢 OFF'
+    print(f"🚨 EMERGENCY BRAKE: {state}")
+    return "EMERGENCY_BRAKE"
 
 # --- SYSTEM MONITORING FUNCTIONS ---
 
@@ -652,10 +659,16 @@ def on_gear_change(data):
 
 @socketio.on('emergency_stop')
 def on_emergency_stop(data):
-    """Handle emergency stop"""
+    """Handle emergency brake toggle - when ON, car cannot move"""
+    # Toggle the emergency brake state
+    car_state["emergency_brake_active"] = not car_state["emergency_brake_active"]
+    
+    # Immediately cut power
     car_state["current_pwm"] = 0
     car_state["gas_pressed"] = False
     car_state["brake_pressed"] = False
+    
+    # Lock the motors physically
     try:
         GPIO.output(18, False); GPIO.output(19, False)
         GPIO.output(17, False); GPIO.output(27, False)
@@ -663,8 +676,10 @@ def on_emergency_stop(data):
         pwm_a.ChangeDutyCycle(100); pwm_b.ChangeDutyCycle(100)
     except Exception as e:
         pass  # GPIO not available
-    print(f"\n⚙️ [UI Control] 🚨 EMERGENCY STOP ACTIVATED!! Motors locked!")
-    emit('emergency_stop_response', {'status': 'ok'})
+    
+    state = '🔴 ON' if car_state["emergency_brake_active"] else '🟢 OFF'
+    print(f"\n⚙️ [UI Control] 🚨 EMERGENCY BRAKE: {state}")
+    emit('emergency_stop_response', {'status': 'ok', 'emergency_brake_active': car_state["emergency_brake_active"]})
 
 @socketio.on('auto_accel_enable')
 def on_auto_accel_enable(data):
