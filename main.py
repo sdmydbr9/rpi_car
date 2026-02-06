@@ -324,14 +324,41 @@ app = Flask(__name__,
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
+# Helper function to get local network IP
+def get_local_ip():
+    """Get the Raspberry Pi's local network IP address"""
+    try:
+        # Create a socket to determine which IP is used to reach external networks
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))  # Google DNS, no internet connection needed
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        # Fallback: try to get hostname IP
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except Exception:
+            return "127.0.0.1"
+
 @app.route("/")
 def index():
     return render_template('index.html')
+
+# API endpoint for getting server IP (used by mobile/remote clients)
+@app.route("/api/server-ip")
+def api_server_ip():
+    """Return the server's network IP address for remote connections"""
+    return jsonify({"ip": get_local_ip(), "port": 5000})
 
 # Catch-all for React files (vite.svg, etc.)
 @app.route('/<path:filename>')
 def serve_root_files(filename):
     return send_from_directory(DIST_DIR, filename)
+
+# Print server info on startup
+print(f"🌐 Server IP Address: {get_local_ip()}")
+print(f"📱 Mobile devices can connect via: http://{get_local_ip()}:5000")
 
 # --- CONTROLS ---
 

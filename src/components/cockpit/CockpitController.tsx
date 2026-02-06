@@ -36,23 +36,48 @@ export const CockpitController = () => {
   const connectionTimeoutRef = useRef<number | null>(null);
   const autoConnectAttemptedRef = useRef(false);
 
-  // Auto-connect to localhost on mount
+  // Smart auto-connect: try localhost first, then fallback to server IP
   useEffect(() => {
     if (!autoConnectAttemptedRef.current) {
       autoConnectAttemptedRef.current = true;
-      const autoConnect = async () => {
-        console.log('🚀 [Startup] Auto-connecting to localhost:5000...');
-        try {
-          await socketClient.connectToServer('localhost', 5000);
-          setServerIp('localhost');
-          setIsConnected(true);
-          setStreamUrl('http://localhost/stream');
-          console.log('✅ [Startup] Auto-connected to localhost');
-        } catch (error) {
-          console.error('❌ [Startup] Auto-connect failed:', error);
+      const smartAutoConnect = async () => {
+        const tryConnection = async (ip: string) => {
+          console.log(`🔌 [Startup] Attempting connection to ${ip}:5000...`);
+          try {
+            await socketClient.connectToServer(ip, 5000);
+            setServerIp(ip);
+            setIsConnected(true);
+            setStreamUrl(`http://${ip}/stream`);
+            console.log(`✅ [Startup] Successfully connected to ${ip}`);
+            return true;
+          } catch (error) {
+            console.warn(`⚠️ [Startup] Failed to connect to ${ip}:`, error);
+            return false;
+          }
+        };
+
+        // Try localhost first (for local development)
+        const localhostConnected = await tryConnection('localhost');
+        
+        if (!localhostConnected) {
+          // If localhost fails, fetch the server's network IP
+          console.log('🔍 [Startup] Localhost failed, fetching server IP...');
+          try {
+            // Try to get server IP from current origin
+            const protocol = window.location.protocol;
+            const hostname = window.location.hostname;
+            const port = window.location.port;
+            const apiUrl = `${protocol}//${hostname}${port ? ':' + port : ''}/api/server-ip`;
+            const response = await fetch(apiUrl);
+            const data = await response.json();
+            console.log(`📡 [Startup] Server IP from API: ${data.ip}`);
+            await tryConnection(data.ip);
+          } catch (error) {
+            console.error('❌ [Startup] Could not fetch server IP:', error);
+          }
         }
       };
-      autoConnect();
+      smartAutoConnect();
     }
   }, []);
 
