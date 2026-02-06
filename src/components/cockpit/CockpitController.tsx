@@ -8,7 +8,6 @@ import { Pedals } from "./Pedals";
 import { ImmersiveHUD } from "../ImmersiveHUD";
 import * as socketClient from "../../lib/socketClient";
 import { useAutoAcceleration } from "../../hooks/useAutoAcceleration";
-import { useIsMobile } from "../../hooks/use-mobile";
 
 interface ControlState {
   steeringAngle: number;
@@ -213,8 +212,6 @@ export const CockpitController = () => {
     currentSpeed: controlState.speed,
   });
 
-  const isMobile = useIsMobile();
-
   return (
     <>
       {/* Immersive HUD Overlay */}
@@ -243,19 +240,19 @@ export const CockpitController = () => {
           isConnected={isConnected}
         />
         
-        {/* Main Content - Responsive Layout */}
-        <div className="flex-1 flex min-h-0 overflow-hidden flex-col md:flex-row">
+        {/* Main Content - Fixed Layout (No Responsive Changes) */}
+        <div className="flex-1 flex min-h-0 overflow-hidden flex-row">
           {/* Left Zone: Camera Feed + Steering Wheel */}
-          <div className={`${isMobile ? 'flex-none' : 'flex-[0.35]'} border-b md:border-b-0 md:border-r border-border/30 racing-panel m-0.5 flex ${isMobile ? 'flex-row' : 'flex-col'} overflow-hidden gap-0.5`}>
+          <div className="flex-[0.35] border-r border-border/30 racing-panel m-0.5 flex flex-col overflow-hidden gap-0.5">
             {/* Camera Feed */}
-            <div className={`${isMobile ? 'flex-[0.5]' : 'h-[30%]'} min-h-[4rem] md:min-h-0 p-0.5 border-none md:border-b border-border/30`}>
+            <div className="h-[30%] min-h-0 p-0.5 border-none border-b border-border/30">
               <div onClick={handleImmersiveViewToggle} className="cursor-pointer h-full w-full">
                 <CameraFeed isConnected={isConnected} />
               </div>
             </div>
             
             {/* Steering Wheel */}
-            <div className={`${isMobile ? 'flex-[0.5]' : 'flex-1'} min-h-0 overflow-hidden flex items-center justify-center`}>
+            <div className="flex-1 min-h-0 overflow-hidden flex items-center justify-center">
               <SteeringWheel 
                 angle={controlState.steeringAngle} 
                 onAngleChange={handleAngleChange}
@@ -265,7 +262,7 @@ export const CockpitController = () => {
           </div>
           
           {/* Center Zone: Car Telemetry */}
-          <div className={`${isMobile ? 'flex-none' : 'flex-[0.4]'} racing-panel m-0.5 overflow-hidden`}>
+          <div className="flex-[0.4] racing-panel m-0.5 overflow-hidden">
             <CarTelemetry 
               steeringAngle={controlState.steeringAngle}
               throttle={controlState.throttle}
@@ -278,7 +275,7 @@ export const CockpitController = () => {
           </div>
           
           {/* Right Zone: Gear Shifter */}
-          <div className={`${isMobile ? 'flex-none' : 'flex-[0.25]'} border-t md:border-t-0 md:border-l border-border/30 racing-panel m-0.5 overflow-hidden`}>
+          <div className="flex-[0.25] border-l border-border/30 racing-panel m-0.5 overflow-hidden">
             <GearShifter 
               currentGear={controlState.gear} 
               onGearChange={handleGearChange}

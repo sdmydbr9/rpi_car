@@ -79,14 +79,74 @@
 @layer base {
   * {
     @apply border-border;
+    /* Gaming UI: Remove default outline */
+    outline: none;
+  }
+
+  *:focus-visible {
+    outline: none;
+  }
+
+  /* Disable default focus ring for all interactive elements */
+  button,
+  input,
+  select,
+  textarea,
+  a {
+    outline: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+  }
+
+  /* Remove default tap highlight on interactive elements */
+  button,
+  input,
+  select,
+  textarea,
+  a,
+  [role="button"],
+  [role="link"] {
+    -webkit-tap-highlight-color: transparent;
+    tap-highlight-color: transparent;
+  }
+
+  /* Disable default input styles */
+  input,
+  textarea {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+  }
+
+  /* Remove default button styles */
+  button {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    border: none;
+    background: none;
+    padding: 0;
+    cursor: pointer;
   }
 
   html, body, #root {
     @apply h-full w-full overflow-hidden;
     font-family: 'Rajdhani', sans-serif;
-    /* Support for zoom and browser scaling */
+    /* Prevent any zoom or text scaling */
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
+    -webkit-text-zoom: 100%;
+    text-zoom: 100%;
+    /* Disable pinch zoom */
+    touch-action: manipulation;
+    /* Gaming UI Polish - Prevent text selection */
+    user-select: none;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+    /* Disable iOS selection UI */
+    -webkit-touch-callout: none;
   }
 
   body {
@@ -98,6 +158,18 @@
     /* Prevent font scaling issues with zoom */
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    /* Disable context menu */
+    -webkit-user-select: none;
+    /* Prevent layout shift on zoom by disabling viewport zoom changes */
+    width: 100vw;
+    height: 100vh;
+    width: 100dvw;
+    height: 100dvh;
+  }
+
+  /* Disable context menu right-click */
+  body {
+    -webkit-touch-callout: none;
   }
 
   /* Mobile viewport optimization */
@@ -106,9 +178,54 @@
       font-size: 16px;
     }
   }
+
+  /* Prevent layout shifts on browser zoom/pinch */
+  * {
+    -webkit-box-sizing: border-box;
+    box-sizing: border-box;
+  }
+
+  /* Ensure fixed/absolute positioned elements scale with viewport */
+  html {
+    font-size: 16px;
+    height: 100%;
+    height: 100vh;
+    height: 100dvh;
+  }
 }
 
 @layer utilities {
+  /* Gaming UI Polish - Prevent Text Selection & Unwanted Interactions */
+  .no-select {
+    user-select: none;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+  }
+
+  .no-drag {
+    -webkit-user-drag: none;
+    user-drag: none;
+  }
+
+  /* Disable tap highlight on mobile */
+  .no-tap-highlight {
+    -webkit-tap-highlight-color: transparent;
+    tap-highlight-color: transparent;
+  }
+
+  /* Gaming-optimized focus ring */
+  .gaming-focus {
+    outline: 2px solid hsl(var(--primary));
+    outline-offset: 2px;
+  }
+
+  .gaming-focus:focus-visible {
+    outline: 2px solid hsl(var(--primary));
+    outline-offset: 2px;
+    box-shadow: 0 0 8px hsl(var(--primary) / 0.6);
+  }
+
   /* Zoom/Scale Responsive Utilities */
   .scale-responsive {
     transform-origin: center;
@@ -124,34 +241,7 @@
     height: clamp(1rem, 100vh, 100vh);
   }
 
-  /* Mobile-first responsive shadows and effects */
-  @media (max-width: 640px) {
-    .glow-teal {
-      box-shadow: 
-        0 0 5px hsl(var(--primary) / 0.4),
-        0 0 10px hsl(var(--primary) / 0.2);
-    }
-    
-    .glow-red {
-      box-shadow: 
-        0 0 5px hsl(var(--destructive) / 0.4),
-        0 0 10px hsl(var(--destructive) / 0.2);
-    }
-  }
-
-  /* Carbon Fiber Texture */
-  .carbon-fiber {
-    background-image: 
-      repeating-linear-gradient(
-        45deg,
-        hsl(var(--carbon-primary)) 0px,
-        hsl(var(--carbon-primary)) 2px,
-        hsl(var(--carbon-secondary)) 2px,
-        hsl(var(--carbon-secondary)) 4px
-      );
-  }
-  
-  /* Glow Effects */
+  /* Glow Effects - Consistent across all screen sizes */
   .glow-teal {
     box-shadow: 
       0 0 10px hsl(var(--primary) / 0.5),
@@ -179,6 +269,18 @@
   
   .text-glow-red {
     text-shadow: 0 0 10px hsl(var(--destructive) / 0.8);
+  }
+  
+  /* Carbon Fiber Texture */
+  .carbon-fiber {
+    background-image: 
+      repeating-linear-gradient(
+        45deg,
+        hsl(var(--carbon-primary)) 0px,
+        hsl(var(--carbon-primary)) 2px,
+        hsl(var(--carbon-secondary)) 2px,
+        hsl(var(--carbon-secondary)) 4px
+      );
   }
   
   /* Panel Styling */
