@@ -1,6 +1,7 @@
 import RPi.GPIO as GPIO
 from flask import Flask, render_template, send_from_directory, jsonify, request
 from flask_cors import CORS
+from flask_socketio import SocketIO, emit, join_room, leave_room
 import os
 import subprocess
 import sys
@@ -64,20 +65,49 @@ check_and_build()
 # ==========================================
 # 🚗 HARDWARE SETUP
 # ==========================================
+
+# Clean up any existing GPIO first
+try:
+    GPIO.cleanup()
+except:
+    pass
+
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
 
 # Setup Motor Pins
-GPIO.setup([IN1, IN2, IN3, IN4, ENA, ENB], GPIO.OUT)
+try:
+    GPIO.setup([IN1, IN2, IN3, IN4, ENA, ENB], GPIO.OUT)
+except Exception as e:
+    print(f"⚠️  GPIO setup error: {e}")
+    print("   Retrying with force_cleanup...")
+    try:
+        GPIO.cleanup()
+        GPIO.setup([IN1, IN2, IN3, IN4, ENA, ENB], GPIO.OUT)
+    except Exception as e2:
+        print(f"❌ GPIO setup failed: {e2}")
+        print("   Running without physical GPIO (simulation mode)")
 
 # Setup IR Sensor Pins (Input)
-GPIO.setup([LEFT_IR, RIGHT_IR], GPIO.IN)
+try:
+    GPIO.setup([LEFT_IR, RIGHT_IR], GPIO.IN)
+except Exception as e:
+    print(f"⚠️  IR sensor setup error: {e}")
 
 # Setup PWM
-pwm_a = GPIO.PWM(ENA, FREQ)
-pwm_b = GPIO.PWM(ENB, FREQ)
-pwm_a.start(0)
-pwm_b.start(0)
+try:
+    pwm_a = GPIO.PWM(ENA, FREQ)
+    pwm_b = GPIO.PWM(ENB, FREQ)
+    pwm_a.start(0)
+    pwm_b.start(0)
+except Exception as e:
+    print(f"⚠️  PWM setup error: {e}")
+    # Create dummy PWM objects for testing
+    class DummyPWM:
+        def ChangeDutyCycle(self, val): pass
+        def stop(self): pass
+    pwm_a = DummyPWM()
+    pwm_b = DummyPWM()
 
 # ==========================================
 # 🧠 PHYSICS ENGINE (Background Thread)
@@ -98,7 +128,8 @@ car_state = {
     "user_steer_angle": 0, # Store user's manual steering (preserved when avoiding)
     "obstacle_avoidance_active": False,  # Track if currently avoiding
     "speed_limit": 100,    # Manual speed limit (5-100), overrides gear speeds
-    "speed_limit_enabled": False  # Whether to use speed limit instead of gear
+    "speed_limit_enabled": False,  # Whether to use speed limit instead of gear
+    "auto_accel_enabled": False  # Auto-acceleration mode (client-side for throttle)
 }
 
 def physics_loop():
@@ -112,8 +143,12 @@ def physics_loop():
     while True:
         # --- CHECK IR SENSORS ---
         # IR sensors are active LOW: 0 = obstacle detected, 1 = no obstacle
-        left_obstacle = not GPIO.input(LEFT_IR)   # Invert so True = obstacle
-        right_obstacle = not GPIO.input(RIGHT_IR) # Invert so True = obstacle
+        try:
+            left_obstacle = not GPIO.input(LEFT_IR)   # Invert so True = obstacle
+            right_obstacle = not GPIO.input(RIGHT_IR) # Invert so True = obstacle
+        except:
+            left_obstacle = False
+            right_obstacle = False
         
         car_state["left_obstacle"] = left_obstacle
         car_state["right_obstacle"] = right_obstacle
@@ -250,8 +285,11 @@ def physics_loop():
             left_motor_speed = current # Outer wheel stays fast
 
         # --- 4. APPLY TO MOTORS ---
-        pwm_a.ChangeDutyCycle(int(left_motor_speed))
-        pwm_b.ChangeDutyCycle(int(right_motor_speed))
+        try:
+            pwm_a.ChangeDutyCycle(int(left_motor_speed))
+            pwm_b.ChangeDutyCycle(int(right_motor_speed))
+        except Exception as e:
+            pass  # GPIO not available, skip
 
         # Direction Logic
         l_a, l_b = False, True # Default Forward
@@ -264,8 +302,11 @@ def physics_loop():
         # NOTE: We removed the "Spin" override. 
         # Now we only steer by changing speed, not direction.
         
-        GPIO.output(IN1, l_a); GPIO.output(IN2, l_b)
-        GPIO.output(IN3, r_a); GPIO.output(IN4, r_b)
+        try:
+            GPIO.output(IN1, l_a); GPIO.output(IN2, l_b)
+            GPIO.output(IN3, r_a); GPIO.output(IN4, r_b)
+        except Exception as e:
+            pass  # GPIO not available, skip
 
         time.sleep(0.02)  # 20ms loop = 50Hz (2.5x faster reaction than 50ms)
 
@@ -274,13 +315,14 @@ engine_thread = threading.Thread(target=physics_loop, daemon=True)
 engine_thread.start()
 
 # ==========================================
-# 🌐 WEB SERVER (Flask)
+# 🌐 WEB SERVER (Flask + SocketIO)
 # ==========================================
 app = Flask(__name__, 
             static_folder=os.path.join(DIST_DIR, 'assets'), 
             static_url_path='/assets',
             template_folder=DIST_DIR)
 CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 @app.route("/")
 def index():
@@ -398,9 +440,12 @@ def emergency_stop():
     car_state["gas_pressed"] = False
     car_state["brake_pressed"] = False
     # Magnetic lock: all pins to False
-    GPIO.output(IN1, False); GPIO.output(IN2, False)
-    GPIO.output(IN3, False); GPIO.output(IN4, False)
-    pwm_a.ChangeDutyCycle(100); pwm_b.ChangeDutyCycle(100)
+    try:
+        GPIO.output(IN1, False); GPIO.output(IN2, False)
+        GPIO.output(IN3, False); GPIO.output(IN4, False)
+        pwm_a.ChangeDutyCycle(100); pwm_b.ChangeDutyCycle(100)
+    except Exception as e:
+        pass  # GPIO not available
     print("🚨 EMERGENCY STOP: Motors locked!")
     return "EMERGENCY_STOP"
 
@@ -501,6 +546,150 @@ def get_gpu_clock():
     return 400
 
 # --- TELEMETRY ---
+
+# ==========================================
+# 🌐 WEBSOCKET EVENT HANDLERS
+# ==========================================
+
+@socketio.on('connect')
+def on_connect():
+    """Handle client connection"""
+    print(f"\n🔗 [Socket] ✅ CLIENT CONNECTED")
+    print(f"   Client ID: {request.sid}")
+    print(f"   Remote Address: {request.remote_addr}")
+    emit('connection_response', {'data': 'Connected to RC Car'})
+
+@socketio.on('disconnect')
+def on_disconnect():
+    """Handle client disconnection"""
+    print(f"\n🔓 [Socket] ❌ CLIENT DISCONNECTED")
+    print(f"   Client ID: {request.sid}")
+
+@socketio.on('throttle')
+def on_throttle(data):
+    """Handle throttle control"""
+    value = data.get('value', False)
+    if value:
+        car_state["gas_pressed"] = True
+        car_state["brake_pressed"] = False
+        car_state["direction"] = "forward"
+        print(f"\n⚙️ [UI Control] 🚀 THROTTLE PRESSED (Forward)")
+    else:
+        car_state["gas_pressed"] = False
+        print(f"\n⚙️ [UI Control] ⏸️ THROTTLE RELEASED")
+    emit('throttle_response', {'status': 'ok', 'value': value})
+
+@socketio.on('brake')
+def on_brake(data):
+    """Handle brake control"""
+    value = data.get('value', False)
+    car_state["brake_pressed"] = value
+    if value:
+        car_state["gas_pressed"] = False
+        print(f"\n⚙️ [UI Control] 🛑 BRAKE ENGAGED")
+    else:
+        print(f"\n⚙️ [UI Control] 🩹 BRAKE RELEASED")
+    emit('brake_response', {'status': 'ok', 'value': value})
+
+@socketio.on('steering')
+def on_steering(data):
+    """Handle steering control (angle -90 to +90)"""
+    try:
+        angle = int(data.get('angle', 0))
+        angle = max(-90, min(90, angle))  # Clamp to -90 to 90
+        car_state["user_steer_angle"] = angle
+        if abs(angle) > 10:
+            car_state["turning"] = "left" if angle < 0 else "right"
+            direction = "⬅️ LEFT" if angle < 0 else "➡️ RIGHT"
+            print(f"\n⚙️ [UI Control] 🎡 STEERING: {direction} ({abs(angle)}°)")
+        else:
+            car_state["turning"] = "straight"
+            print(f"\n⚙️ [UI Control] 🎡 STEERING: ⬆️ CENTER (0°)")
+        emit('steering_response', {'status': 'ok', 'angle': angle})
+    except (ValueError, TypeError) as e:
+        print(f"\n⚠️ [UI Control] ❌ Invalid steering angle: {e}")
+        emit('steering_response', {'status': 'error', 'message': 'Invalid angle'})
+
+@socketio.on('gear_change')
+def on_gear_change(data):
+    """Handle gear selection"""
+    gear = data.get('gear', 'N').upper()
+    if gear in ["R", "N", "1", "2", "3", "S"]:
+        car_state["gear"] = gear
+        gear_names = {'R': '🔙 REVERSE', 'N': '⏸️ NEUTRAL', '1': '1️⃣ 1st', '2': '2️⃣ 2nd', '3': '3️⃣ 3rd', 'S': '⚡ SPORT'}
+        print(f"\n⚙️ [UI Control] 🔧 GEAR: {gear_names.get(gear, gear)}")
+        emit('gear_response', {'status': 'ok', 'gear': gear})
+    else:
+        print(f"\n⚠️ [UI Control] ❌ Invalid gear: {gear}")
+        emit('gear_response', {'status': 'error', 'message': 'Invalid gear'})
+
+@socketio.on('emergency_stop')
+def on_emergency_stop(data):
+    """Handle emergency stop"""
+    car_state["current_pwm"] = 0
+    car_state["gas_pressed"] = False
+    car_state["brake_pressed"] = False
+    try:
+        GPIO.output(18, False); GPIO.output(19, False)
+        GPIO.output(17, False); GPIO.output(27, False)
+        GPIO.output(22, False); GPIO.output(23, False)
+        pwm_a.ChangeDutyCycle(100); pwm_b.ChangeDutyCycle(100)
+    except Exception as e:
+        pass  # GPIO not available
+    print(f"\n⚙️ [UI Control] 🚨 EMERGENCY STOP ACTIVATED!! Motors locked!")
+    emit('emergency_stop_response', {'status': 'ok'})
+
+@socketio.on('auto_accel_enable')
+def on_auto_accel_enable(data):
+    """Handle auto-acceleration enable (server-side auto-throttle)"""
+    car_state["auto_accel_enabled"] = True
+    print(f"\n⚙️ [UI Control] 🚀 AUTO-ACCEL: ENABLED (auto-throttle mode)")
+    emit('auto_accel_response', {'status': 'ok', 'enabled': True})
+
+@socketio.on('auto_accel_disable')
+def on_auto_accel_disable(data):
+    """Handle auto-acceleration disable"""
+    car_state["auto_accel_enabled"] = False
+    car_state["gas_pressed"] = False
+    print(f"\n⚙️ [UI Control] 🚫 AUTO-ACCEL: DISABLED")
+    emit('auto_accel_response', {'status': 'ok', 'enabled': False})
+
+# Telemetry broadcast thread
+def telemetry_broadcast():
+    """Broadcast telemetry data to all connected clients at 20Hz"""
+    while True:
+        try:
+            pwm = car_state["current_pwm"]
+            fake_rpm = int(pwm * 2.2)
+            fake_speed = round(pwm * 0.025, 1)
+            
+            telemetry_data = {
+                "rpm": fake_rpm,
+                "speed": fake_speed,
+                "current_pwm": pwm,
+                "gear": car_state["gear"],
+                "steer_angle": car_state["steer_angle"],
+                "direction": car_state["direction"],
+                "turning": car_state["turning"],
+                "left_obstacle": car_state["left_obstacle"],
+                "right_obstacle": car_state["right_obstacle"],
+                "gas_pressed": car_state["gas_pressed"],
+                "brake_pressed": car_state["brake_pressed"]
+            }
+            
+            socketio.emit('telemetry_update', telemetry_data)
+            time.sleep(0.05)  # 20Hz = 50ms
+        except Exception as e:
+            print(f"❌ Telemetry broadcast error: {e}")
+            time.sleep(0.05)
+
+# Start telemetry broadcaster thread
+telemetry_thread = threading.Thread(target=telemetry_broadcast, daemon=True)
+telemetry_thread.start()
+
+# ==========================================
+# 🌐 HTTP ENDPOINTS (kept for backwards compatibility)
+# ==========================================
 @app.route("/telemetry")
 def telemetry():
     """Returns current car state for the dashboard"""
@@ -662,7 +851,7 @@ echo "   IP Address: {ip}"
 if __name__ == "__main__":
     try:
         # Host 0.0.0.0 makes it available on your Wi-Fi
-        app.run(host='0.0.0.0', port=5000, debug=False)
+        socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
     finally:
         # Safety cleanup
         pwm_a.stop()

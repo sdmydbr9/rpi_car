@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Satellite, X, Wifi, WifiOff } from "lucide-react";
+import { Satellite, X, Wifi, WifiOff, AlertCircle, Loader } from "lucide-react";
 import { z } from "zod";
 
 interface ConnectionDialogProps {
@@ -9,24 +9,34 @@ interface ConnectionDialogProps {
 }
 
 const ipSchema = z.string().regex(
-  /^(\d{1,3}\.){3}\d{1,3}(:\d{1,5})?$/,
-  "Enter valid IP (e.g., 192.168.1.100:5000)"
+  /^(localhost|(\d{1,3}\.){3}\d{1,3})(:\d+)?$/,
+  "Enter valid IP (e.g., 192.168.1.100 or localhost)"
 );
 
 export const ConnectionDialog = ({ isConnected, onConnect, onDisconnect }: ConnectionDialogProps) => {
   const [isOpen, setIsOpen] = useState(false);
-  const [ipAddress, setIpAddress] = useState("");
+  const [ipAddress, setIpAddress] = useState("localhost");
   const [error, setError] = useState("");
+  const [isConnecting, setIsConnecting] = useState(false);
 
-  const handleConnect = () => {
+  const handleConnect = async () => {
     const result = ipSchema.safeParse(ipAddress.trim());
     if (!result.success) {
       setError(result.error.errors[0].message);
       return;
     }
     setError("");
-    onConnect(ipAddress.trim());
-    setIsOpen(false);
+    setIsConnecting(true);
+    
+    try {
+      await new Promise(resolve => setTimeout(resolve, 500)); // Small delay for UX
+      onConnect(ipAddress.trim());
+      setIsOpen(false);
+    } catch (err) {
+      setError("Failed to connect. Check IP and try again.");
+    } finally {
+      setIsConnecting(false);
+    }
   };
 
   const handleDisconnect = () => {
@@ -97,13 +107,16 @@ export const ConnectionDialog = ({ isConnected, onConnect, onDisconnect }: Conne
                   setIpAddress(e.target.value);
                   setError("");
                 }}
-                placeholder="192.168.1.100:5000"
+                placeholder="localhost or 192.168.1.100"
                 maxLength={21}
                 className="w-full bg-muted border border-border rounded px-3 py-2 text-foreground racing-number text-sm focus:border-primary focus:outline-none transition-colors"
                 disabled={isConnected}
               />
               {error && (
-                <p className="text-xs text-destructive mt-1">{error}</p>
+                <div className="text-xs text-destructive mt-2 flex items-center gap-1">
+                  <AlertCircle className="w-3 h-3" />
+                  {error}
+                </div>
               )}
             </div>
 
@@ -112,23 +125,31 @@ export const ConnectionDialog = ({ isConnected, onConnect, onDisconnect }: Conne
               {isConnected ? (
                 <button
                   onClick={handleDisconnect}
-                  className="flex-1 py-2 px-4 rounded border border-destructive bg-destructive/20 text-destructive racing-text text-sm hover:bg-destructive/30 transition-colors touch-feedback"
+                  className="flex-1 py-2 px-4 rounded border border-destructive bg-destructive/20 text-destructive racing-text text-sm hover:bg-destructive/30 transition-colors touch-feedback disabled:opacity-50"
                 >
                   DISCONNECT
                 </button>
               ) : (
                 <button
                   onClick={handleConnect}
-                  className="flex-1 py-2 px-4 rounded border border-primary bg-primary/20 text-primary racing-text text-sm hover:bg-primary/30 transition-colors touch-feedback"
+                  disabled={isConnecting}
+                  className="flex-1 py-2 px-4 rounded border border-primary bg-primary/20 text-primary racing-text text-sm hover:bg-primary/30 transition-colors touch-feedback disabled:opacity-50 flex items-center justify-center gap-2"
                 >
-                  START
+                  {isConnecting ? (
+                    <>
+                      <Loader className="w-4 h-4 animate-spin" />
+                      CONNECTING...
+                    </>
+                  ) : (
+                    'START'
+                  )}
                 </button>
               )}
             </div>
 
             {/* Info */}
             <p className="text-[10px] text-muted-foreground mt-4 text-center">
-              Enter the IP address of your Raspberry Pi Flask server
+              Enter the IP address of your Raspberry Pi to establish WebSocket connection
             </p>
           </div>
         </div>

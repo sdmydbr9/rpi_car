@@ -6,6 +6,8 @@ import { CarTelemetry } from "./CarTelemetry";
 import { GearShifter } from "./GearShifter";
 import { Pedals } from "./Pedals";
 import { ImmersiveHUD } from "../ImmersiveHUD";
+import * as socketClient from "../../lib/socketClient";
+import { useAutoAcceleration } from "../../hooks/useAutoAcceleration";
 
 interface ControlState {
   steeringAngle: number;
@@ -30,227 +32,161 @@ export const CockpitController = () => {
   const [isImmersiveView, setIsImmersiveView] = useState(false);
   const [streamUrl, setStreamUrl] = useState<string>("");
   const [isEngineRunning, setIsEngineRunning] = useState(false);
-  const speedIntervalRef = useRef<number | null>(null);
-  const telemetryIntervalRef = useRef<number | null>(null);
+  const autoAccelIntervalRef = useRef<number | null>(null);
+  const connectionTimeoutRef = useRef<number | null>(null);
 
-  // Simulate speed based on throttle/brake/gear
+
+  // Setup telemetry subscription when connected
   useEffect(() => {
-    if (speedIntervalRef.current) {
-      clearInterval(speedIntervalRef.current);
-    }
-
-    speedIntervalRef.current = window.setInterval(() => {
-      setControlState(prev => {
-        let newSpeed = prev.speed;
-        const gearMultiplier = {
-          'R': -0.3,
-          'N': 0,
-          '1': 0.5,
-          '2': 0.7,
-          '3': 0.9,
-          'S': 1.2,
-        }[prev.gear] || 0;
-
-        if (prev.throttle && !prev.brake && prev.gear !== 'N') {
-          newSpeed = Math.min(100, prev.speed + (2 * gearMultiplier));
-        } else if (prev.brake) {
-          newSpeed = Math.max(0, prev.speed - 5);
-        } else {
-          // Natural deceleration
-          newSpeed = Math.max(0, prev.speed - 0.5);
-        }
-
-        return { ...prev, speed: Math.max(0, newSpeed) };
-      });
-    }, 100);
-
-    return () => {
-      if (speedIntervalRef.current) {
-        clearInterval(speedIntervalRef.current);
-      }
-    };
-  }, []);
-
-  // Fetch telemetry data when connected
-  useEffect(() => {
-    if (!isConnected || !serverIp) {
-      if (telemetryIntervalRef.current) {
-        clearInterval(telemetryIntervalRef.current);
-        telemetryIntervalRef.current = null;
-      }
+    if (!isConnected) {
       return;
     }
 
-    telemetryIntervalRef.current = window.setInterval(async () => {
-      try {
-        const response = await fetch(`http://${serverIp}/telemetry`);
-        if (response.ok) {
-          const data = await response.json();
-          setControlState(prev => ({
-            ...prev,
-            steeringAngle: data.steer_angle || prev.steeringAngle,
-            gear: data.gear || prev.gear,
-            speed: data.current_pwm || prev.speed,
-            throttle: data.direction === 'forward',
-            brake: data.direction === 'stop',
-          }));
-        }
-      } catch (error) {
-        console.error("Failed to fetch telemetry:", error);
-      }
-    }, 500); // Poll every 500ms
+    // Subscribe to telemetry updates
+    socketClient.onTelemetry((data) => {
+      setControlState(prev => ({
+        ...prev,
+        steeringAngle: data.steer_angle || prev.steeringAngle,
+        gear: data.gear || prev.gear,
+        speed: data.current_pwm || prev.speed,
+        throttle: data.gas_pressed || prev.throttle,
+        brake: data.brake_pressed || prev.brake,
+      }));
+    });
 
     return () => {
-      if (telemetryIntervalRef.current) {
-        clearInterval(telemetryIntervalRef.current);
-        telemetryIntervalRef.current = null;
-      }
+      socketClient.onTelemetry(() => {}); // Unsubscribe
     };
-  }, [isConnected, serverIp]);
+  }, [isConnected]);
 
-  const sendCommand = useCallback((command: string, value: unknown) => {
-    if (!isConnected || !serverIp) return;
-    
-    const baseUrl = `http://${serverIp}`;
-    
+  const handleConnect = useCallback(async (ip: string) => {
+    console.log('🌐 Attempting to connect to:', ip);
     try {
-      switch (command) {
-        case "steering":
-          fetch(`${baseUrl}/steer/${value}`);
-          break;
-        case "throttle":
-          if (value) {
-            fetch(`${baseUrl}/forward`);
-          } else {
-            fetch(`${baseUrl}/stop`);
-          }
-          break;
-        case "brake":
-          if (value) {
-            fetch(`${baseUrl}/brake`);
-          }
-          break;
-        case "gear":
-          fetch(`${baseUrl}/gear/${value}`);
-          break;
-        case "action":
-          if (value === "launch") {
-            fetch(`${baseUrl}/forward`);
-          }
-          break;
-      }
+      await socketClient.connectToServer(ip, 5000);
+      setServerIp(ip);
+      setIsConnected(true);
+      setStreamUrl(`http://${ip}/stream`);
+      console.log("✅ Connected to:", ip);
     } catch (error) {
-      console.error(`Failed to send ${command}:`, error);
+      console.error("❌ Failed to connect:", error);
+      setIsConnected(false);
     }
-  }, [isConnected, serverIp]);
-
-  const handleConnect = useCallback((ip: string) => {
-    setServerIp(ip);
-    setIsConnected(true);
-    setStreamUrl(`http://${ip}/stream`);
-    console.log("Connected to:", ip);
   }, []);
 
   const handleDisconnect = useCallback(() => {
+    socketClient.disconnectFromServer();
     setIsConnected(false);
     setServerIp("");
     setStreamUrl("");
     setControlState(prev => ({ ...prev, speed: 0, throttle: false, brake: false, gear: 'N' }));
-    if (telemetryIntervalRef.current) {
-      clearInterval(telemetryIntervalRef.current);
-      telemetryIntervalRef.current = null;
-    }
     console.log("Disconnected");
+  }, []);
+
+  const handleAngleChange = useCallback((angle: number) => {
+    console.log('🎮 Steering angle changed:', angle, { isEngineRunning, isConnected });
+    if (!isEngineRunning) {
+      console.warn('⚠️ Engine not running, cannot steer');
+      return;
+    }
+    setControlState(prev => ({ ...prev, steeringAngle: angle }));
+    socketClient.emitSteering(Math.round(angle));
+  }, [isEngineRunning]);
+
+  const handleThrottleChange = useCallback((active: boolean) => {
+    console.log('🎮 Throttle changed:', active, { isEngineRunning, isConnected });
+    if (!isEngineRunning) {
+      console.warn('⚠️ Engine not running, cannot throttle');
+      return;
+    }
+    setControlState(prev => ({ ...prev, throttle: active }));
+    socketClient.emitThrottle(active);
+  }, [isEngineRunning]);
+
+  const handleBrakeChange = useCallback((active: boolean) => {
+    console.log('🎮 Brake changed:', active, { isEngineRunning, isConnected });
+    if (!isEngineRunning) {
+      console.warn('⚠️ Engine not running, cannot brake');
+      return;
+    }
+    setControlState(prev => ({ ...prev, brake: active }));
+    socketClient.emitBrake(active);
+  }, [isEngineRunning]);
+
+  const handleGearChange = useCallback((gear: string) => {
+    console.log('🎮 Gear changed:', gear, { isEngineRunning, isConnected });
+    if (!isEngineRunning) {
+      console.warn('⚠️ Engine not running, cannot change gear');
+      return;
+    }
+    setControlState(prev => ({ ...prev, gear }));
+    socketClient.emitGearChange(gear);
+  }, [isEngineRunning]);
+
+  const handleLaunch = useCallback(() => {
+    if (!isEngineRunning || isAutoMode) return;
+    // Launch: auto-accelerate in current gear
+    setIsAutoMode(true);
+    socketClient.emitAutoAccelEnable();
+  }, [isEngineRunning, isAutoMode]);
+
+  const handleDonut = useCallback(() => {
+    if (!isEngineRunning || isAutoMode) return;
+    // Donut: full throttle + steering
+    setIsAutoMode(true);
+    socketClient.emitThrottle(true);
+    socketClient.emitSteering(60);
+    socketClient.emitAutoAccelEnable();
+  }, [isEngineRunning, isAutoMode]);
+
+  const handleEmergencyStop = useCallback(() => {
+    console.log('🏁 Emergency stop toggled:', !isEmergencyStop);
+    setIsEmergencyStop(prev => !prev);
+    if (!isEmergencyStop) {
+      console.log('🏁 Emergency stop ACTIVE');
+      setIsAutoMode(false);
+      setControlState(prev => ({ ...prev, speed: 0, throttle: false, brake: false, gear: 'N' }));
+      socketClient.emitEmergencyStop();
+    }
+  }, [isEmergencyStop]);
+
+  const handleAutoMode = useCallback(() => {
+    if (isEmergencyStop) return; // Cannot enable auto mode during emergency stop
+    setIsAutoMode(prev => !prev);
+    if (!isAutoMode) {
+      socketClient.emitAutoAccelEnable();
+    } else {
+      socketClient.emitAutoAccelDisable();
+    }
+  }, [isEmergencyStop, isAutoMode]);
+
+  const handleEngineStart = useCallback(() => {
+    console.log('🔧 Engine START button clicked');
+    setIsEngineRunning(true);
+    console.log('✅ Engine started');
+  }, []);
+
+  const handleEngineStop = useCallback(() => {
+    console.log('🔧 Engine STOP button clicked');
+    setIsEngineRunning(false);
+    setIsAutoMode(false);
+    socketClient.emitAutoAccelDisable();
+    socketClient.emitThrottle(false);
+    socketClient.emitBrake(true);
+    setControlState(prev => ({ ...prev, throttle: false, brake: false, speed: 0 }));
+    console.log('✅ Engine stopped');
   }, []);
 
   const handleImmersiveViewToggle = useCallback(() => {
     setIsImmersiveView(prev => !prev);
   }, []);
 
-  const handleAngleChange = useCallback((angle: number) => {
-    if (!isEngineRunning) return;
-    setControlState(prev => ({ ...prev, steeringAngle: angle }));
-    sendCommand("steering", Math.round(angle));
-  }, [sendCommand, isEngineRunning]);
-
-  const handleThrottleChange = useCallback((active: boolean) => {
-    if (!isEngineRunning) return;
-    setControlState(prev => ({ ...prev, throttle: active }));
-    sendCommand("throttle", active);
-  }, [sendCommand, isEngineRunning]);
-
-  const handleBrakeChange = useCallback((active: boolean) => {
-    if (!isEngineRunning) return;
-    setControlState(prev => ({ ...prev, brake: active }));
-    sendCommand("brake", active);
-  }, [sendCommand, isEngineRunning]);
-
-  const handleGearChange = useCallback((gear: string) => {
-    if (!isEngineRunning) return;
-    setControlState(prev => ({ ...prev, gear }));
-    sendCommand("gear", gear);
-  }, [sendCommand, isEngineRunning]);
-
-  const handleLaunch = useCallback(() => {
-    sendCommand("action", "launch");
-  }, [sendCommand]);
-
-  const handleDonut = useCallback(() => {
-    sendCommand("action", "donut");
-  }, [sendCommand]);
-
-  const handleEmergencyStop = useCallback(() => {
-    setIsEmergencyStop(prev => !prev);
-    if (!isEmergencyStop) {
-      // Activating emergency stop
-      setIsAutoMode(false);
-      setControlState(prev => ({ ...prev, speed: 0, throttle: false, brake: false, gear: 'N' }));
-      sendCommand("action", "emergency_stop");
-    }
-  }, [isEmergencyStop, sendCommand]);
-
-  const handleAutoMode = useCallback(() => {
-    if (isEmergencyStop) return; // Cannot enable auto mode during emergency stop
-    setIsAutoMode(prev => !prev);
-  }, [isEmergencyStop]);
-
-  const handleEngineStart = useCallback(() => {
-    setIsEngineRunning(true);
-  }, []);
-
-  const handleEngineStop = useCallback(() => {
-    setIsEngineRunning(false);
-    setControlState(prev => ({ ...prev, throttle: false, brake: false, speed: 0 }));
-  }, []);
-
-  // Auto mode acceleration logic
-  useEffect(() => {
-    if (!isAutoMode || !isConnected || isEmergencyStop) return;
-
-    const autoAccelInterval = setInterval(() => {
-      setControlState(prev => {
-        if (prev.gear === 'N') return prev;
-        
-        let newSpeed = prev.speed;
-        const gearMultiplier = {
-          'R': -0.3,
-          'N': 0,
-          '1': 0.5,
-          '2': 0.7,
-          '3': 0.9,
-          'S': 1.2,
-        }[prev.gear] || 0;
-
-        if (!isEmergencyStop && prev.gear !== 'N') {
-          newSpeed = Math.min(100, prev.speed + (2 * gearMultiplier));
-        }
-
-        return { ...prev, speed: Math.max(0, newSpeed), throttle: !isEmergencyStop };
-      });
-    }, 100);
-
-    return () => clearInterval(autoAccelInterval);
-  }, [isAutoMode, isConnected, isEmergencyStop]);
+  // Use auto-acceleration hook for client-side auto-throttle
+  useAutoAcceleration({
+    enabled: isAutoMode,
+    gear: controlState.gear,
+    isEngineRunning,
+    currentSpeed: controlState.speed,
+  });
 
   return (
     <>
