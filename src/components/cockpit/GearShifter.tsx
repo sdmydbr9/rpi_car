@@ -1,12 +1,14 @@
-import { OctagonX, Zap, Power, PowerOff } from "lucide-react";
+import { OctagonX, Zap, Power, PowerOff, Radio } from "lucide-react";
 
 interface GearShifterProps {
   currentGear: string;
   onGearChange: (gear: string) => void;
   isEmergencyStop: boolean;
   isAutoMode: boolean;
+  isIREnabled: boolean;
   onEmergencyStop: () => void;
   onAutoMode: () => void;
+  onIRToggle: () => void;
   isEnabled?: boolean;
   isEngineRunning?: boolean;
   onEngineStart?: () => void;
@@ -20,8 +22,10 @@ export const GearShifter = ({
   onGearChange,
   isEmergencyStop,
   isAutoMode,
+  isIREnabled,
   onEmergencyStop,
   onAutoMode,
+  onIRToggle,
   isEnabled = true,
   isEngineRunning = false,
   onEngineStart,
@@ -163,6 +167,28 @@ export const GearShifter = ({
           <PowerOff className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
           <span className="text-[4px] sm:text-[6px] font-bold racing-text leading-tight">STOP</span>
         </button>
+      </div>
+
+      {/* IR Sensor Button */}
+      <div className="flex gap-1 mt-1 w-full px-1">
+        <button
+          onClick={onIRToggle}
+          disabled={!isEngineRunning}
+          className={`
+            w-12 h-12 mx-auto rounded-full border-2 flex items-center justify-center
+            transition-all duration-100 touch-feedback
+            ${!isEngineRunning
+              ? 'bg-muted border-muted/50 text-muted-foreground cursor-not-allowed opacity-50'
+              : isIREnabled
+              ? 'bg-primary border-primary text-primary-foreground glow-teal'
+              : 'bg-card border-primary/50 text-primary hover:bg-primary/20'
+            }
+          `}
+          title={isIREnabled ? 'IR Sensors: ON' : 'IR Sensors: OFF'}
+        >
+          <Radio className="w-4 h-4 sm:w-5 sm:h-5" />
+        </button>
+        <div className="flex-1" />
       </div>
     </div>
   );

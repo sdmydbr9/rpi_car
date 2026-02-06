@@ -18,6 +18,7 @@ export interface TelemetryData {
   right_obstacle: boolean;
   gas_pressed: boolean;
   brake_pressed: boolean;
+  ir_enabled: boolean;
 }
 
 /**
@@ -183,6 +184,18 @@ export function emitAutoAccelDisable(): void {
   }
 }
 
+/**
+ * Toggle IR sensor control
+ */
+export function emitIRToggle(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎮 IR SENSORS: TOGGLED`);
+    socket.emit('ir_toggle', {});
+  } else {
+    console.warn(`[UI Control] ⚠️ Cannot emit IR toggle - socket not connected`, { socket: !!socket, connected: socket?.connected });
+  }
+}
+
 export default {
   connectToServer,
   disconnectFromServer,
@@ -195,4 +208,5 @@ export default {
   emitEmergencyStop,
   emitAutoAccelEnable,
   emitAutoAccelDisable,
+  emitIRToggle,
 };

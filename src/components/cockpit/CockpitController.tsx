@@ -29,6 +29,7 @@ export const CockpitController = () => {
   const [serverIp, setServerIp] = useState("");
   const [isEmergencyStop, setIsEmergencyStop] = useState(false);
   const [isAutoMode, setIsAutoMode] = useState(false);
+  const [isIREnabled, setIsIREnabled] = useState(true);
   const [isImmersiveView, setIsImmersiveView] = useState(false);
   const [streamUrl, setStreamUrl] = useState<string>("");
   const [isEngineRunning, setIsEngineRunning] = useState(false);
@@ -97,6 +98,8 @@ export const CockpitController = () => {
         throttle: data.gas_pressed || prev.throttle,
         brake: data.brake_pressed || prev.brake,
       }));
+      // Update IR enabled state from telemetry
+      setIsIREnabled(data.ir_enabled ?? true);
     });
 
     return () => {
@@ -183,6 +186,11 @@ export const CockpitController = () => {
     }
   }, [isEmergencyStop, isAutoMode]);
 
+  const handleIRToggle = useCallback(() => {
+    console.log('🎮 IR sensor toggle');
+    socketClient.emitIRToggle();
+  }, []);
+
   const handleEngineStart = useCallback(() => {
     console.log('🔧 Engine START button clicked');
     setIsEngineRunning(true);
@@ -241,7 +249,7 @@ export const CockpitController = () => {
         />
         
         {/* Main Content - Fixed Layout (No Responsive Changes) */}
-        <div className="flex-1 flex min-h-0 overflow-hidden flex-row">
+        <div className="flex-1 flex min-h-0 overflow-hidden flex-row px-4">
           {/* Left Zone: Camera Feed + Steering Wheel */}
           <div className="flex-[0.35] border-r border-border/30 racing-panel m-0.5 flex flex-col overflow-hidden gap-0.5">
             {/* Camera Feed */}
@@ -281,8 +289,10 @@ export const CockpitController = () => {
               onGearChange={handleGearChange}
               isEmergencyStop={isEmergencyStop}
               isAutoMode={isAutoMode}
+              isIREnabled={isIREnabled}
               onEmergencyStop={handleEmergencyStop}
               onAutoMode={handleAutoMode}
+              onIRToggle={handleIRToggle}
               isEnabled={isEngineRunning}
               isEngineRunning={isEngineRunning}
               onEngineStart={handleEngineStart}
@@ -292,7 +302,7 @@ export const CockpitController = () => {
         </div>
         
         {/* Footer Zone: Pedals */}
-        <div className="h-[12dvh] min-h-12 max-h-20 border-t border-primary/30 flex-shrink-0">
+        <div className="h-[12dvh] min-h-12 max-h-20 border-t border-primary/30 flex-shrink-0 px-4">
           <Pedals 
             onThrottleChange={handleThrottleChange}
             onBrakeChange={handleBrakeChange}

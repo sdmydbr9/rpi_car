@@ -475,22 +475,27 @@ def handle_action(action):
 def emergency_stop():
     """Toggle emergency brake - when ON, car cannot move"""
     car_state["emergency_brake_active"] = not car_state["emergency_brake_active"]
-    car_state["current_pwm"] = 0
-    car_state["gas_pressed"] = False
-    car_state["brake_pressed"] = False
     
-    # CRITICAL: Reset obstacle avoidance state when emergency brake is toggled
-    # This prevents the car from being stuck in STOPPED or STEERING mode after releasing the brake
+    # Always cut power immediately
+    car_state["current_pwm"] = 0
+    
+    # Physics loop checks emergency_brake_active flag and forces speed to 0
+    # We don't reset gas_pressed/brake_pressed so they're preserved when brake is deactivated
+    
+    # Reset obstacle avoidance state to prevent stuck state
     car_state["obstacle_state"] = "IDLE"
     car_state["steer_angle"] = 0
     
-    # Magnetic lock: all pins to False
-    try:
-        GPIO.output(IN1, False); GPIO.output(IN2, False)
-        GPIO.output(IN3, False); GPIO.output(IN4, False)
-        pwm_a.ChangeDutyCycle(100); pwm_b.ChangeDutyCycle(100)
-    except Exception as e:
-        pass  # GPIO not available
+    # Apply magnetic lock ONLY when activating the emergency brake
+    if car_state["emergency_brake_active"]:
+        try:
+            # Magnetic lock: set all direction pins to False, PWM to 100%
+            # NOTE: Do NOT use GPIO.output() on ENA/ENB - they're managed by PWM objects
+            GPIO.output(IN1, False); GPIO.output(IN2, False)
+            GPIO.output(IN3, False); GPIO.output(IN4, False)
+            pwm_a.ChangeDutyCycle(100); pwm_b.ChangeDutyCycle(100)
+        except Exception as e:
+            pass  # GPIO not available
     state = '🔴 ON' if car_state["emergency_brake_active"] else '🟢 OFF'
     print(f"🚨 EMERGENCY BRAKE: {state}")
     return "EMERGENCY_BRAKE"
@@ -675,24 +680,26 @@ def on_emergency_stop(data):
     # Toggle the emergency brake state
     car_state["emergency_brake_active"] = not car_state["emergency_brake_active"]
     
-    # Immediately cut power
+    # Always cut power immediately
     car_state["current_pwm"] = 0
-    car_state["gas_pressed"] = False
-    car_state["brake_pressed"] = False
     
-    # CRITICAL: Reset obstacle avoidance state when emergency brake is toggled
-    # This prevents the car from being stuck in STOPPED or STEERING mode after releasing the brake
+    # Physics loop checks emergency_brake_active flag and forces speed to 0
+    # We don't reset gas_pressed/brake_pressed so they're preserved when brake is deactivated
+    
+    # Reset obstacle avoidance state to prevent stuck state
     car_state["obstacle_state"] = "IDLE"
     car_state["steer_angle"] = 0
     
-    # Lock the motors physically
-    try:
-        GPIO.output(18, False); GPIO.output(19, False)
-        GPIO.output(17, False); GPIO.output(27, False)
-        GPIO.output(22, False); GPIO.output(23, False)
-        pwm_a.ChangeDutyCycle(100); pwm_b.ChangeDutyCycle(100)
-    except Exception as e:
-        pass  # GPIO not available
+    # Apply magnetic lock ONLY when activating the emergency brake
+    if car_state["emergency_brake_active"]:
+        try:
+            # Magnetic lock: set all direction pins to False, PWM to 100%
+            # NOTE: Do NOT use GPIO.output() on ENA/ENB - they're managed by PWM objects
+            GPIO.output(IN1, False); GPIO.output(IN2, False)
+            GPIO.output(IN3, False); GPIO.output(IN4, False)
+            pwm_a.ChangeDutyCycle(100); pwm_b.ChangeDutyCycle(100)
+        except Exception as e:
+            pass  # GPIO not available
     
     state = '🔴 ON' if car_state["emergency_brake_active"] else '🟢 OFF'
     print(f"\n⚙️ [UI Control] 🚨 EMERGENCY BRAKE: {state}")
@@ -712,6 +719,19 @@ def on_auto_accel_disable(data):
     car_state["gas_pressed"] = False
     print(f"\n⚙️ [UI Control] 🚫 AUTO-ACCEL: DISABLED")
     emit('auto_accel_response', {'status': 'ok', 'enabled': False})
+
+@socketio.on('ir_toggle')
+def on_ir_toggle(data):
+    """Handle IR sensor toggle"""
+    car_state["ir_enabled"] = not car_state["ir_enabled"]
+    state = '✅ ON' if car_state["ir_enabled"] else '❌ OFF'
+    print(f"\n⚙️ [UI Control] 📡 IR SENSORS: {state}")
+    emit('ir_response', {'status': 'ok', 'ir_enabled': car_state["ir_enabled"]})
+
+@socketio.on('state_request')
+def on_state_request(data):
+    """Send current car state to client"""
+    emit('state_response', car_state)
 
 # Telemetry broadcast thread
 def telemetry_broadcast():
@@ -733,7 +753,8 @@ def telemetry_broadcast():
                 "left_obstacle": car_state["left_obstacle"],
                 "right_obstacle": car_state["right_obstacle"],
                 "gas_pressed": car_state["gas_pressed"],
-                "brake_pressed": car_state["brake_pressed"]
+                "brake_pressed": car_state["brake_pressed"],
+                "ir_enabled": car_state["ir_enabled"]
             }
             
             socketio.emit('telemetry_update', telemetry_data)
