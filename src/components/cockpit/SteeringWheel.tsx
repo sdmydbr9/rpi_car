@@ -3,9 +3,10 @@ import { useState, useRef, useCallback } from "react";
 interface SteeringWheelProps {
   onAngleChange: (angle: number) => void;
   angle: number;
+  isEnabled?: boolean;
 }
 
-export const SteeringWheel = ({ onAngleChange, angle }: SteeringWheelProps) => {
+export const SteeringWheel = ({ onAngleChange, angle, isEnabled = true }: SteeringWheelProps) => {
   const wheelRef = useRef<HTMLDivElement>(null);
   const [isDragging, setIsDragging] = useState(false);
   const startAngleRef = useRef(0);
@@ -20,12 +21,13 @@ export const SteeringWheel = ({ onAngleChange, angle }: SteeringWheelProps) => {
   }, []);
 
   const handleTouchStart = useCallback((e: React.TouchEvent) => {
+    if (!isEnabled) return;
     e.preventDefault();
     setIsDragging(true);
     const touch = e.touches[0];
     startTouchAngleRef.current = calculateAngle(touch.clientX, touch.clientY);
     startAngleRef.current = angle;
-  }, [angle, calculateAngle]);
+  }, [angle, calculateAngle, isEnabled]);
 
   const handleTouchMove = useCallback((e: React.TouchEvent) => {
     if (!isDragging) return;
@@ -54,17 +56,18 @@ export const SteeringWheel = ({ onAngleChange, angle }: SteeringWheelProps) => {
     <div className="flex flex-col items-center justify-center h-full p-0.5 overflow-hidden">
       <div
         ref={wheelRef}
-        className="relative cursor-grab active:cursor-grabbing touch-none select-none w-[min(28vw,10rem)] aspect-[5/4]"
+        className={`relative touch-none select-none w-[min(28vw,10rem)] aspect-[5/4] transition-opacity ${isEnabled ? 'cursor-grab active:cursor-grabbing' : 'cursor-not-allowed opacity-50'}`}
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
         onMouseDown={(e) => {
+          if (!isEnabled) return;
           setIsDragging(true);
           startTouchAngleRef.current = calculateAngle(e.clientX, e.clientY);
           startAngleRef.current = angle;
         }}
         onMouseMove={(e) => {
-          if (!isDragging) return;
+          if (!isDragging || !isEnabled) return;
           const currentTouchAngle = calculateAngle(e.clientX, e.clientY);
           let deltaAngle = currentTouchAngle - startTouchAngleRef.current;
           if (deltaAngle > 180) deltaAngle -= 360;

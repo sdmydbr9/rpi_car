@@ -29,6 +29,7 @@ export const CockpitController = () => {
   const [isAutoMode, setIsAutoMode] = useState(false);
   const [isImmersiveView, setIsImmersiveView] = useState(false);
   const [streamUrl, setStreamUrl] = useState<string>("");
+  const [isEngineRunning, setIsEngineRunning] = useState(false);
   const speedIntervalRef = useRef<number | null>(null);
   const telemetryIntervalRef = useRef<number | null>(null);
 
@@ -167,24 +168,28 @@ export const CockpitController = () => {
   }, []);
 
   const handleAngleChange = useCallback((angle: number) => {
+    if (!isEngineRunning) return;
     setControlState(prev => ({ ...prev, steeringAngle: angle }));
     sendCommand("steering", Math.round(angle));
-  }, [sendCommand]);
+  }, [sendCommand, isEngineRunning]);
 
   const handleThrottleChange = useCallback((active: boolean) => {
+    if (!isEngineRunning) return;
     setControlState(prev => ({ ...prev, throttle: active }));
     sendCommand("throttle", active);
-  }, [sendCommand]);
+  }, [sendCommand, isEngineRunning]);
 
   const handleBrakeChange = useCallback((active: boolean) => {
+    if (!isEngineRunning) return;
     setControlState(prev => ({ ...prev, brake: active }));
     sendCommand("brake", active);
-  }, [sendCommand]);
+  }, [sendCommand, isEngineRunning]);
 
   const handleGearChange = useCallback((gear: string) => {
+    if (!isEngineRunning) return;
     setControlState(prev => ({ ...prev, gear }));
     sendCommand("gear", gear);
-  }, [sendCommand]);
+  }, [sendCommand, isEngineRunning]);
 
   const handleLaunch = useCallback(() => {
     sendCommand("action", "launch");
@@ -208,6 +213,15 @@ export const CockpitController = () => {
     if (isEmergencyStop) return; // Cannot enable auto mode during emergency stop
     setIsAutoMode(prev => !prev);
   }, [isEmergencyStop]);
+
+  const handleEngineStart = useCallback(() => {
+    setIsEngineRunning(true);
+  }, []);
+
+  const handleEngineStop = useCallback(() => {
+    setIsEngineRunning(false);
+    setControlState(prev => ({ ...prev, throttle: false, brake: false, speed: 0 }));
+  }, []);
 
   // Auto mode acceleration logic
   useEffect(() => {
@@ -283,7 +297,8 @@ export const CockpitController = () => {
             <div className="flex-1 min-h-0 overflow-hidden">
               <SteeringWheel 
                 angle={controlState.steeringAngle} 
-                onAngleChange={handleAngleChange} 
+                onAngleChange={handleAngleChange}
+                isEnabled={isEngineRunning}
               />
             </div>
           </div>
@@ -310,6 +325,10 @@ export const CockpitController = () => {
               isAutoMode={isAutoMode}
               onEmergencyStop={handleEmergencyStop}
               onAutoMode={handleAutoMode}
+              isEnabled={isEngineRunning}
+              isEngineRunning={isEngineRunning}
+              onEngineStart={handleEngineStart}
+              onEngineStop={handleEngineStop}
             />
           </div>
         </div>
@@ -319,6 +338,7 @@ export const CockpitController = () => {
           <Pedals 
             onThrottleChange={handleThrottleChange}
             onBrakeChange={handleBrakeChange}
+            isEnabled={isEngineRunning}
           />
         </div>
       </div>

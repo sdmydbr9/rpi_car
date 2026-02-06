@@ -1,4 +1,4 @@
-import { OctagonX, Zap } from "lucide-react";
+import { OctagonX, Zap, Power, PowerOff } from "lucide-react";
 
 interface GearShifterProps {
   currentGear: string;
@@ -7,6 +7,10 @@ interface GearShifterProps {
   isAutoMode: boolean;
   onEmergencyStop: () => void;
   onAutoMode: () => void;
+  isEnabled?: boolean;
+  isEngineRunning?: boolean;
+  onEngineStart?: () => void;
+  onEngineStop?: () => void;
 }
 
 const GEARS = ["S", "3", "2", "1", "N", "R"];
@@ -17,7 +21,11 @@ export const GearShifter = ({
   isEmergencyStop,
   isAutoMode,
   onEmergencyStop,
-  onAutoMode
+  onAutoMode,
+  isEnabled = true,
+  isEngineRunning = false,
+  onEngineStart,
+  onEngineStop
 }: GearShifterProps) => {
   return (
     <div className="flex flex-col items-center h-full pt-0.5 pb-0.5 px-0.5 overflow-hidden">
@@ -32,10 +40,13 @@ export const GearShifter = ({
             <button
               key={gear}
               onClick={() => onGearChange(gear)}
+              disabled={!isEnabled}
               className={`
                 w-[8vw] h-[4dvh] max-w-12 max-h-7 min-w-6 min-h-4 rounded border text-[10px] sm:text-sm font-bold racing-text
                 transition-all duration-100 touch-feedback
-                ${isActive
+                ${!isEnabled
+                  ? 'bg-muted/40 border-muted/30 text-muted-foreground opacity-50 cursor-not-allowed'
+                  : isActive
                   ? isReverse
                     ? "gear-reverse-active border-destructive"
                     : "gear-active border-primary"
@@ -103,6 +114,43 @@ export const GearShifter = ({
         >
           <Zap className="w-4 h-4 sm:w-5 sm:h-5" />
           <span className="text-[5px] sm:text-xs font-bold racing-text leading-none">AUTO</span>
+        </button>
+      </div>
+
+      {/* START and STOP Buttons */}
+      <div className="flex gap-0.5 mt-1 w-full">
+        {/* START Button */}
+        <button
+          onClick={onEngineStart}
+          disabled={isEngineRunning}
+          className={`
+            flex-1 rounded-full border-2 flex flex-col items-center justify-center p-1.5 h-12
+            transition-all duration-100 touch-feedback
+            ${isEngineRunning
+              ? 'bg-muted border-muted/50 text-muted-foreground cursor-not-allowed opacity-50'
+              : 'bg-primary border-primary text-primary-foreground hover:bg-primary/90 glow-teal'
+            }
+          `}
+        >
+          <Power className="w-4 h-4 sm:w-5 sm:h-5" />
+          <span className="text-[5px] sm:text-xs font-bold racing-text leading-none">START</span>
+        </button>
+
+        {/* STOP Button */}
+        <button
+          onClick={onEngineStop}
+          disabled={!isEngineRunning}
+          className={`
+            flex-1 rounded-full border-2 flex flex-col items-center justify-center p-1.5 h-12
+            transition-all duration-100 touch-feedback
+            ${!isEngineRunning
+              ? 'bg-muted border-muted/50 text-muted-foreground cursor-not-allowed opacity-50'
+              : 'bg-destructive border-destructive text-destructive-foreground hover:bg-destructive/90 glow-red'
+            }
+          `}
+        >
+          <PowerOff className="w-4 h-4 sm:w-5 sm:h-5" />
+          <span className="text-[5px] sm:text-xs font-bold racing-text leading-none">STOP</span>
         </button>
       </div>
     </div>
