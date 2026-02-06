@@ -14,10 +14,8 @@ import re
 # ==========================================
 
 # --- PROJECT PATHS ---
-# Folder name where your Loveable/React code lives
-PROJECT_DIR = "f1-race-control"
 # The folder where the built website ends up
-DIST_DIR = os.path.join(PROJECT_DIR, "dist")
+DIST_DIR = "dist"
 
 # --- MOTOR PINS (BCM Numbering) ---
 # Check your wiring! 
@@ -51,11 +49,11 @@ def check_and_build():
         print("⚠️  UI build not found. Building now...")
         print("⏳ This might take 2-3 minutes on a Raspberry Pi...")
         try:
-            subprocess.run(["npm", "run", "build"], cwd=PROJECT_DIR, check=True)
+            subprocess.run(["npm", "run", "build"], check=True)
             print("✅ Build Complete!")
         except Exception as e:
             print(f"❌ Build failed: {e}")
-            print("   Make sure you are in the 'rpi_car' folder and 'f1-race-control' exists.")
+            print("   Make sure you are in the 'rpi_car' folder and npm dependencies are installed.")
             sys.exit(1)
     else:
         print("✅ UI found. Starting engine...")
@@ -505,7 +503,7 @@ def get_gpu_clock():
 # --- TELEMETRY ---
 @app.route("/telemetry")
 def telemetry():
-    """Returns fake data for the dashboard gauges"""
+    """Returns current car state for the dashboard"""
     pwm = car_state["current_pwm"]
     
     # Math to fake RPM and KM/H based on power
@@ -515,7 +513,11 @@ def telemetry():
     return jsonify({
         "rpm": fake_rpm,
         "speed": fake_speed,
+        "current_pwm": pwm,
         "gear": car_state["gear"],
+        "steer_angle": car_state["steer_angle"],
+        "direction": car_state["direction"],
+        "turning": car_state["turning"],
         "left_obstacle": car_state["left_obstacle"],
         "right_obstacle": car_state["right_obstacle"]
     })
