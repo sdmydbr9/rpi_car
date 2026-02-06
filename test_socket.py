@@ -1,76 +1,75 @@
 #!/usr/bin/env python3
-"""Test script to verify socket.io connection and commands"""
+"""Test script to verify HTTP API connection and commands"""
 
-import socketio
+import requests
 import time
 import sys
 
-# Create a socket.io client
-sio = socketio.Client(reconnection=True)
+BASE_URL = "http://127.0.0.1:5000"
 
-@sio.event
-def connect():
-    print("✅ Connected to server")
+def api_call(endpoint, data=None):
+    """Make an API call to the backend"""
+    try:
+        if data:
+            response = requests.post(f"{BASE_URL}{endpoint}", json=data, timeout=5)
+        else:
+            response = requests.get(f"{BASE_URL}{endpoint}", timeout=5)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"❌ API call failed: {e}")
+        return None
+
+def test_api():
+    print(f"Attempting to connect to {BASE_URL}...")
+    
+    # Test connection
+    response = api_call("/api/state")
+    if response is None:
+        print(f"❌ Failed to connect to {BASE_URL}")
+        sys.exit(1)
+    
+    print("✅ Connected to server\n")
+    
+    # Test throttle command
     print("   Sending throttle command...")
-    sio.emit('throttle', {'value': True})
+    result = api_call("/api/control/throttle", {'value': True})
+    if result:
+        print(f"📡 Throttle Response: {result}")
     time.sleep(0.5)
     
+    # Test steering command
     print("   Sending steering command...")
-    sio.emit('steering', {'angle': 45})
+    result = api_call("/api/control/steering", {'angle': 45})
+    if result:
+        print(f"📡 Steering Response: {result}")
     time.sleep(0.5)
     
+    # Test brake command
     print("   Sending brake command...")
-    sio.emit('brake', {'value': True})
+    result = api_call("/api/control/brake", {'value': True})
+    if result:
+        print(f"📡 Brake Response: {result}")
     time.sleep(0.5)
     
+    # Test gear command
     print("   Sending gear command...")
-    sio.emit('gear_change', {'gear': 'D'})
+    result = api_call("/api/control/gear", {'gear': '3'})
+    if result:
+        print(f"📡 Gear Response: {result}")
     time.sleep(0.5)
     
-    print("   Disconnecting...")
-    sio.disconnect()
-
-@sio.event
-def disconnect():
-    print("❌ Disconnected from server")
-
-@sio.on('throttle_response')
-def on_throttle_response(data):
-    print(f"📡 Throttle Response: {data}")
-
-@sio.on('steering_response')
-def on_steering_response(data):
-    print(f"📡 Steering Response: {data}")
-
-@sio.on('brake_response')
-def on_brake_response(data):
-    print(f"📡 Brake Response: {data}")
-
-@sio.on('gear_response')
-def on_gear_response(data):
-    print(f"📡 Gear Response: {data}")
-
-@sio.on('connection_response')
-def on_connection_response(data):
-    print(f"📡 Connection Response: {data}")
-
-@sio.on('telemetry_update')
-def on_telemetry_update(data):
-    print(f"📡 Telemetry Update: {data}")
-
-@sio.event
-def connect_error(data):
-    print(f"❌ Connection error: {data}")
-
-# Connect to the server
-try:
-    print("Attempting to connect to http://127.0.0.1:5000...")
-    sio.connect('http://127.0.0.1:5000',
-                transports=['websocket', 'polling'],
-                wait_timeout=10)
+    # Get telemetry
+    print("   Getting telemetry...")
+    result = api_call("/api/telemetry")
+    if result:
+        print(f"📡 Telemetry: {result}")
+    time.sleep(0.5)
     
-    # Keep the connection alive for a bit
-    time.sleep(2)
+    print("\n✅ All tests completed successfully")
+
+try:
+    test_api()
 except Exception as e:
-    print(f"❌ Failed to connect: {e}")
+    print(f"❌ Test failed: {e}")
     sys.exit(1)

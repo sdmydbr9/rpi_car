@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback } from 'react';
-import * as socketClient from '../lib/socketClient';
+import * as httpClient from '../lib/httpClient';
 
 interface UseAutoAccelerationOptions {
   enabled: boolean;
@@ -45,7 +45,7 @@ export const useAutoAcceleration = ({
 
     // Stop if conditions aren't met
     if (!enabled || !isEngineRunning || gear === 'N' || gear === 'R') {
-      socketClient.emitThrottle(false);
+      httpClient.emitThrottle(false);
       return;
     }
 
@@ -57,10 +57,10 @@ export const useAutoAcceleration = ({
 
       if (speed < gearLimit) {
         // Increment throttle
-        socketClient.emitThrottle(true);
+        httpClient.emitThrottle(true);
       } else {
         // At limit, maintain throttle
-        socketClient.emitThrottle(true);
+        httpClient.emitThrottle(true);
       }
     }, 200); // Increment every 200ms for smooth acceleration
 
@@ -69,7 +69,7 @@ export const useAutoAcceleration = ({
         clearInterval(accelIntervalRef.current);
         accelIntervalRef.current = null;
       }
-      socketClient.emitThrottle(false);
+      httpClient.emitThrottle(false);
     };
   }, [enabled, isEngineRunning, gear]);
 };
