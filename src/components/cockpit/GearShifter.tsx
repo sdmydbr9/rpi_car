@@ -27,41 +27,52 @@ export const GearShifter = ({
   onEngineStart,
   onEngineStop
 }: GearShifterProps) => {
+  // Gearbox layout: 2 rows x 3 columns
+  const gearLayout = [
+    ["S", "3", "2"],
+    ["1", "N", "R"]
+  ];
+
   return (
-    <div className="flex flex-col items-center h-full pt-0.5 pb-0.5 px-0.5 overflow-hidden">
-      <div className="racing-text text-[8px] sm:text-xs text-muted-foreground mb-1">GEAR</div>
+    <div className="flex flex-col items-center h-full pt-1 pb-1 px-1 overflow-hidden">
+      <div className="racing-text text-[8px] sm:text-xs text-muted-foreground mb-2">TRANSMISSION</div>
       
-      <div className="flex flex-col gap-0.5 overflow-hidden">
-        {GEARS.map((gear) => {
-          const isActive = currentGear === gear;
-          const isReverse = gear === "R";
-          
-          return (
-            <button
-              key={gear}
-              onClick={() => onGearChange(gear)}
-              disabled={!isEnabled}
-              className={`
-                w-[8vw] h-[4dvh] max-w-12 max-h-7 min-w-6 min-h-4 rounded border text-[10px] sm:text-sm font-bold racing-text
-                transition-all duration-100 touch-feedback
-                ${!isEnabled
-                  ? 'bg-muted/40 border-muted/30 text-muted-foreground opacity-50 cursor-not-allowed'
-                  : isActive
-                  ? isReverse
-                    ? "gear-reverse-active border-destructive"
-                    : "gear-active border-primary"
-                  : "bg-card border-border hover:border-primary/50 text-muted-foreground hover:text-foreground"
-                }
-              `}
-            >
-              {gear}
-            </button>
-          );
-        })}
+      {/* Gearbox Grid Container */}
+      <div className="bg-card border-2 border-border rounded-lg p-2 space-y-1.5">
+        {gearLayout.map((row, rowIdx) => (
+          <div key={rowIdx} className="flex gap-1.5 justify-center">
+            {row.map((gear) => {
+              const isActive = currentGear === gear;
+              const isReverse = gear === "R";
+              
+              return (
+                <button
+                  key={gear}
+                  onClick={() => onGearChange(gear)}
+                  disabled={!isEnabled}
+                  className={`
+                    w-10 h-10 sm:w-12 sm:h-12 rounded-lg border-2 text-xs sm:text-sm font-bold racing-text
+                    transition-all duration-150 touch-feedback flex items-center justify-center
+                    ${!isEnabled
+                      ? 'bg-muted/40 border-muted/30 text-muted-foreground opacity-50 cursor-not-allowed'
+                      : isActive
+                      ? isReverse
+                        ? "gear-reverse-active border-destructive bg-destructive/20 shadow-lg shadow-destructive/50"
+                        : "gear-active border-primary bg-primary/20 shadow-lg shadow-primary/50"
+                      : "bg-card border-border hover:border-primary/60 text-muted-foreground hover:text-foreground hover:bg-primary/5"
+                    }
+                  `}
+                >
+                  {gear}
+                </button>
+              );
+            })}
+          </div>
+        ))}
       </div>
       
       {/* Telemetry Wave */}
-      <div className="w-full mt-1 overflow-hidden h-4 sm:h-6 border border-border rounded bg-card/50">
+      <div className="w-full mt-2 overflow-hidden h-3 sm:h-4 border border-border rounded bg-card/50">
         <svg className="w-[200%] h-full animate-telemetry" viewBox="0 0 200 30" preserveAspectRatio="none">
           <path
             d="M0,15 Q10,5 20,15 T40,15 T60,15 T80,15 T100,15 T120,15 T140,15 T160,15 T180,15 T200,15"
@@ -79,15 +90,15 @@ export const GearShifter = ({
           />
         </svg>
       </div>
-      <div className="text-[5px] sm:text-[7px] text-muted-foreground racing-text mt-0.5 mb-1">LIVE TELEMETRY</div>
+      <div className="text-[5px] sm:text-[7px] text-muted-foreground racing-text mt-0.5 mb-2">TELEMETRY</div>
       
       {/* Emergency Brake and AUTO Mode Buttons */}
-      <div className="flex gap-0.5 mt-1 w-full">
+      <div className="flex gap-1 mt-1 w-full px-1">
         {/* Emergency Brake Button */}
         <button
           onClick={onEmergencyStop}
           className={`
-            flex-1 rounded-full border-2 flex flex-col items-center justify-center p-1.5 h-12
+            flex-1 rounded-md border-2 flex flex-col items-center justify-center p-1 h-8
             transition-all duration-100 touch-feedback
             ${isEmergencyStop
               ? 'bg-destructive border-destructive text-destructive-foreground glow-red'
@@ -95,8 +106,8 @@ export const GearShifter = ({
             }
           `}
         >
-          <OctagonX className="w-4 h-4 sm:w-5 sm:h-5" />
-          <span className="text-[5px] sm:text-xs font-bold racing-text leading-none">EMERGENCY BRAKE</span>
+          <OctagonX className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+          <span className="text-[4px] sm:text-[6px] font-bold racing-text leading-tight">BRAKE</span>
         </button>
         
         {/* AUTO Button */}
@@ -104,7 +115,7 @@ export const GearShifter = ({
           onClick={onAutoMode}
           disabled={isEmergencyStop}
           className={`
-            flex-1 rounded-full border-2 flex flex-col items-center justify-center p-1.5 h-12
+            flex-1 rounded-md border-2 flex flex-col items-center justify-center p-1 h-8
             transition-all duration-100 touch-feedback disabled:opacity-50
             ${isAutoMode
               ? 'bg-primary border-primary text-primary-foreground glow-teal'
@@ -112,19 +123,19 @@ export const GearShifter = ({
             }
           `}
         >
-          <Zap className="w-4 h-4 sm:w-5 sm:h-5" />
-          <span className="text-[5px] sm:text-xs font-bold racing-text leading-none">AUTO</span>
+          <Zap className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+          <span className="text-[4px] sm:text-[6px] font-bold racing-text leading-tight">AUTO</span>
         </button>
       </div>
 
       {/* START and STOP Buttons */}
-      <div className="flex gap-0.5 mt-1 w-full">
+      <div className="flex gap-1 mt-1 w-full px-1">
         {/* START Button */}
         <button
           onClick={onEngineStart}
           disabled={isEngineRunning}
           className={`
-            flex-1 rounded-full border-2 flex flex-col items-center justify-center p-1.5 h-12
+            flex-1 rounded-md border-2 flex flex-col items-center justify-center p-1 h-8
             transition-all duration-100 touch-feedback
             ${isEngineRunning
               ? 'bg-muted border-muted/50 text-muted-foreground cursor-not-allowed opacity-50'
@@ -132,8 +143,8 @@ export const GearShifter = ({
             }
           `}
         >
-          <Power className="w-4 h-4 sm:w-5 sm:h-5" />
-          <span className="text-[5px] sm:text-xs font-bold racing-text leading-none">START</span>
+          <Power className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+          <span className="text-[4px] sm:text-[6px] font-bold racing-text leading-tight">START</span>
         </button>
 
         {/* STOP Button */}
@@ -141,7 +152,7 @@ export const GearShifter = ({
           onClick={onEngineStop}
           disabled={!isEngineRunning}
           className={`
-            flex-1 rounded-full border-2 flex flex-col items-center justify-center p-1.5 h-12
+            flex-1 rounded-md border-2 flex flex-col items-center justify-center p-1 h-8
             transition-all duration-100 touch-feedback
             ${!isEngineRunning
               ? 'bg-muted border-muted/50 text-muted-foreground cursor-not-allowed opacity-50'
@@ -149,8 +160,8 @@ export const GearShifter = ({
             }
           `}
         >
-          <PowerOff className="w-4 h-4 sm:w-5 sm:h-5" />
-          <span className="text-[5px] sm:text-xs font-bold racing-text leading-none">STOP</span>
+          <PowerOff className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+          <span className="text-[4px] sm:text-[6px] font-bold racing-text leading-tight">STOP</span>
         </button>
       </div>
     </div>

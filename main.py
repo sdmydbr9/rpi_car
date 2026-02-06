@@ -130,11 +130,12 @@ car_state = {
     "speed_limit": 100,    # Manual speed limit (5-100), overrides gear speeds
     "speed_limit_enabled": False,  # Whether to use speed limit instead of gear
     "auto_accel_enabled": False,  # Auto-acceleration mode (client-side for throttle)
-    "emergency_brake_active": False  # Emergency brake: when ON, car cannot move
+    "emergency_brake_active": False,  # Emergency brake: when ON, car cannot move
+    "obstacle_state": "IDLE"  # Obstacle avoidance state: IDLE, STOPPED, STEERING
 }
 
 def physics_loop():
-    obstacle_state = "IDLE"  # IDLE, STOPPED, STEERING
+    # Note: obstacle_state is now in car_state, not a local variable
     stop_timer = 0           # Timer for 1-second stop (50 cycles = 1 second at 20ms)
     steering_timer = 0       # Timer for steering duration
     last_left_obstacle = False
@@ -172,12 +173,14 @@ def physics_loop():
         brake = car_state["brake_pressed"]
         current = car_state["current_pwm"]
         user_angle = car_state["user_steer_angle"]
+        obstacle_state = car_state["obstacle_state"]
         
         # --- OBSTACLE AVOIDANCE STATE MACHINE ---
         if car_state["ir_enabled"] and gas and (left_obstacle or right_obstacle):
             if obstacle_state == "IDLE":
                 # Trigger: Obstacle detected, enter STOPPED state
                 obstacle_state = "STOPPED"
+                car_state["obstacle_state"] = "STOPPED"
                 stop_timer = 50  # 1 second (50 cycles × 20ms)
                 print("🚨 OBSTACLE(S) DETECTED - EMERGENCY STOP FOR 1 SECOND")
                 current = 0  # Immediately cut power
@@ -192,6 +195,7 @@ def physics_loop():
                 if stop_timer <= 0:
                     # Stop period complete, transition to STEERING
                     obstacle_state = "STEERING"
+                    car_state["obstacle_state"] = "STEERING"
                     steering_timer = 0
                     
                     # Determine steering direction based on obstacles
@@ -217,6 +221,7 @@ def physics_loop():
                 if not (left_obstacle or right_obstacle):
                     # All obstacles cleared, return to normal
                     obstacle_state = "IDLE"
+                    car_state["obstacle_state"] = "IDLE"
                     car_state["steer_angle"] = user_angle
                     print("✅ ALL OBSTACLES CLEARED - RESUMING NORMAL CONTROL")
                 elif left_obstacle and right_obstacle:
@@ -230,6 +235,7 @@ def physics_loop():
             # No obstacles detected
             if obstacle_state != "IDLE":
                 obstacle_state = "IDLE"
+                car_state["obstacle_state"] = "IDLE"
             car_state["steer_angle"] = user_angle
         
         # Get the current steering angle (either from avoidance or user input)
@@ -472,6 +478,12 @@ def emergency_stop():
     car_state["current_pwm"] = 0
     car_state["gas_pressed"] = False
     car_state["brake_pressed"] = False
+    
+    # CRITICAL: Reset obstacle avoidance state when emergency brake is toggled
+    # This prevents the car from being stuck in STOPPED or STEERING mode after releasing the brake
+    car_state["obstacle_state"] = "IDLE"
+    car_state["steer_angle"] = 0
+    
     # Magnetic lock: all pins to False
     try:
         GPIO.output(IN1, False); GPIO.output(IN2, False)
@@ -667,6 +679,11 @@ def on_emergency_stop(data):
     car_state["current_pwm"] = 0
     car_state["gas_pressed"] = False
     car_state["brake_pressed"] = False
+    
+    # CRITICAL: Reset obstacle avoidance state when emergency brake is toggled
+    # This prevents the car from being stuck in STOPPED or STEERING mode after releasing the brake
+    car_state["obstacle_state"] = "IDLE"
+    car_state["steer_angle"] = 0
     
     # Lock the motors physically
     try:
