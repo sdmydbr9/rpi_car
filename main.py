@@ -656,10 +656,12 @@ def api_throttle():
         value = data.get('value', False)
         
         if value:
-            car_state["gas_pressed"] = True
-            car_state["brake_pressed"] = False
-            car_state["direction"] = "forward"
-            print(f"\n⚙️ [UI Control] 🚀 THROTTLE PRESSED (Forward)")
+            # IMPORTANT: Only set gas_pressed if brake is NOT currently being held
+            # This prevents auto-accelerate from overriding an active brake command
+            if not car_state["brake_pressed"]:
+                car_state["gas_pressed"] = True
+                car_state["direction"] = "forward"
+                print(f"\n⚙️ [UI Control] 🚀 THROTTLE PRESSED (Forward)")
         else:
             car_state["gas_pressed"] = False
             print(f"\n⚙️ [UI Control] ⏸️ THROTTLE RELEASED")
