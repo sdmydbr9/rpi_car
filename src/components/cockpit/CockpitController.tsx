@@ -88,10 +88,10 @@ export const CockpitController = () => {
     }
 
     // Subscribe to telemetry updates
+    // Note: steeringAngle is NOT updated from telemetry - it's controlled only by user input
     socketClient.onTelemetry((data) => {
       setControlState(prev => ({
         ...prev,
-        steeringAngle: data.steer_angle || prev.steeringAngle,
         gear: data.gear || prev.gear,
         speed: data.current_pwm || prev.speed,
         throttle: data.gas_pressed || prev.throttle,
