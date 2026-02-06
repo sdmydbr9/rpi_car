@@ -34,7 +34,27 @@ export const CockpitController = () => {
   const [isEngineRunning, setIsEngineRunning] = useState(false);
   const autoAccelIntervalRef = useRef<number | null>(null);
   const connectionTimeoutRef = useRef<number | null>(null);
+  const autoConnectAttemptedRef = useRef(false);
 
+  // Auto-connect to localhost on mount
+  useEffect(() => {
+    if (!autoConnectAttemptedRef.current) {
+      autoConnectAttemptedRef.current = true;
+      const autoConnect = async () => {
+        console.log('🚀 [Startup] Auto-connecting to localhost:5000...');
+        try {
+          await socketClient.connectToServer('localhost', 5000);
+          setServerIp('localhost');
+          setIsConnected(true);
+          setStreamUrl('http://localhost/stream');
+          console.log('✅ [Startup] Auto-connected to localhost');
+        } catch (error) {
+          console.error('❌ [Startup] Auto-connect failed:', error);
+        }
+      };
+      autoConnect();
+    }
+  }, []);
 
   // Setup telemetry subscription when connected
   useEffect(() => {
@@ -59,28 +79,7 @@ export const CockpitController = () => {
     };
   }, [isConnected]);
 
-  const handleConnect = useCallback(async (ip: string) => {
-    console.log('🌐 Attempting to connect to:', ip);
-    try {
-      await socketClient.connectToServer(ip, 5000);
-      setServerIp(ip);
-      setIsConnected(true);
-      setStreamUrl(`http://${ip}/stream`);
-      console.log("✅ Connected to:", ip);
-    } catch (error) {
-      console.error("❌ Failed to connect:", error);
-      setIsConnected(false);
-    }
-  }, []);
 
-  const handleDisconnect = useCallback(() => {
-    socketClient.disconnectFromServer();
-    setIsConnected(false);
-    setServerIp("");
-    setStreamUrl("");
-    setControlState(prev => ({ ...prev, speed: 0, throttle: false, brake: false, gear: 'N' }));
-    console.log("Disconnected");
-  }, []);
 
   const handleAngleChange = useCallback((angle: number) => {
     console.log('🎮 Steering angle changed:', angle, { isEngineRunning, isConnected });
@@ -214,8 +213,6 @@ export const CockpitController = () => {
         {/* Header */}
         <Header 
           isConnected={isConnected}
-          onConnect={handleConnect}
-          onDisconnect={handleDisconnect}
         />
         
         {/* Main Content */}

@@ -41,7 +41,7 @@ export const ConnectionDialog = ({ isConnected, onConnect, onDisconnect }: Conne
 
   const handleDisconnect = () => {
     onDisconnect();
-    setIpAddress("");
+    setIpAddress("localhost");
   };
 
   return (

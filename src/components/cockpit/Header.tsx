@@ -1,19 +1,13 @@
-import { ConnectionDialog } from "./ConnectionDialog";
-
 interface HeaderProps {
   driverName?: string;
   position?: string;
   isConnected: boolean;
-  onConnect: (ip: string) => void;
-  onDisconnect: () => void;
 }
 
 export const Header = ({ 
   driverName = "HAMILTON", 
   position = "P1",
-  isConnected,
-  onConnect,
-  onDisconnect
+  isConnected
 }: HeaderProps) => {
   return (
     <header className="flex items-center justify-between px-1.5 sm:px-4 py-0.5 sm:py-1.5 border-b border-primary/30 bg-card/30 backdrop-blur-sm h-[6dvh] min-h-[1.75rem] max-h-10 flex-shrink-0">
@@ -50,12 +44,6 @@ export const Header = ({
         <div className="w-4 h-4 sm:w-6 sm:h-6 bg-primary rounded flex items-center justify-center">
           <span className="text-primary-foreground font-bold text-[8px] sm:text-xs">44</span>
         </div>
-        {/* Connection Dialog */}
-        <ConnectionDialog
-          isConnected={isConnected}
-          onConnect={onConnect}
-          onDisconnect={onDisconnect}
-        />
       </div>
     </header>
   );
