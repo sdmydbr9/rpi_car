@@ -18,6 +18,7 @@ interface ImmersiveHUDProps {
   onEmergencyStop: () => void;
   onAutoModeToggle: () => void;
   onSteeringChange?: (angle: number) => void;
+  onGearChange?: (gear: string) => void;
 }
 
 export const ImmersiveHUD = ({
@@ -36,6 +37,7 @@ export const ImmersiveHUD = ({
   onEmergencyStop,
   onAutoModeToggle,
   onSteeringChange,
+  onGearChange,
 }: ImmersiveHUDProps) => {
   const { triggerHaptic, playSound } = useGameFeedback();
   const [eBrakeActive, setEBrakeActive] = useState(false);
@@ -88,6 +90,11 @@ export const ImmersiveHUD = ({
     setSteeringDirection(null);
     onSteeringChange?.(0);
   }, [onSteeringChange]);
+
+  const handleGearChange = useCallback((newGear: string) => {
+    triggerHaptic('light');
+    onGearChange?.(newGear);
+  }, [triggerHaptic, onGearChange]);
 
   if (!isOpen) return null;
 
@@ -244,6 +251,77 @@ export const ImmersiveHUD = ({
             <div className="text-[10px] racing-text text-primary -mt-2">RPM</div>
           </div>
         </div>
+
+        {/* Gear Shifter Section */}
+        <div className="absolute top-40 right-4 z-20 pointer-events-auto">
+          <div className="bg-background/40 backdrop-blur-md border border-border/50 rounded-lg p-3">
+            <div className="text-[10px] racing-text text-muted-foreground mb-2 text-center">GEAR</div>
+            <div className="grid grid-cols-3 gap-1">
+              <button
+                onClick={() => handleGearChange('S')}
+                className={`w-8 h-8 rounded text-xs font-bold racing-text transition-all ${
+                  gear === 'S'
+                    ? 'bg-primary text-primary-foreground glow-teal'
+                    : 'bg-muted/50 text-muted-foreground hover:bg-muted'
+                }`}
+              >
+                S
+              </button>
+              <button
+                onClick={() => handleGearChange('3')}
+                className={`w-8 h-8 rounded text-xs font-bold racing-text transition-all ${
+                  gear === '3'
+                    ? 'bg-primary text-primary-foreground glow-teal'
+                    : 'bg-muted/50 text-muted-foreground hover:bg-muted'
+                }`}
+              >
+                3
+              </button>
+              <button
+                onClick={() => handleGearChange('2')}
+                className={`w-8 h-8 rounded text-xs font-bold racing-text transition-all ${
+                  gear === '2'
+                    ? 'bg-primary text-primary-foreground glow-teal'
+                    : 'bg-muted/50 text-muted-foreground hover:bg-muted'
+                }`}
+              >
+                2
+              </button>
+              <button
+                onClick={() => handleGearChange('1')}
+                className={`w-8 h-8 rounded text-xs font-bold racing-text transition-all ${
+                  gear === '1'
+                    ? 'bg-primary text-primary-foreground glow-teal'
+                    : 'bg-muted/50 text-muted-foreground hover:bg-muted'
+                }`}
+              >
+                1
+              </button>
+              <button
+                onClick={() => handleGearChange('N')}
+                className={`w-8 h-8 rounded text-xs font-bold racing-text transition-all ${
+                  gear === 'N'
+                    ? 'bg-primary text-primary-foreground glow-teal'
+                    : 'bg-muted/50 text-muted-foreground hover:bg-muted'
+                }`}
+              >
+                N
+              </button>
+              <button
+                onClick={() => handleGearChange('R')}
+                className={`w-8 h-8 rounded text-xs font-bold racing-text transition-all ${
+                  gear === 'R'
+                    ? 'bg-destructive text-destructive-foreground glow-red'
+                    : 'bg-muted/50 text-muted-foreground hover:bg-muted'
+                }`}
+              >
+                R
+              </button>
+            </div>
+          </div>
+        </div>
+
+
         
         {/* Top Right - Speed & Gear */}
         <div className="absolute top-4 right-4 z-20 pointer-events-none">

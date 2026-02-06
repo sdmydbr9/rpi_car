@@ -257,6 +257,7 @@ export const CockpitController = () => {
         onEmergencyStop={handleEmergencyStop}
         onAutoModeToggle={handleAutoMode}
         onSteeringChange={handleAngleChange}
+        onGearChange={handleGearChange}
       />
       
       <div className="h-[100dvh] w-full flex flex-col overflow-hidden">

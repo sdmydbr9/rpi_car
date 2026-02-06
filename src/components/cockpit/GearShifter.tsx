@@ -20,10 +20,10 @@ export const GearShifter = ({
   onAutoMode
 }: GearShifterProps) => {
   return (
-    <div className="flex flex-col items-center h-full py-0.5 px-0.5 overflow-hidden">
-      <div className="racing-text text-[8px] sm:text-xs text-muted-foreground mb-0.5">GEAR</div>
+    <div className="flex flex-col items-center h-full pt-0.5 pb-0.5 px-0.5 overflow-hidden">
+      <div className="racing-text text-[8px] sm:text-xs text-muted-foreground mb-1">GEAR</div>
       
-      <div className="flex flex-col gap-0.5 flex-1 justify-center overflow-hidden">
+      <div className="flex flex-col gap-0.5 overflow-hidden">
         {GEARS.map((gear) => {
           const isActive = currentGear === gear;
           const isReverse = gear === "R";
@@ -50,7 +50,7 @@ export const GearShifter = ({
       </div>
       
       {/* Telemetry Wave */}
-      <div className="w-full mt-0.5 overflow-hidden h-4 sm:h-6 border border-border rounded bg-card/50">
+      <div className="w-full mt-1 overflow-hidden h-4 sm:h-6 border border-border rounded bg-card/50">
         <svg className="w-[200%] h-full animate-telemetry" viewBox="0 0 200 30" preserveAspectRatio="none">
           <path
             d="M0,15 Q10,5 20,15 T40,15 T60,15 T80,15 T100,15 T120,15 T140,15 T160,15 T180,15 T200,15"
@@ -68,15 +68,15 @@ export const GearShifter = ({
           />
         </svg>
       </div>
-      <div className="text-[5px] sm:text-[7px] text-muted-foreground racing-text mt-0.5">LIVE TELEMETRY</div>
+      <div className="text-[5px] sm:text-[7px] text-muted-foreground racing-text mt-0.5 mb-1">LIVE TELEMETRY</div>
       
       {/* E-STOP and AUTO Mode Buttons */}
-      <div className="flex gap-0.5 mt-0.5 w-full">
+      <div className="flex gap-0.5 mt-1 w-full">
         {/* E-STOP Button */}
         <button
           onClick={onEmergencyStop}
           className={`
-            flex-1 rounded border-2 flex flex-col items-center justify-center p-0.5
+            flex-1 rounded-full border-2 flex flex-col items-center justify-center p-1.5 h-12
             transition-all duration-100 touch-feedback
             ${isEmergencyStop
               ? 'bg-destructive border-destructive text-destructive-foreground glow-red'
@@ -84,8 +84,8 @@ export const GearShifter = ({
             }
           `}
         >
-          <OctagonX className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
-          <span className="text-[4px] sm:text-[5px] font-bold racing-text leading-none">E-STOP</span>
+          <OctagonX className="w-4 h-4 sm:w-5 sm:h-5" />
+          <span className="text-[5px] sm:text-xs font-bold racing-text leading-none">E-STOP</span>
         </button>
         
         {/* AUTO Button */}
@@ -93,7 +93,7 @@ export const GearShifter = ({
           onClick={onAutoMode}
           disabled={isEmergencyStop}
           className={`
-            flex-1 rounded border-2 flex flex-col items-center justify-center p-0.5
+            flex-1 rounded-full border-2 flex flex-col items-center justify-center p-1.5 h-12
             transition-all duration-100 touch-feedback disabled:opacity-50
             ${isAutoMode
               ? 'bg-primary border-primary text-primary-foreground glow-teal'
@@ -101,8 +101,8 @@ export const GearShifter = ({
             }
           `}
         >
-          <Zap className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
-          <span className="text-[4px] sm:text-[5px] font-bold racing-text leading-none">AUTO</span>
+          <Zap className="w-4 h-4 sm:w-5 sm:h-5" />
+          <span className="text-[5px] sm:text-xs font-bold racing-text leading-none">AUTO</span>
         </button>
       </div>
     </div>
