@@ -133,7 +133,19 @@ car_state = {
     "emergency_brake_active": False,  # Emergency brake: when ON, car cannot move
     "obstacle_state": "IDLE",  # Obstacle avoidance state: IDLE, STOPPED, STEERING
     "is_braking": False,  # Flag to indicate normal brake is applied for motor control
+    "heartbeat_active": True,  # Heartbeat status: True = client responding, False = lost connection
 }
+
+# ==========================================
+# 💗 HEARTBEAT / PING TRACKING
+# ==========================================
+# Dictionary to track last ping time from each connected client
+client_last_pong = {}  # {client_id: timestamp}
+has_had_client = False  # Track if a client has ever connected (to avoid false emergency brakes on startup)
+
+# Heartbeat configuration
+HEARTBEAT_INTERVAL = 2.0  # Send ping every 2 seconds
+HEARTBEAT_TIMEOUT = 5.0   # Declare client dead if no pong for 5 seconds
 
 def physics_loop():
     # Note: obstacle_state is now in car_state, not a local variable
@@ -613,16 +625,46 @@ def get_gpu_clock():
 @socketio.on('connect')
 def on_connect():
     """Handle client connection"""
+    global has_had_client
     print(f"\n🔗 [Socket] ✅ CLIENT CONNECTED")
     print(f"   Client ID: {request.sid}")
     print(f"   Remote Address: {request.remote_addr}")
+    # Initialize ping tracking for this client
+    has_had_client = True
+    client_last_pong[request.sid] = time.time()
+    car_state["heartbeat_active"] = True
+    # Ensure emergency brakes are OFF when client connects (client is now responsible for safety)
+    car_state["emergency_brake_active"] = False
+    print(f"   Emergency brakes reset to OFF")
     emit('connection_response', {'data': 'Connected to RC Car'})
 
 @socketio.on('disconnect')
 def on_disconnect():
     """Handle client disconnection"""
+    global has_had_client
     print(f"\n🔓 [Socket] ❌ CLIENT DISCONNECTED")
     print(f"   Client ID: {request.sid}")
+    # Clean up ping tracking for this client
+    if request.sid in client_last_pong:
+        del client_last_pong[request.sid]
+    # If all clients disconnected AND we've had clients before, activate emergency brakes
+    if not client_last_pong and has_had_client:
+        car_state["emergency_brake_active"] = True
+        car_state["heartbeat_active"] = False
+        car_state["current_pwm"] = 0
+        print(f"🚨 [Heartbeat] ❌ ALL CLIENTS DISCONNECTED - EMERGENCY BRAKES ACTIVATED!")
+
+
+@socketio.on('heartbeat_pong')
+def on_heartbeat_pong(data):
+    """Handle heartbeat_pong response from client (heartbeat check)"""
+    client_id = request.sid
+    client_last_pong[client_id] = time.time()
+    # Signal that heartbeat is active
+    car_state["heartbeat_active"] = True
+    # Debug: Only print occasionally to avoid spam
+    # print(f"💗 [Heartbeat] ✅ Heartbeat pong received from client {client_id}")
+
 
 @socketio.on('throttle')
 def on_throttle(data):
@@ -747,6 +789,55 @@ def on_state_request(data):
     """Send current car state to client"""
     emit('state_response', car_state)
 
+# Heartbeat monitoring thread
+def heartbeat_monitor():
+    """Monitor client heartbeat - ping clients and check for pong responses"""
+    last_ping_time = time.time()
+    
+    while True:
+        try:
+            current_time = time.time()
+            
+            # Send heartbeat_ping to all connected clients periodically
+            if current_time - last_ping_time >= HEARTBEAT_INTERVAL:
+                if client_last_pong:  # Only ping if clients are connected
+                    # Need app context for socketio.emit in background thread
+                    with app.app_context():
+                        socketio.emit('heartbeat_ping', {})
+                    print(f"💗 [Heartbeat] 🔔 Heartbeat ping sent to all clients")
+                    last_ping_time = current_time
+            
+            # Check for dead clients (no pong response within timeout)
+            dead_clients = []
+            for client_id, last_pong_time in client_last_pong.items():
+                if current_time - last_pong_time > HEARTBEAT_TIMEOUT:
+                    dead_clients.append(client_id)
+            
+            # Handle dead clients
+            if dead_clients:
+                for client_id in dead_clients:
+                    print(f"🚨 [Heartbeat] ❌ HEARTBEAT LOST from client {client_id}")
+                    print(f"🚨 [Heartbeat] 🛑 ACTIVATING EMERGENCY BRAKES!")
+                    car_state["emergency_brake_active"] = True
+                    car_state["heartbeat_active"] = False
+                    car_state["current_pwm"] = 0
+                    car_state["gas_pressed"] = False
+                    car_state["brake_pressed"] = False
+                
+                # Remove dead clients from tracking
+                for client_id in dead_clients:
+                    del client_last_pong[client_id]
+            
+            time.sleep(0.1)  # Check every 100ms
+        except Exception as e:
+            print(f"❌ Heartbeat monitor error: {e}")
+            time.sleep(0.1)
+
+# Start heartbeat monitor thread
+heartbeat_thread = threading.Thread(target=heartbeat_monitor, daemon=True)
+heartbeat_thread.start()
+print("💗 [Heartbeat] ✅ Heartbeat monitor started (interval: {:.1f}s, timeout: {:.1f}s)".format(HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT))
+
 # Telemetry broadcast thread
 def telemetry_broadcast():
     """Broadcast telemetry data to all connected clients at 20Hz"""
@@ -769,6 +860,8 @@ def telemetry_broadcast():
                 "gas_pressed": car_state["gas_pressed"],
                 "brake_pressed": car_state["brake_pressed"],
                 "ir_enabled": car_state["ir_enabled"],
+                "heartbeat_active": car_state["heartbeat_active"],
+                "emergency_brake_active": car_state["emergency_brake_active"],
                 "temperature": get_cpu_temperature(),
                 "cpu_clock": get_cpu_clock(),
                 "gpu_clock": get_gpu_clock()

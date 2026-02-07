@@ -19,6 +19,8 @@ export interface TelemetryData {
   gas_pressed: boolean;
   brake_pressed: boolean;
   ir_enabled: boolean;
+  heartbeat_active?: boolean;
+  emergency_brake_active?: boolean;
   temperature?: number;
   cpu_clock?: number;
   gpu_clock?: number;
@@ -67,6 +69,11 @@ export function connectToServer(serverIp: string, port: number = 5000): Promise<
     socket.on('disconnect', () => {
       console.log(`[Socket] ❌ Disconnected from RC Car backend`);
     });
+
+    socket.on('heartbeat_ping', () => {
+      console.log(`[Socket] 💗 Heartbeat ping received from server, sending heartbeat_pong...`);
+      socket?.emit('heartbeat_pong', {});
+    });
   });
 }
 
@@ -87,6 +94,20 @@ export function disconnectFromServer(): void {
 export function isConnected(): boolean {
   return socket?.connected || false;
 }
+
+/**
+ * Get heartbeat status from server (True = heartbeat active, False = lost)
+ */
+export function onHeartbeatStatus(callback: (active: boolean) => void): void {
+  if (socket) {
+    socket.on('telemetry_update', (data: any) => {
+      if (data.heartbeat_active !== undefined) {
+        callback(data.heartbeat_active);
+      }
+    });
+  }
+}
+
 
 /**
  * Subscribe to telemetry updates

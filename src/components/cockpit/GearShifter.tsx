@@ -230,7 +230,7 @@ export const GearShifter = ({
       </div>
 
       {/* Transmission Icon Gearbox */}
-      <div className="relative w-full aspect-[110/135] mb-1.5 max-h-[140px] sm:max-h-none">
+      <div className="relative w-full aspect-[110/135] mb-1 max-h-[80px] sm:max-h-[110px] md:max-h-[140px] lg:max-h-none">
         {/* Transmission Icon */}
         <svg 
           className="w-full h-full"
@@ -247,7 +247,7 @@ export const GearShifter = ({
             <path d="m50 3.875c-5.1094 0-9.2656 4.1562-9.2656 9.2656 0 4.5625 3.3438 8.3594 7.7031 9.1094 0.51562 0.09375 1.0312 0.14062 1.5625 0.14062s1.0469-0.046875 1.5625-0.14062c4.3594-0.75 7.7031-4.5469 7.7031-9.1094 0-5.1094-4.1562-9.2656-9.2656-9.2656z"/>
             <path d="m80.562 3.875c-5.1094 0-9.25 4.1562-9.25 9.2656 0 4.5625 3.3281 8.3594 7.6875 9.1094 0.51562 0.09375 1.0312 0.14062 1.5625 0.14062s1.0625-0.046875 1.5625-0.14062c4.3594-0.75 7.7031-4.5469 7.7031-9.1094 0-5.1094-4.1562-9.2656-9.2656-9.2656z"/>
             <path d="m80.566 69.422c0.86328 0 1.5625-0.69922 1.5625-1.5625v-45.609c-0.50781 0.085938-1.0273 0.14062-1.5625 0.14062s-1.0547-0.054687-1.5625-0.14062v26.188h-27.441v-26.188c-0.50781 0.085938-1.0273 0.14062-1.5625 0.14062s-1.0547-0.054687-1.5625-0.14062v26.188h-27.441v-26.188c-0.50781 0.085938-1.0273 0.14062-1.5625 0.14062s-1.0547-0.054687-1.5625-0.14062v54.043c0.50781-0.085938 1.0273-0.14062 1.5625-0.14062s1.0547 0.054687 1.5625 0.14062v-24.73h27.441v24.73c0.50781-0.085938 1.0273-0.14062 1.5625-0.14062s1.0547 0.054687 1.5625 0.14062v-24.73h27.441v16.297c0 0.86328 0.69922 1.5625 1.5625 1.5625z"/>
-            <path d="m82.688 74.695h-8.3672c-0.86328 0-1.5625 0.69922-1.5625 1.5625v18.305c0 0.86328 0.69922 1.5625 1.5625 1.5625 0.86328 0 1.5625-0.69922 1.5625-1.5625v-7.5898h5.125l4.4141 8.3203c0.28125 0.52734 0.82031 0.82812 1.3828 0.82812 0.24609 0 0.49609-0.058594 0.73047-0.18359 0.76172-0.40625 1.0547-1.3516 0.64844-2.1133l-3.7812-7.125c2.2969-0.73047 3.9609-2.8828 3.9609-5.4141v-0.91406c0-3.1328-2.5469-5.6797-5.6797-5.6797z" style={{ fill: currentGear === "R" ? "rgb(59, 130, 246)" : "currentColor", transition: "fill 0.2s" }} />
+            <path d="m82.688 74.695h-8.3672c-0.86328 0-1.5625 0.69922-1.5625 1.5625v18.305c0 0.86328 0.69922 1.5625 1.5625 1.5625 0.86328 0 1.5625-0.69922 1.5625-1.5625v-7.5898h5.125l4.4141 8.3203c0.28125 0.52734 0.82031 0.82812 1.3828 0.82812 0.24609 0 0.49609-0.058594 0.73047-0.18359 0.76172-0.40625 1.0547-1.3516 0.64844-2.1133l-3.7812-7.125c2.2969-0.73047 3.9609-2.8828 3.9609-5.4141v-0.91406c0-3.1328-2.5469-5.6797-5.6797-5.6797z" style={{ fill: currentGear === "R" ? "rgb(20, 184, 166)" : "currentColor", transition: "fill 0.2s" }} />
           </g>
 
           {/* Invisible click handler for R */}
@@ -267,10 +267,10 @@ export const GearShifter = ({
             cx="19.4"
             cy="13.1"
             r="9.1"
-            fill={currentGear === "S" ? "rgb(59, 130, 246)" : "rgba(255, 255, 255, 0.02)"}
-            stroke={currentGear === "S" ? "rgb(147, 197, 253)" : "rgba(255, 255, 255, 0.1)"}
-            strokeWidth="0.5"
-            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s' }}
+            fill={currentGear === "S" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.02)"}
+            stroke={currentGear === "S" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.1)"}
+            strokeWidth={currentGear === "S" ? "1" : "0.5"}
+            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s, strokeWidth 0.2s' }}
             onClick={() => isEnabled && onGearChange("S")}
           />
           <text
@@ -278,9 +278,9 @@ export const GearShifter = ({
             y="13.1"
             textAnchor="middle"
             dominantBaseline="middle"
-            fontSize="5"
+            fontSize="8"
             fontWeight="bold"
-            fill={currentGear === "S" ? "rgb(59, 130, 246)" : "rgb(0, 0, 0)"}
+            fill={currentGear === "S" ? "white" : "rgb(0, 0, 0)"}
             pointerEvents="none"
           >
             S
@@ -291,10 +291,10 @@ export const GearShifter = ({
             cx="50"
             cy="13.1"
             r="9.1"
-            fill={currentGear === "3" ? "rgb(59, 130, 246)" : "rgba(255, 255, 255, 0.02)"}
-            stroke={currentGear === "3" ? "rgb(147, 197, 253)" : "rgba(255, 255, 255, 0.1)"}
-            strokeWidth="0.5"
-            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s' }}
+            fill={currentGear === "3" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.02)"}
+            stroke={currentGear === "3" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.1)"}
+            strokeWidth={currentGear === "3" ? "1" : "0.5"}
+            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s, strokeWidth 0.2s' }}
             onClick={() => isEnabled && onGearChange("3")}
           />
           <text
@@ -302,9 +302,9 @@ export const GearShifter = ({
             y="13.1"
             textAnchor="middle"
             dominantBaseline="middle"
-            fontSize="5"
+            fontSize="8"
             fontWeight="bold"
-            fill={currentGear === "3" ? "rgb(59, 130, 246)" : "rgb(0, 0, 0)"}
+            fill={currentGear === "3" ? "white" : "rgb(0, 0, 0)"}
             pointerEvents="none"
           >
             3
@@ -315,10 +315,10 @@ export const GearShifter = ({
             cx="80.6"
             cy="13.1"
             r="9.1"
-            fill={currentGear === "2" ? "rgb(59, 130, 246)" : "rgba(255, 255, 255, 0.02)"}
-            stroke={currentGear === "2" ? "rgb(147, 197, 253)" : "rgba(255, 255, 255, 0.1)"}
-            strokeWidth="0.5"
-            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s' }}
+            fill={currentGear === "2" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.02)"}
+            stroke={currentGear === "2" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.1)"}
+            strokeWidth={currentGear === "2" ? "1" : "0.5"}
+            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s, strokeWidth 0.2s' }}
             onClick={() => isEnabled && onGearChange("2")}
           />
           <text
@@ -326,9 +326,9 @@ export const GearShifter = ({
             y="13.1"
             textAnchor="middle"
             dominantBaseline="middle"
-            fontSize="5"
+            fontSize="8"
             fontWeight="bold"
-            fill={currentGear === "2" ? "rgb(59, 130, 246)" : "rgb(0, 0, 0)"}
+            fill={currentGear === "2" ? "white" : "rgb(0, 0, 0)"}
             pointerEvents="none"
           >
             2
@@ -339,10 +339,10 @@ export const GearShifter = ({
             cx="19.4"
             cy="85.4"
             r="9.1"
-            fill={currentGear === "1" ? "rgb(59, 130, 246)" : "rgba(255, 255, 255, 0.02)"}
-            stroke={currentGear === "1" ? "rgb(147, 197, 253)" : "rgba(255, 255, 255, 0.1)"}
-            strokeWidth="0.5"
-            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s' }}
+            fill={currentGear === "1" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.02)"}
+            stroke={currentGear === "1" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.1)"}
+            strokeWidth={currentGear === "1" ? "1" : "0.5"}
+            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s, strokeWidth 0.2s' }}
             onClick={() => isEnabled && onGearChange("1")}
           />
           <text
@@ -350,9 +350,9 @@ export const GearShifter = ({
             y="85.4"
             textAnchor="middle"
             dominantBaseline="middle"
-            fontSize="5"
+            fontSize="8"
             fontWeight="bold"
-            fill={currentGear === "1" ? "rgb(59, 130, 246)" : "rgb(0, 0, 0)"}
+            fill={currentGear === "1" ? "white" : "rgb(0, 0, 0)"}
             pointerEvents="none"
           >
             1
@@ -363,10 +363,10 @@ export const GearShifter = ({
             cx="50"
             cy="85.4"
             r="9.1"
-            fill={currentGear === "N" ? "rgb(59, 130, 246)" : "rgba(255, 255, 255, 0.02)"}
-            stroke={currentGear === "N" ? "rgb(147, 197, 253)" : "rgba(255, 255, 255, 0.1)"}
-            strokeWidth="0.5"
-            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s' }}
+            fill={currentGear === "N" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.02)"}
+            stroke={currentGear === "N" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.1)"}
+            strokeWidth={currentGear === "N" ? "1" : "0.5"}
+            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s, strokeWidth 0.2s' }}
             onClick={() => isEnabled && onGearChange("N")}
           />
           <text
@@ -374,9 +374,9 @@ export const GearShifter = ({
             y="85.4"
             textAnchor="middle"
             dominantBaseline="middle"
-            fontSize="5"
+            fontSize="8"
             fontWeight="bold"
-            fill={currentGear === "N" ? "rgb(59, 130, 246)" : "rgb(0, 0, 0)"}
+            fill={currentGear === "N" ? "white" : "rgb(0, 0, 0)"}
             pointerEvents="none"
           >
             N
@@ -397,7 +397,7 @@ export const GearShifter = ({
           onClick={onEngineStart}
           disabled={isEngineRunning}
           className={`
-            flex-1 rounded-full border-2 flex flex-col items-center justify-center py-2 px-1.5
+            flex-1 rounded-full border-2 flex flex-col items-center justify-center py-1.5 px-1
             transition-all duration-100 touch-feedback font-bold racing-text
             ${isEngineRunning
               ? 'bg-muted border-muted text-muted-foreground cursor-not-allowed opacity-50'
@@ -405,8 +405,8 @@ export const GearShifter = ({
             }
           `}
         >
-          <Power className="w-4 h-4 mb-0.5" />
-          <span className="text-[7px] sm:text-[8px] leading-tight">START</span>
+          <Power className="w-3 h-3 mb-0.5" />
+          <span className="text-[6px] sm:text-[7px] leading-tight">START</span>
         </button>
 
         {/* STOP Button - Pill Shaped */}
@@ -414,7 +414,7 @@ export const GearShifter = ({
           onClick={onEngineStop}
           disabled={!isEngineRunning}
           className={`
-            flex-1 rounded-full border-2 flex flex-col items-center justify-center py-2 px-1.5
+            flex-1 rounded-full border-2 flex flex-col items-center justify-center py-1.5 px-1
             transition-all duration-100 touch-feedback font-bold racing-text
             ${!isEngineRunning
               ? 'bg-muted border-muted text-muted-foreground cursor-not-allowed opacity-50'
@@ -422,8 +422,8 @@ export const GearShifter = ({
             }
           `}
         >
-          <PowerOff className="w-4 h-4 mb-0.5" />
-          <span className="text-[7px] sm:text-[8px] leading-tight">STOP</span>
+          <PowerOff className="w-3 h-3 mb-0.5" />
+          <span className="text-[6px] sm:text-[7px] leading-tight">STOP</span>
         </button>
       </div>
     </div>
