@@ -24,6 +24,12 @@ export interface TelemetryData {
   temperature?: number;
   cpu_clock?: number;
   gpu_clock?: number;
+  // Autonomous driving telemetry
+  autonomous_mode?: boolean;
+  autonomous_state?: string;
+  autonomous_target_speed?: number;
+  sonar_distance?: number;
+  sonar_enabled?: boolean;
 }
 
 /**
@@ -250,7 +256,7 @@ export function emitSonarToggle(): void {
 export function emitAutopilotToggle(): void {
   if (socket && socket.connected) {
     console.log(`[UI Control] 🎮 AUTOPILOT: TOGGLED`);
-    socket.emit('autopilot_toggle', {});
+    socket.emit('autonomous_toggle', {});
   } else {
     console.warn(`[UI Control] ⚠️ Cannot emit autopilot toggle - socket not connected`, { socket: !!socket, connected: socket?.connected });
   }

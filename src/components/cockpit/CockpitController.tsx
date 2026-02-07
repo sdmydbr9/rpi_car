@@ -44,6 +44,10 @@ export const CockpitController = () => {
   const [eBrakeActive, setEBrakeActive] = useState(false);
   const [streamUrl, setStreamUrl] = useState<string>("");
   const [isEngineRunning, setIsEngineRunning] = useState(false);
+  // Autonomous telemetry state
+  const [autonomousState, setAutonomousState] = useState<string>("CRUISING");
+  const [sonarDistance, setSonarDistance] = useState<number>(100);
+  const [autonomousTargetSpeed, setAutonomousTargetSpeed] = useState<number>(0);
   const autoAccelIntervalRef = useRef<number | null>(null);
   const connectionTimeoutRef = useRef<number | null>(null);
   const autoConnectAttemptedRef = useRef(false);
@@ -117,6 +121,12 @@ export const CockpitController = () => {
       }));
       // Update IR enabled state from telemetry
       setIsIREnabled(data.ir_enabled ?? true);
+      // Update autonomous telemetry
+      if (data.autonomous_mode !== undefined) setIsAutopilotEnabled(data.autonomous_mode);
+      if (data.autonomous_state) setAutonomousState(data.autonomous_state);
+      if (data.sonar_distance !== undefined) setSonarDistance(data.sonar_distance);
+      if (data.autonomous_target_speed !== undefined) setAutonomousTargetSpeed(data.autonomous_target_speed);
+      if (data.sonar_enabled !== undefined) setIsSonarEnabled(data.sonar_enabled);
     });
 
     return () => {
@@ -232,14 +242,22 @@ export const CockpitController = () => {
 
   const handleIRToggle = useCallback(() => {
     console.log('🎮 IR sensor toggle');
+    if (isAutopilotEnabled) {
+      console.log('🚫 IR sensors cannot be toggled in autonomous mode');
+      return;
+    }
     socketClient.emitIRToggle();
-  }, []);
+  }, [isAutopilotEnabled]);
 
   const handleSonarToggle = useCallback(() => {
     console.log('🎮 SONAR sensor toggle');
+    if (isAutopilotEnabled) {
+      console.log('🚫 Sonar sensor cannot be toggled in autonomous mode');
+      return;
+    }
     setIsSonarEnabled(prev => !prev);
     socketClient.emitSonarToggle();
-  }, []);
+  }, [isAutopilotEnabled]);
 
   const handleAutopilotToggle = useCallback(() => {
     console.log('🎮 Autopilot toggle');
@@ -343,6 +361,10 @@ export const CockpitController = () => {
               onLaunch={handleLaunch}
               onDonut={handleDonut}
               isEngineRunning={isEngineRunning}
+              isAutopilotEnabled={isAutopilotEnabled}
+              autonomousState={autonomousState}
+              sonarDistance={sonarDistance}
+              autonomousTargetSpeed={autonomousTargetSpeed}
             />
           </div>
           

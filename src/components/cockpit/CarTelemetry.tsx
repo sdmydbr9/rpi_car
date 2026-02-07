@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Rocket, RotateCcw } from "lucide-react";
+import { Rocket, RotateCcw, Radar, Navigation, AlertTriangle } from "lucide-react";
 import { Speedometer } from "./Speedometer";
 import { Gauge } from "./Gauge";
 
@@ -16,6 +16,10 @@ interface CarTelemetryProps {
   onLaunch: () => void;
   onDonut: () => void;
   isEngineRunning?: boolean;
+  isAutopilotEnabled?: boolean;
+  autonomousState?: string;
+  sonarDistance?: number;
+  autonomousTargetSpeed?: number;
 }
 
 export const CarTelemetry = ({
@@ -31,6 +35,10 @@ export const CarTelemetry = ({
   onLaunch,
   onDonut,
   isEngineRunning = false,
+  isAutopilotEnabled = false,
+  autonomousState = "CRUISING",
+  sonarDistance = 100,
+  autonomousTargetSpeed = 0,
 }: CarTelemetryProps) => {
   const [launchActive, setLaunchActive] = useState(false);
   const [donutActive, setDonutActive] = useState(false);
@@ -251,6 +259,58 @@ export const CarTelemetry = ({
           BRK
         </div>
       </div>
+
+      {/* Autonomous Driving Status Panel */}
+      {isAutopilotEnabled && (
+        <div className="w-full max-w-[20rem] rounded-md border border-primary/40 bg-primary/5 px-2 py-1 flex flex-col gap-0.5">
+          {/* Header */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1">
+              <Navigation className="w-3 h-3 text-primary animate-pulse" />
+              <span className="text-[8px] sm:text-[10px] font-bold racing-text text-primary">
+                AUTOPILOT
+              </span>
+            </div>
+            <span className={`text-[7px] sm:text-[9px] font-bold racing-text px-1.5 py-0.5 rounded ${
+              autonomousState === 'CRUISING'  ? 'bg-green-500/20 text-green-400' :
+              autonomousState === 'BRAKING'   ? 'bg-red-500/20 text-red-400 animate-pulse' :
+              autonomousState === 'REVERSING' ? 'bg-amber-500/20 text-amber-400 animate-pulse' :
+              autonomousState === 'TURNING'   ? 'bg-blue-500/20 text-blue-400' :
+              'bg-muted text-muted-foreground'
+            }`}>
+              {autonomousState}
+            </span>
+          </div>
+          {/* Sonar bar + target speed */}
+          <div className="flex items-center gap-2">
+            <Radar className="w-2.5 h-2.5 text-muted-foreground flex-shrink-0" />
+            <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all duration-150 ${
+                  sonarDistance < 20  ? 'bg-red-500' :
+                  sonarDistance < 50  ? 'bg-amber-400' :
+                  'bg-green-500'
+                }`}
+                style={{ width: `${Math.min(100, (sonarDistance / 100) * 100)}%` }}
+              />
+            </div>
+            <span className="text-[7px] sm:text-[9px] racing-text text-muted-foreground w-10 text-right">
+              {sonarDistance < 0 ? '--' : `${Math.round(sonarDistance)}cm`}
+            </span>
+          </div>
+          {/* Target speed readout */}
+          <div className="flex items-center justify-between text-[6px] sm:text-[8px] racing-text text-muted-foreground">
+            <span>TARGET</span>
+            <span className="font-bold text-foreground">{autonomousTargetSpeed}%</span>
+            {sonarDistance < 20 && (
+              <span className="flex items-center gap-0.5 text-red-400">
+                <AlertTriangle className="w-2 h-2" />
+                DANGER
+              </span>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

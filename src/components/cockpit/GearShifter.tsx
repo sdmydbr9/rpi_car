@@ -107,18 +107,18 @@ export const GearShifter = ({
         {/* IR Button - Round */}
         <button
           onClick={onIRToggle}
-          disabled={!isEngineRunning}
+          disabled={!isEngineRunning || isAutopilotEnabled}
           className={`
             w-12 h-12 rounded-full border-2 flex items-center justify-center relative
             transition-all duration-100 touch-feedback font-bold
-            ${!isEngineRunning
+            ${!isEngineRunning || isAutopilotEnabled
               ? 'bg-muted border-muted text-muted-foreground cursor-not-allowed opacity-50'
               : isIREnabled
               ? 'bg-green-500/20 border-green-500 shadow-lg'
               : 'bg-white/10 border-white/30 hover:bg-white/20 hover:border-white/40'
             }
           `}
-          title={isIREnabled ? 'IR: ON' : 'IR: OFF'}
+          title={isAutopilotEnabled ? 'IR: LOCKED (Autonomous Mode)' : (isIREnabled ? 'IR: ON' : 'IR: OFF')}
         >
           {/* Red diagonal line overlay when IR is off */}
           {!isIREnabled && isEngineRunning && (
@@ -152,18 +152,18 @@ export const GearShifter = ({
         {/* SONAR Button - Round */}
         <button
           onClick={onSonarToggle}
-          disabled={!isEngineRunning}
+          disabled={!isEngineRunning || isAutopilotEnabled}
           className={`
             w-12 h-12 rounded-full border-2 flex items-center justify-center relative
             transition-all duration-100 touch-feedback font-bold
-            ${!isEngineRunning
+            ${!isEngineRunning || isAutopilotEnabled
               ? 'bg-muted border-muted text-muted-foreground cursor-not-allowed opacity-50'
               : isSonarEnabled
               ? 'bg-blue-500/20 border-blue-500 shadow-lg'
               : 'bg-white/10 border-white/30 hover:bg-white/20 hover:border-white/40'
             }
           `}
-          title={isSonarEnabled ? 'SONAR: ON' : 'SONAR: OFF'}
+          title={isAutopilotEnabled ? 'SONAR: LOCKED (Autonomous Mode)' : (isSonarEnabled ? 'SONAR: ON' : 'SONAR: OFF')}
         >
           {/* Red diagonal line overlay when Sonar is off */}
           {!isSonarEnabled && isEngineRunning && (
