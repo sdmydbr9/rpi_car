@@ -13,9 +13,11 @@ interface ImmersiveHUDProps {
   isConnected: boolean;
   isAutoMode: boolean;
   isEmergencyStop: boolean;
+  eBrakeActive: boolean;
   onThrottleChange: (active: boolean) => void;
   onBrakeChange: (active: boolean) => void;
   onEmergencyStop: () => void;
+  onEBrakeToggle: () => void;
   onAutoModeToggle: () => void;
   onSteeringChange?: (angle: number) => void;
   onGearChange?: (gear: string) => void;
@@ -32,15 +34,16 @@ export const ImmersiveHUD = ({
   isConnected,
   isAutoMode,
   isEmergencyStop,
+  eBrakeActive,
   onThrottleChange,
   onBrakeChange,
   onEmergencyStop,
+  onEBrakeToggle,
   onAutoModeToggle,
   onSteeringChange,
   onGearChange,
 }: ImmersiveHUDProps) => {
   const { triggerHaptic, playSound } = useGameFeedback();
-  const [eBrakeActive, setEBrakeActive] = useState(false);
   const [steeringDirection, setSteeringDirection] = useState<'left' | 'right' | null>(null);
   
   // RPM simulation based on speed and throttle
@@ -66,13 +69,10 @@ export const ImmersiveHUD = ({
   }, [onThrottleChange]);
   
   const handleEBrake = useCallback(() => {
-    setEBrakeActive(prev => !prev);
     triggerHaptic('heavy');
     playSound('emergency');
-    if (!eBrakeActive) {
-      onEmergencyStop();
-    }
-  }, [eBrakeActive, triggerHaptic, playSound, onEmergencyStop]);
+    onEBrakeToggle();
+  }, [triggerHaptic, playSound, onEBrakeToggle]);
 
   const handleSteerLeft = useCallback(() => {
     setSteeringDirection('left');
@@ -99,7 +99,7 @@ export const ImmersiveHUD = ({
   if (!isOpen) return null;
 
   return (
-    <div className={`fixed inset-0 z-50 ${isEmergencyStop || eBrakeActive ? 'animate-pulse' : ''}`}>
+    <div className="fixed inset-0 z-50">
       {/* Emergency border flash */}
       {(isEmergencyStop || eBrakeActive) && (
         <div className="absolute inset-0 border-4 border-destructive z-50 pointer-events-none animate-pulse" />

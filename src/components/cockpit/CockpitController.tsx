@@ -41,6 +41,7 @@ export const CockpitController = () => {
   const [isSonarEnabled, setIsSonarEnabled] = useState(true);
   const [isAutopilotEnabled, setIsAutopilotEnabled] = useState(false);
   const [isImmersiveView, setIsImmersiveView] = useState(false);
+  const [eBrakeActive, setEBrakeActive] = useState(false);
   const [streamUrl, setStreamUrl] = useState<string>("");
   const [isEngineRunning, setIsEngineRunning] = useState(false);
   const autoAccelIntervalRef = useRef<number | null>(null);
@@ -185,6 +186,7 @@ export const CockpitController = () => {
     const newEmergencyStopState = !isEmergencyStop;
     console.log('🏁 Emergency stop toggled:', newEmergencyStopState);
     setIsEmergencyStop(newEmergencyStopState);
+    setEBrakeActive(newEmergencyStopState);
     
     if (newEmergencyStopState) {
       // Activating emergency stop
@@ -198,6 +200,25 @@ export const CockpitController = () => {
       socketClient.emitEmergencyStopRelease();
     }
   }, [isEmergencyStop]);
+
+  const handleEBrakeToggle = useCallback(() => {
+    const newEBrakeState = !eBrakeActive;
+    console.log('🛑 E-brake toggled:', newEBrakeState);
+    setEBrakeActive(newEBrakeState);
+    
+    if (newEBrakeState) {
+      // Activating e-brake
+      console.log('🛑 E-brake ACTIVE');
+      setIsEmergencyStop(true);
+      setControlState(prev => ({ ...prev, speed: 0, throttle: false, brake: false, gear: 'N' }));
+      socketClient.emitEmergencyStop();
+    } else {
+      // Deactivating e-brake
+      console.log('🛑 E-brake RELEASED');
+      setIsEmergencyStop(false);
+      socketClient.emitEmergencyStopRelease();
+    }
+  }, [eBrakeActive]);
 
   const handleAutoMode = useCallback(() => {
     if (isEmergencyStop) return; // Cannot enable auto mode during emergency stop
@@ -270,9 +291,11 @@ export const CockpitController = () => {
         isConnected={isConnected}
         isAutoMode={isAutoMode}
         isEmergencyStop={isEmergencyStop}
+        eBrakeActive={eBrakeActive}
         onThrottleChange={handleThrottleChange}
         onBrakeChange={handleBrakeChange}
         onEmergencyStop={handleEmergencyStop}
+        onEBrakeToggle={handleEBrakeToggle}
         onAutoModeToggle={handleAutoMode}
         onSteeringChange={handleAngleChange}
         onGearChange={handleGearChange}
