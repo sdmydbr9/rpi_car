@@ -229,60 +229,162 @@ export const GearShifter = ({
         </button>
       </div>
 
-      {/* Gearbox Grid Container with Transmission Icon Background */}
-      <div className="relative w-full mb-1.5">
-        {/* Transmission Icon Background */}
+      {/* Transmission Icon Gearbox */}
+      <div className="relative w-full aspect-[110/135] mb-1.5 max-h-[140px] sm:max-h-none">
+        {/* Transmission Icon */}
         <svg 
-          className="w-full h-auto"
+          className="w-full h-full"
           style={{ color: 'currentColor' }}
           xmlns="http://www.w3.org/2000/svg" 
           version="1.1" 
           viewBox="-5.0 -10.0 110.0 135.0"
+          preserveAspectRatio="xMidYMid meet"
         >
-          <g style={{ fill: 'currentColor', opacity: 0.3 }}>
+          <g style={{ fill: 'currentColor' }}>
             <path d="m19.438 22.391c0.53125 0 1.0469-0.046875 1.5625-0.14062 4.3594-0.75 7.6875-4.5469 7.6875-9.1094 0-5.1094-4.1406-9.2656-9.25-9.2656s-9.2656 4.1562-9.2656 9.2656c0 4.5625 3.3438 8.3594 7.7031 9.1094 0.5 0.09375 1.0312 0.14062 1.5625 0.14062z"/>
             <path d="m28.688 85.406c0-4.5625-3.3281-8.3594-7.6875-9.1094-0.51562-0.09375-1.0312-0.14062-1.5625-0.14062s-1.0625 0.046875-1.5625 0.14062c-4.3594 0.75-7.7031 4.5469-7.7031 9.1094 0 5.1094 4.1562 9.2656 9.2656 9.2656s9.25-4.1562 9.25-9.2656z"/>
             <path d="m50 76.156c-0.53125 0-1.0469 0.046875-1.5625 0.14062-4.3594 0.75-7.7031 4.5469-7.7031 9.1094 0 5.1094 4.1562 9.2656 9.2656 9.2656s9.2656-4.1562 9.2656-9.2656c0-4.5625-3.3438-8.3594-7.7031-9.1094-0.51562-0.09375-1.0312-0.14062-1.5625-0.14062z"/>
             <path d="m50 3.875c-5.1094 0-9.2656 4.1562-9.2656 9.2656 0 4.5625 3.3438 8.3594 7.7031 9.1094 0.51562 0.09375 1.0312 0.14062 1.5625 0.14062s1.0469-0.046875 1.5625-0.14062c4.3594-0.75 7.7031-4.5469 7.7031-9.1094 0-5.1094-4.1562-9.2656-9.2656-9.2656z"/>
             <path d="m80.562 3.875c-5.1094 0-9.25 4.1562-9.25 9.2656 0 4.5625 3.3281 8.3594 7.6875 9.1094 0.51562 0.09375 1.0312 0.14062 1.5625 0.14062s1.0625-0.046875 1.5625-0.14062c4.3594-0.75 7.7031-4.5469 7.7031-9.1094 0-5.1094-4.1562-9.2656-9.2656-9.2656z"/>
             <path d="m80.566 69.422c0.86328 0 1.5625-0.69922 1.5625-1.5625v-45.609c-0.50781 0.085938-1.0273 0.14062-1.5625 0.14062s-1.0547-0.054687-1.5625-0.14062v26.188h-27.441v-26.188c-0.50781 0.085938-1.0273 0.14062-1.5625 0.14062s-1.0547-0.054687-1.5625-0.14062v26.188h-27.441v-26.188c-0.50781 0.085938-1.0273 0.14062-1.5625 0.14062s-1.0547-0.054687-1.5625-0.14062v54.043c0.50781-0.085938 1.0273-0.14062 1.5625-0.14062s1.0547 0.054687 1.5625 0.14062v-24.73h27.441v24.73c0.50781-0.085938 1.0273-0.14062 1.5625-0.14062s1.0547 0.054687 1.5625 0.14062v-24.73h27.441v16.297c0 0.86328 0.69922 1.5625 1.5625 1.5625z"/>
-            <path d="m82.688 74.695h-8.3672c-0.86328 0-1.5625 0.69922-1.5625 1.5625v18.305c0 0.86328 0.69922 1.5625 1.5625 1.5625 0.86328 0 1.5625-0.69922 1.5625-1.5625v-7.5898h5.125l4.4141 8.3203c0.28125 0.52734 0.82031 0.82812 1.3828 0.82812 0.24609 0 0.49609-0.058594 0.73047-0.18359 0.76172-0.40625 1.0547-1.3516 0.64844-2.1133l-3.7812-7.125c2.2969-0.73047 3.9609-2.8828 3.9609-5.4141v-0.91406c0-3.1328-2.5469-5.6797-5.6797-5.6797z"/>
+            <path d="m82.688 74.695h-8.3672c-0.86328 0-1.5625 0.69922-1.5625 1.5625v18.305c0 0.86328 0.69922 1.5625 1.5625 1.5625 0.86328 0 1.5625-0.69922 1.5625-1.5625v-7.5898h5.125l4.4141 8.3203c0.28125 0.52734 0.82031 0.82812 1.3828 0.82812 0.24609 0 0.49609-0.058594 0.73047-0.18359 0.76172-0.40625 1.0547-1.3516 0.64844-2.1133l-3.7812-7.125c2.2969-0.73047 3.9609-2.8828 3.9609-5.4141v-0.91406c0-3.1328-2.5469-5.6797-5.6797-5.6797z" style={{ fill: currentGear === "R" ? "rgb(59, 130, 246)" : "currentColor", transition: "fill 0.2s" }} />
           </g>
-        </svg>
 
-        {/* Gearbox Buttons Overlay */}
-        <div className="absolute inset-0 flex flex-col items-center justify-center p-1.5">
-          {gearLayout.map((row, rowIdx) => (
-            <div key={rowIdx} className="flex gap-1 justify-center">
-              {row.map((gear) => {
-                const isActive = currentGear === gear;
-                const isReverse = gear === "R";
-                
-                return (
-                  <button
-                    key={gear}
-                    onClick={() => onGearChange(gear)}
-                    disabled={!isEnabled}
-                    className={`
-                      w-7 h-7 sm:w-8 sm:h-8 rounded-lg border-2 text-[10px] sm:text-xs font-bold racing-text
-                      transition-all duration-150 touch-feedback flex items-center justify-center
-                      ${!isEnabled
-                        ? 'bg-muted/40 border-muted/30 text-muted-foreground opacity-50 cursor-not-allowed'
-                        : isActive
-                        ? isReverse
-                          ? "gear-reverse-active border-destructive bg-destructive/20"
-                          : "gear-active border-primary bg-primary/20"
-                        : "bg-card border-border hover:border-primary/60 text-muted-foreground hover:text-foreground hover:bg-primary/5"
-                      }
-                    `}
-                  >
-                    {gear}
-                  </button>
-                );
-              })}
-            </div>
-          ))}
-        </div>
+          {/* Invisible click handler for R */}
+          <circle
+            cx="80.6"
+            cy="85.4"
+            r="9.1"
+            fill="transparent"
+            stroke="transparent"
+            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5 }}
+            onClick={() => isEnabled && onGearChange("R")}
+          />
+
+          {/* Interactive Gear Selection Overlays */}
+          {/* S - Top Left */}
+          <circle
+            cx="19.4"
+            cy="13.1"
+            r="9.1"
+            fill={currentGear === "S" ? "rgb(59, 130, 246)" : "rgba(255, 255, 255, 0.02)"}
+            stroke={currentGear === "S" ? "rgb(147, 197, 253)" : "rgba(255, 255, 255, 0.1)"}
+            strokeWidth="0.5"
+            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s' }}
+            onClick={() => isEnabled && onGearChange("S")}
+          />
+          <text
+            x="19.4"
+            y="13.1"
+            textAnchor="middle"
+            dominantBaseline="middle"
+            fontSize="5"
+            fontWeight="bold"
+            fill={currentGear === "S" ? "rgb(59, 130, 246)" : "rgb(0, 0, 0)"}
+            pointerEvents="none"
+          >
+            S
+          </text>
+
+          {/* 3 - Top Middle */}
+          <circle
+            cx="50"
+            cy="13.1"
+            r="9.1"
+            fill={currentGear === "3" ? "rgb(59, 130, 246)" : "rgba(255, 255, 255, 0.02)"}
+            stroke={currentGear === "3" ? "rgb(147, 197, 253)" : "rgba(255, 255, 255, 0.1)"}
+            strokeWidth="0.5"
+            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s' }}
+            onClick={() => isEnabled && onGearChange("3")}
+          />
+          <text
+            x="50"
+            y="13.1"
+            textAnchor="middle"
+            dominantBaseline="middle"
+            fontSize="5"
+            fontWeight="bold"
+            fill={currentGear === "3" ? "rgb(59, 130, 246)" : "rgb(0, 0, 0)"}
+            pointerEvents="none"
+          >
+            3
+          </text>
+
+          {/* 2 - Top Right */}
+          <circle
+            cx="80.6"
+            cy="13.1"
+            r="9.1"
+            fill={currentGear === "2" ? "rgb(59, 130, 246)" : "rgba(255, 255, 255, 0.02)"}
+            stroke={currentGear === "2" ? "rgb(147, 197, 253)" : "rgba(255, 255, 255, 0.1)"}
+            strokeWidth="0.5"
+            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s' }}
+            onClick={() => isEnabled && onGearChange("2")}
+          />
+          <text
+            x="80.6"
+            y="13.1"
+            textAnchor="middle"
+            dominantBaseline="middle"
+            fontSize="5"
+            fontWeight="bold"
+            fill={currentGear === "2" ? "rgb(59, 130, 246)" : "rgb(0, 0, 0)"}
+            pointerEvents="none"
+          >
+            2
+          </text>
+
+          {/* 1 - Bottom Left */}
+          <circle
+            cx="19.4"
+            cy="85.4"
+            r="9.1"
+            fill={currentGear === "1" ? "rgb(59, 130, 246)" : "rgba(255, 255, 255, 0.02)"}
+            stroke={currentGear === "1" ? "rgb(147, 197, 253)" : "rgba(255, 255, 255, 0.1)"}
+            strokeWidth="0.5"
+            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s' }}
+            onClick={() => isEnabled && onGearChange("1")}
+          />
+          <text
+            x="19.4"
+            y="85.4"
+            textAnchor="middle"
+            dominantBaseline="middle"
+            fontSize="5"
+            fontWeight="bold"
+            fill={currentGear === "1" ? "rgb(59, 130, 246)" : "rgb(0, 0, 0)"}
+            pointerEvents="none"
+          >
+            1
+          </text>
+
+          {/* N - Bottom Middle */}
+          <circle
+            cx="50"
+            cy="85.4"
+            r="9.1"
+            fill={currentGear === "N" ? "rgb(59, 130, 246)" : "rgba(255, 255, 255, 0.02)"}
+            stroke={currentGear === "N" ? "rgb(147, 197, 253)" : "rgba(255, 255, 255, 0.1)"}
+            strokeWidth="0.5"
+            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s' }}
+            onClick={() => isEnabled && onGearChange("N")}
+          />
+          <text
+            x="50"
+            y="85.4"
+            textAnchor="middle"
+            dominantBaseline="middle"
+            fontSize="5"
+            fontWeight="bold"
+            fill={currentGear === "N" ? "rgb(59, 130, 246)" : "rgb(0, 0, 0)"}
+            pointerEvents="none"
+          >
+            N
+          </text>
+
+
+
+        </svg>
       </div>
 
       {/* Spacer */}
