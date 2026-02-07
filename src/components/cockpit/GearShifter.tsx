@@ -39,8 +39,6 @@ export const GearShifter = ({
 
   return (
     <div className="flex flex-col items-center h-full pt-1 pb-1 px-1 overflow-hidden">
-      <div className="racing-text text-[8px] sm:text-xs text-muted-foreground mb-2">TRANSMISSION</div>
-      
       {/* Gearbox Grid Container */}
       <div className="bg-card border-2 border-border rounded-lg p-2 space-y-1.5">
         {gearLayout.map((row, rowIdx) => (
@@ -55,14 +53,14 @@ export const GearShifter = ({
                   onClick={() => onGearChange(gear)}
                   disabled={!isEnabled}
                   className={`
-                    w-10 h-10 sm:w-12 sm:h-12 rounded-lg border-2 text-xs sm:text-sm font-bold racing-text
+                    w-8 h-8 sm:w-9 sm:h-9 rounded-lg border-2 text-xs sm:text-sm font-bold racing-text
                     transition-all duration-150 touch-feedback flex items-center justify-center
                     ${!isEnabled
                       ? 'bg-muted/40 border-muted/30 text-muted-foreground opacity-50 cursor-not-allowed'
                       : isActive
                       ? isReverse
-                        ? "gear-reverse-active border-destructive bg-destructive/20 shadow-lg shadow-destructive/50"
-                        : "gear-active border-primary bg-primary/20 shadow-lg shadow-primary/50"
+                        ? "gear-reverse-active border-destructive bg-destructive/20"
+                        : "gear-active border-primary bg-primary/20"
                       : "bg-card border-border hover:border-primary/60 text-muted-foreground hover:text-foreground hover:bg-primary/5"
                     }
                   `}
@@ -102,16 +100,16 @@ export const GearShifter = ({
         <button
           onClick={onEmergencyStop}
           className={`
-            flex-1 rounded-md border-2 flex flex-col items-center justify-center p-1 h-8
+            flex-1 rounded-md border-2 flex flex-col items-center justify-center p-0.5 h-7
             transition-all duration-100 touch-feedback
             ${isEmergencyStop
-              ? 'bg-destructive border-destructive text-destructive-foreground glow-red'
+              ? 'bg-destructive border-destructive text-destructive-foreground'
               : 'bg-card border-destructive/50 text-destructive hover:bg-destructive/20'
             }
           `}
         >
-          <OctagonX className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
-          <span className="text-[4px] sm:text-[6px] font-bold racing-text leading-tight">BRAKE</span>
+          <OctagonX className="w-3 h-3" />
+          <span className="text-[4px] sm:text-[5px] font-bold racing-text leading-tight">BRAKE</span>
         </button>
         
         {/* AUTO Button */}
@@ -119,53 +117,16 @@ export const GearShifter = ({
           onClick={onAutoMode}
           disabled={isEmergencyStop}
           className={`
-            flex-1 rounded-md border-2 flex flex-col items-center justify-center p-1 h-8
+            flex-1 rounded-md border-2 flex flex-col items-center justify-center p-0.5 h-7
             transition-all duration-100 touch-feedback disabled:opacity-50
             ${isAutoMode
-              ? 'bg-primary border-primary text-primary-foreground glow-teal'
+              ? 'bg-primary border-primary text-primary-foreground'
               : 'bg-card border-primary/50 text-primary hover:bg-primary/20'
             }
           `}
         >
-          <Zap className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
-          <span className="text-[4px] sm:text-[6px] font-bold racing-text leading-tight">AUTO</span>
-        </button>
-      </div>
-
-      {/* START and STOP Buttons */}
-      <div className="flex gap-1 mt-1 w-full px-1">
-        {/* START Button */}
-        <button
-          onClick={onEngineStart}
-          disabled={isEngineRunning}
-          className={`
-            flex-1 rounded-md border-2 flex flex-col items-center justify-center p-1 h-8
-            transition-all duration-100 touch-feedback
-            ${isEngineRunning
-              ? 'bg-muted border-muted/50 text-muted-foreground cursor-not-allowed opacity-50'
-              : 'bg-primary border-primary text-primary-foreground hover:bg-primary/90 glow-teal'
-            }
-          `}
-        >
-          <Power className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
-          <span className="text-[4px] sm:text-[6px] font-bold racing-text leading-tight">START</span>
-        </button>
-
-        {/* STOP Button */}
-        <button
-          onClick={onEngineStop}
-          disabled={!isEngineRunning}
-          className={`
-            flex-1 rounded-md border-2 flex flex-col items-center justify-center p-1 h-8
-            transition-all duration-100 touch-feedback
-            ${!isEngineRunning
-              ? 'bg-muted border-muted/50 text-muted-foreground cursor-not-allowed opacity-50'
-              : 'bg-destructive border-destructive text-destructive-foreground hover:bg-destructive/90 glow-red'
-            }
-          `}
-        >
-          <PowerOff className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
-          <span className="text-[4px] sm:text-[6px] font-bold racing-text leading-tight">STOP</span>
+          <Zap className="w-3 h-3" />
+          <span className="text-[4px] sm:text-[5px] font-bold racing-text leading-tight">AUTO</span>
         </button>
       </div>
 
@@ -175,20 +136,60 @@ export const GearShifter = ({
           onClick={onIRToggle}
           disabled={!isEngineRunning}
           className={`
-            w-12 h-12 mx-auto rounded-full border-2 flex items-center justify-center
+            w-9 h-9 mx-auto rounded-full border-2 flex items-center justify-center
             transition-all duration-100 touch-feedback
             ${!isEngineRunning
               ? 'bg-muted border-muted/50 text-muted-foreground cursor-not-allowed opacity-50'
               : isIREnabled
-              ? 'bg-primary border-primary text-primary-foreground glow-teal'
+              ? 'bg-primary border-primary text-primary-foreground'
               : 'bg-card border-primary/50 text-primary hover:bg-primary/20'
             }
           `}
           title={isIREnabled ? 'IR Sensors: ON' : 'IR Sensors: OFF'}
         >
-          <Radio className="w-4 h-4 sm:w-5 sm:h-5" />
+          <Radio className="w-3.5 h-3.5" />
         </button>
         <div className="flex-1" />
+      </div>
+
+      {/* Spacer */}
+      <div className="flex-1" />
+
+      {/* START and STOP Buttons */}
+      <div className="flex gap-1 w-full px-1 pb-1">
+        {/* START Button */}
+        <button
+          onClick={onEngineStart}
+          disabled={isEngineRunning}
+          className={`
+            flex-1 rounded-md border-2 flex flex-col items-center justify-center p-0.5 h-7
+            transition-all duration-100 touch-feedback
+            ${isEngineRunning
+              ? 'bg-muted border-muted/50 text-muted-foreground cursor-not-allowed opacity-50'
+              : 'bg-primary border-primary text-primary-foreground hover:bg-primary/90'
+            }
+          `}
+        >
+          <Power className="w-3 h-3" />
+          <span className="text-[4px] sm:text-[5px] font-bold racing-text leading-tight">START</span>
+        </button>
+
+        {/* STOP Button */}
+        <button
+          onClick={onEngineStop}
+          disabled={!isEngineRunning}
+          className={`
+            flex-1 rounded-md border-2 flex flex-col items-center justify-center p-0.5 h-7
+            transition-all duration-100 touch-feedback
+            ${!isEngineRunning
+              ? 'bg-muted border-muted/50 text-muted-foreground cursor-not-allowed opacity-50'
+              : 'bg-destructive border-destructive text-destructive-foreground hover:bg-destructive/90'
+            }
+          `}
+        >
+          <PowerOff className="w-3 h-3" />
+          <span className="text-[4px] sm:text-[5px] font-bold racing-text leading-tight">STOP</span>
+        </button>
       </div>
     </div>
   );

@@ -296,11 +296,11 @@
   }
   
   .gear-active {
-    @apply glow-teal bg-primary text-primary-foreground;
+    @apply bg-primary text-primary-foreground;
   }
   
   .gear-reverse-active {
-    @apply glow-red bg-destructive text-destructive-foreground;
+    @apply bg-destructive text-destructive-foreground;
   }
   
   /* Racing Typography */
