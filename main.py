@@ -191,39 +191,23 @@ def physics_loop():
         # --- OBSTACLE AVOIDANCE STATE MACHINE ---
         if car_state["ir_enabled"] and gas and (left_obstacle or right_obstacle):
             if obstacle_state == "IDLE":
-                # Trigger: Obstacle detected, enter STOPPED state
-                obstacle_state = "STOPPED"
-                car_state["obstacle_state"] = "STOPPED"
-                stop_timer = 50  # 1 second (50 cycles × 20ms)
-                print("🚨 OBSTACLE(S) DETECTED - EMERGENCY STOP FOR 1 SECOND")
-                current = 0  # Immediately cut power
-                car_state["current_pwm"] = current
-            
-            elif obstacle_state == "STOPPED":
-                # In stopped state: keep speed at 0
-                current = 0
-                car_state["current_pwm"] = current
-                stop_timer -= 1
+                # Trigger: Obstacle detected, enter STEERING state immediately
+                obstacle_state = "STEERING"
+                car_state["obstacle_state"] = "STEERING"
                 
-                if stop_timer <= 0:
-                    # Stop period complete, transition to STEERING
-                    obstacle_state = "STEERING"
-                    car_state["obstacle_state"] = "STEERING"
-                    steering_timer = 0
-                    
-                    # Determine steering direction based on obstacles
-                    if left_obstacle and right_obstacle:
-                        # Both obstacles: alternate steering left/right
-                        target_steer_angle = 90  # Start steering right
-                        print("🚨 BOTH OBSTACLES - AUTO-STEERING RIGHT")
-                    elif left_obstacle:
-                        # Left obstacle: steer right 90°
-                        target_steer_angle = 90
-                        print("🚨 LEFT OBSTACLE - STEERING RIGHT 90°")
-                    else:  # right_obstacle
-                        # Right obstacle: steer left 90°
-                        target_steer_angle = -90
-                        print("🚨 RIGHT OBSTACLE - STEERING LEFT 90°")
+                # Determine steering direction based on obstacles
+                if left_obstacle and right_obstacle:
+                    # Both obstacles: steer right
+                    target_steer_angle = 90
+                    print("🚨 BOTH OBSTACLES DETECTED - AUTO-STEERING RIGHT")
+                elif left_obstacle:
+                    # Left obstacle: steer right 90°
+                    target_steer_angle = 90
+                    print("🚨 LEFT OBSTACLE DETECTED - STEERING RIGHT 90°")
+                else:  # right_obstacle
+                    # Right obstacle: steer left 90°
+                    target_steer_angle = -90
+                    print("🚨 RIGHT OBSTACLE DETECTED - STEERING LEFT 90°")
             
             elif obstacle_state == "STEERING":
                 # In steering state: apply target angle
