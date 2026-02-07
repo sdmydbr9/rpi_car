@@ -212,35 +212,49 @@ export const ImmersiveHUD = ({
         
         {/* Top Left - RPM Gauge */}
          <div className="absolute top-4 left-4 z-20 pointer-events-none">
-          <div className="w-24 h-24 rounded-full bg-background/40 backdrop-blur-md border border-border/50 flex flex-col items-center justify-center">
-            <svg viewBox="0 0 100 100" className={`w-20 h-20 ${isRedline ? 'animate-[shake_0.1s_infinite]' : ''}`}>
-              {/* Background arc */}
-              <path
-                d="M 15 72 A 40 40 0 1 1 85 72"
-                fill="none"
-                stroke="hsl(var(--muted))"
-                strokeWidth="6"
-                strokeLinecap="round"
-              />
-              {/* Active arc */}
-              <path
-                d="M 15 72 A 40 40 0 1 1 85 72"
-                fill="none"
-                stroke={isRedline ? "hsl(var(--destructive))" : "hsl(var(--primary))"}
-                strokeWidth="6"
-                strokeLinecap="round"
-                strokeDasharray="220"
-                strokeDashoffset={220 - (220 * rpm) / 100}
-                style={{
-                  filter: rpm > 50 ? `drop-shadow(0 0 6px ${isRedline ? 'hsl(var(--destructive))' : 'hsl(var(--primary))'})` : 'none',
-                  transition: 'stroke-dashoffset 0.1s ease-out'
-                }}
-              />
-              <text x="50" y="55" textAnchor="middle" fill="hsl(var(--foreground))" fontSize="16" fontWeight="bold">
-                {Math.round(rpm)}%
-              </text>
-            </svg>
-            <div className="text-[10px] racing-text text-primary -mt-2">RPM</div>
+          <div className="flex items-center gap-2">
+            <div className="w-24 h-24 rounded-full bg-background/40 backdrop-blur-md border border-border/50 flex flex-col items-center justify-center">
+              <svg viewBox="0 0 100 100" className={`w-20 h-20 ${isRedline ? 'animate-[shake_0.1s_infinite]' : ''}`}>
+                {/* Background arc */}
+                <path
+                  d="M 15 72 A 40 40 0 1 1 85 72"
+                  fill="none"
+                  stroke="hsl(var(--muted))"
+                  strokeWidth="6"
+                  strokeLinecap="round"
+                />
+                {/* Active arc */}
+                <path
+                  d="M 15 72 A 40 40 0 1 1 85 72"
+                  fill="none"
+                  stroke={isRedline ? "hsl(var(--destructive))" : "hsl(var(--primary))"}
+                  strokeWidth="6"
+                  strokeLinecap="round"
+                  strokeDasharray="220"
+                  strokeDashoffset={220 - (220 * rpm) / 100}
+                  style={{
+                    filter: rpm > 50 ? `drop-shadow(0 0 6px ${isRedline ? 'hsl(var(--destructive))' : 'hsl(var(--primary))'})` : 'none',
+                    transition: 'stroke-dashoffset 0.1s ease-out'
+                  }}
+                />
+                <text x="50" y="55" textAnchor="middle" fill="hsl(var(--foreground))" fontSize="16" fontWeight="bold">
+                  {Math.round(rpm)}%
+                </text>
+              </svg>
+              <div className="text-[10px] racing-text text-primary -mt-2">RPM</div>
+            </div>
+            
+            {/* E-Brake Toggle */}
+            <button
+              onClick={handleEBrake}
+              className={`pointer-events-auto px-3 py-1.5 rounded text-xs racing-text border transition-all ${
+                eBrakeActive
+                  ? 'bg-destructive text-destructive-foreground border-destructive glow-red'
+                  : 'bg-background/40 backdrop-blur-md text-muted-foreground border-border/50 hover:border-destructive'
+              }`}
+            >
+              E-BRAKE {eBrakeActive ? 'ON' : 'OFF'}
+            </button>
           </div>
         </div>
         
@@ -335,39 +349,25 @@ export const ImmersiveHUD = ({
         
         {/* Bottom Left - Brake Zone */}
          <div className="absolute bottom-4 left-4 pointer-events-auto z-20">
-          <div className="flex flex-col items-start gap-2">
-            {/* E-Brake Toggle */}
-            <button
-              onClick={handleEBrake}
-              className={`px-3 py-1.5 rounded text-xs racing-text border transition-all ${
-                eBrakeActive
-                  ? 'bg-destructive text-destructive-foreground border-destructive glow-red'
-                  : 'bg-background/40 backdrop-blur-md text-muted-foreground border-border/50 hover:border-destructive'
-              }`}
-            >
-              E-BRAKE {eBrakeActive ? 'ON' : 'OFF'}
-            </button>
-            
-            {/* Brake Pedal */}
-            <button
-              onTouchStart={handleBrakeStart}
-              onTouchEnd={handleBrakeEnd}
-              onMouseDown={handleBrakeStart}
-              onMouseUp={handleBrakeEnd}
-              onMouseLeave={handleBrakeEnd}
-              className={`w-32 h-32 rounded-2xl flex flex-col items-center justify-center transition-all ${
-                brake
-                  ? 'bg-destructive/80 backdrop-blur-md border-2 border-destructive glow-red scale-95'
-                  : 'bg-destructive/30 backdrop-blur-md border border-destructive/50 hover:bg-destructive/40'
-              }`}
-            >
-              <svg className="w-12 h-12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <rect x="6" y="4" width="12" height="16" rx="2" />
-                <line x1="6" y1="8" x2="18" y2="8" />
-              </svg>
-              <span className="text-xs racing-text mt-1">BRAKE</span>
-            </button>
-          </div>
+          {/* Brake Pedal */}
+          <button
+            onTouchStart={handleBrakeStart}
+            onTouchEnd={handleBrakeEnd}
+            onMouseDown={handleBrakeStart}
+            onMouseUp={handleBrakeEnd}
+            onMouseLeave={handleBrakeEnd}
+            className={`w-32 h-32 rounded-2xl flex flex-col items-center justify-center transition-all ${
+              brake
+                ? 'bg-destructive/80 backdrop-blur-md border-2 border-destructive glow-red scale-95'
+                : 'bg-destructive/30 backdrop-blur-md border border-destructive/50 hover:bg-destructive/40'
+            }`}
+          >
+            <svg className="w-12 h-12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="6" y="4" width="12" height="16" rx="2" />
+              <line x1="6" y1="8" x2="18" y2="8" />
+            </svg>
+            <span className="text-xs racing-text mt-1">BRAKE</span>
+          </button>
         </div>
         
         {/* Bottom Right - Throttle Zone */}

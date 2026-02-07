@@ -89,7 +89,7 @@ export const GearShifter = ({
       </div>
 
       {/* IR and SONAR and AUTOPILOT - Side by Side Round Buttons */}
-      <div className="flex w-full gap-1 mb-1.5">
+      <div className="flex w-full gap-1 mb-1.5 justify-center">
         {/* IR Button - Round */}
         <button
           onClick={onIRToggle}
