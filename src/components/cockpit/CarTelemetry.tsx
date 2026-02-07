@@ -10,6 +10,7 @@ interface CarTelemetryProps {
   speed: number;
   onLaunch: () => void;
   onDonut: () => void;
+  isEngineRunning?: boolean;
 }
 
 export const CarTelemetry = ({
@@ -20,6 +21,7 @@ export const CarTelemetry = ({
   speed,
   onLaunch,
   onDonut,
+  isEngineRunning = false,
 }: CarTelemetryProps) => {
   const [launchActive, setLaunchActive] = useState(false);
   const [donutActive, setDonutActive] = useState(false);
@@ -42,7 +44,7 @@ export const CarTelemetry = ({
   return (
     <div className="flex flex-col items-center justify-center h-full p-0.5 overflow-hidden">
       {/* Speedometer at top */}
-      <Speedometer speed={speed} maxSpeed={100} />
+      <Speedometer speed={speed} maxSpeed={100} isEngineRunning={isEngineRunning} />
       
       <div className="relative w-[min(22vw,8rem)] mt-0.5">
         {/* Car Body - Top Down View */}

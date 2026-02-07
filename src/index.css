@@ -323,6 +323,13 @@
     animation: telemetry-wave 3s linear infinite;
   }
   
+  /* Needle Sweep Animation */
+  @keyframes needleSweep {
+    0% { transform: rotate(-135deg); transform-origin: 50px 50px; }
+    50% { transform: rotate(135deg); transform-origin: 50px 50px; }
+    100% { transform: rotate(-135deg); transform-origin: 50px 50px; }
+  }
+  
   /* Steering Wheel Rotation */
   .steering-wheel {
     transition: transform 0.05s ease-out;

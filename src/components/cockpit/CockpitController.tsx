@@ -288,6 +288,7 @@ export const CockpitController = () => {
               speed={controlState.speed}
               onLaunch={handleLaunch}
               onDonut={handleDonut}
+              isEngineRunning={isEngineRunning}
             />
           </div>
           

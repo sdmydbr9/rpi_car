@@ -1,9 +1,27 @@
+import { useState, useEffect } from "react";
+
 interface SpeedometerProps {
   speed: number; // 0-100
   maxSpeed?: number;
+  isEngineRunning?: boolean;
 }
 
-export const Speedometer = ({ speed, maxSpeed = 100 }: SpeedometerProps) => {
+export const Speedometer = ({ speed, maxSpeed = 100, isEngineRunning = false }: SpeedometerProps) => {
+  const [performSweep, setPerformSweep] = useState(false);
+  const [wasEngineRunning, setWasEngineRunning] = useState(false);
+
+  // Trigger needle sweep when engine starts
+  useEffect(() => {
+    if (isEngineRunning && !wasEngineRunning) {
+      setPerformSweep(true);
+      setWasEngineRunning(true);
+      // Stop the animation after it completes
+      setTimeout(() => setPerformSweep(false), 800);
+    } else if (!isEngineRunning) {
+      setWasEngineRunning(false);
+    }
+  }, [isEngineRunning, wasEngineRunning]);
+
   const percentage = Math.min(100, Math.max(0, (speed / maxSpeed) * 100));
   // Needle rotates from -135deg (0) to +135deg (max) - total 270deg sweep
   const needleRotation = -135 + (percentage / 100) * 270;
@@ -80,7 +98,10 @@ export const Speedometer = ({ speed, maxSpeed = 100 }: SpeedometerProps) => {
           {ticks}
           
           {/* Needle */}
-          <g transform={`rotate(${needleRotation} 50 50)`} style={{ transition: 'transform 0.1s ease-out' }}>
+          <g transform={`rotate(${performSweep ? -135 : needleRotation} 50 50)`} style={{ 
+            transition: performSweep ? 'none' : 'transform 0.1s ease-out',
+            animation: performSweep ? 'needleSweep 0.8s ease-in-out' : 'none'
+          }}>
             <polygon
               points="50,15 48,50 52,50"
               fill={isHighSpeed ? "hsl(var(--destructive))" : "hsl(var(--primary))"}
