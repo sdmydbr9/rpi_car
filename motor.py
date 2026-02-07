@@ -1,46 +1,62 @@
+"""
+motor.py — CarSystem: Low-level motor controller for L298N dual H-bridge.
+
+Provides a clean API for the AutoPilot and manual control:
+  - set_speed(0-100)       Forward at given PWM %
+  - set_steering(-90..+90) Differential arc turn while driving
+  - pivot_turn("left"|"right", speed)  True tank turn: opposite wheels
+  - reverse(speed)         Straight reverse at given PWM %
+  - brake()                Magnetic lock (H-bridge short-circuit braking)
+  - stop()                 Gentle stop (PWM → 0, pins LOW)
+  - cleanup()              Release GPIO resources
+"""
+
 import time
 import os
 
-# Create a mock GPIO class for testing
+
+# ──────────────────────────────────────────────
+# GPIO abstraction (real RPi.GPIO or mock)
+# ──────────────────────────────────────────────
+
 class MockGPIO:
+    """Fake GPIO for off-Pi testing."""
     BCM = "BCM"
     IN = "IN"
     OUT = "OUT"
-    
+
     def __init__(self):
-        self.pin_states = {}  # For testing: store pin values
-    
+        self.pin_states = {}
+
     def setmode(self, mode): pass
     def setwarnings(self, val): pass
     def setup(self, pins, mode): pass
-    
+
     def input(self, pin):
-        """Return the current pin state (default 1 if not set)"""
         return self.pin_states.get(pin, 1)
-    
+
     def output(self, pins, state): pass
     def cleanup(self): pass
-    
+
     class PWM:
         def __init__(self, pin, freq): pass
         def start(self, val): pass
         def stop(self): pass
         def ChangeDutyCycle(self, val): pass
-    
+
     def PWM(self, pin, freq):
         return self.PWM(pin, freq)
-    
-    # Test helper: set pin state directly
+
     def set_pin(self, pin, value):
-        """For testing: manually set a pin's input state"""
         self.pin_states[pin] = value
 
-# Create a GPIO wrapper that can handle both real and mock GPIO
+
 class GPIOWrapper:
+    """Thin wrapper: routes to real GPIO when available, mock otherwise."""
+
     def __init__(self, real_gpio=None):
         self.real_gpio = real_gpio
-        self.pin_states = {}  # For testing with real GPIO
-        # Use real GPIO constants if available, otherwise use strings
+        self.pin_states = {}
         if real_gpio:
             self.BCM = real_gpio.BCM
             self.IN = real_gpio.IN
@@ -49,59 +65,58 @@ class GPIOWrapper:
             self.BCM = "BCM"
             self.IN = "IN"
             self.OUT = "OUT"
-    
+
     def setmode(self, mode):
         if self.real_gpio:
             self.real_gpio.setmode(mode)
-    
+
     def setwarnings(self, val):
         if self.real_gpio:
             self.real_gpio.setwarnings(val)
-    
+
     def setup(self, pins, mode):
         if self.real_gpio:
             self.real_gpio.setup(pins, mode)
-    
+
     def input(self, pin):
-        """Read from pin - check override first, then real GPIO"""
         if pin in self.pin_states:
             return self.pin_states[pin]
         if self.real_gpio:
             return self.real_gpio.input(pin)
         return 1
-    
+
     def output(self, pins, state):
         if self.real_gpio:
             self.real_gpio.output(pins, state)
-    
+
     def cleanup(self):
         if self.real_gpio:
             self.real_gpio.cleanup()
-    
+
     def PWM(self, pin, freq):
         if self.real_gpio:
             return self.real_gpio.PWM(pin, freq)
         return MockGPIO.PWM(pin, freq)
-    
+
     def set_pin(self, pin, value):
-        """For testing: override a pin's input state"""
         self.pin_states[pin] = value
 
-# Try to use real GPIO, fall back to mock for testing
+
+# ──────────────────────────────────────────────
+# Detect hardware
+# ──────────────────────────────────────────────
+
 GPIO_AVAILABLE = False
 real_gpio = None
 
-# Check if we're on a real Raspberry Pi
-if os.path.exists('/proc/device-tree/model'):  # Running on RPi
+if os.path.exists('/proc/device-tree/model'):
     try:
         import RPi.GPIO as real_gpio
     except Exception as e:
         print(f"⚠️  GPIO import failed: {e}")
 
-# Create the GPIO wrapper
 GPIO = GPIOWrapper(real_gpio)
 
-# Try to initialize real GPIO if available
 if real_gpio:
     try:
         GPIO.setmode(GPIO.BCM)
@@ -110,236 +125,173 @@ if real_gpio:
     except Exception as e:
         print(f"⚠️  GPIO initialization failed: {e}")
 
+
+# ──────────────────────────────────────────────
+# CarSystem
+# ──────────────────────────────────────────────
+
 class CarSystem:
+    """
+    Low-level motor interface for a 2-motor (L298N) differential-drive car.
+
+    Direction convention (inverted H-bridge logic):
+        Forward  → IN_A=LOW,  IN_B=HIGH
+        Reverse  → IN_A=HIGH, IN_B=LOW
+        Brake    → IN_A=HIGH, IN_B=HIGH  (+ 100 % PWM = magnetic lock)
+        Coast    → IN_A=LOW,  IN_B=LOW   (+ 0 % PWM)
+    """
+
+    # Pin assignments (BCM)
+    IN1 = 17;  IN2 = 27   # Left motor direction
+    IN3 = 22;  IN4 = 23   # Right motor direction
+    ENA = 18;  ENB = 19   # Left / Right PWM
+    LEFT_IR = 5;  RIGHT_IR = 6  # IR obstacle sensors
+    PWM_FREQ = 1000        # Hz
+
     def __init__(self):
-        # --- HARDWARE CONFIGURATION ---
         GPIO.setmode(GPIO.BCM)
         GPIO.setwarnings(False)
 
-        # Pins (User Verified)
-        self.IN1 = 17; self.IN2 = 27  # Left
-        self.IN3 = 22; self.IN4 = 23  # Right
-        self.ENA = 18; self.ENB = 19  # Speed
-        
-        # IR Obstacle Sensors
-        self.LEFT_IR = 5   # GPIO 5 - Left Front Obstacle Detection
-        self.RIGHT_IR = 6  # GPIO 6 - Right Front Obstacle Detection
-        self.AVOID_SWERVE_ANGLE = 85  # Degrees to swerve when obstacle detected (increased for aggressive steering)
-
-        # Setup Motor Pins
+        # Motor direction pins
         try:
-            GPIO.setup([self.IN1, self.IN2, self.IN3, self.IN4, self.ENA, self.ENB], GPIO.OUT)
+            GPIO.setup([self.IN1, self.IN2, self.IN3, self.IN4,
+                        self.ENA, self.ENB], GPIO.OUT)
         except Exception as e:
             print(f"⚠️  Motor pin setup failed: {e}")
-        
-        # Setup IR Sensor Pins (Input)
+
+        # IR sensor pins
         try:
             GPIO.setup([self.LEFT_IR, self.RIGHT_IR], GPIO.IN)
         except Exception as e:
             print(f"⚠️  IR sensor pin setup failed: {e}")
 
-        # PWM Init
+        # PWM channels
         try:
-            self.pwm_a = GPIO.PWM(self.ENA, 1000)
-            self.pwm_b = GPIO.PWM(self.ENB, 1000)
+            self.pwm_a = GPIO.PWM(self.ENA, self.PWM_FREQ)
+            self.pwm_b = GPIO.PWM(self.ENB, self.PWM_FREQ)
             self.pwm_a.start(0)
             self.pwm_b.start(0)
         except Exception as e:
             print(f"⚠️  PWM setup failed: {e}")
-            # Create dummy PWM objects
+
             class DummyPWM:
                 def start(self, val): pass
                 def stop(self): pass
                 def ChangeDutyCycle(self, val): pass
+
             self.pwm_a = DummyPWM()
             self.pwm_b = DummyPWM()
 
-        # State Variables
-        self.current_gear = 1
-        self.steering_angle = 0
-        self.user_steering_angle = 0  # Manual input (preserved during avoidance)
-        self.is_gas_pressed = False
-        self.current_speed = 0  # Track current motor speed for acceleration
-        self.acceleration_rate = 5  # Speed increase per update cycle (0-100 scale)
-        self.last_update_time = time.time()
-        self.left_obstacle = False   # IR sensor state
-        self.right_obstacle = False  # IR sensor state
-        self.obstacle_avoidance_active = False  # Track if currently avoiding
-        self.last_left_obstacle = False  # Track state changes
-        self.last_right_obstacle = False
-        
-        # Obstacle Avoidance State Machine
-        self.avoidance_state = "IDLE"  # IDLE, STEERING
-        self.obstacle_clear_timer = 0  # Timer to confirm obstacle is cleared
-        self.obstacle_clear_threshold = 10  # Cycles to confirm obstacle is gone (0.2s typical)
-        self.safe_steer_angle = 75     # Smart steering angle (less aggressive than 90°)
-        
-        # Max Speed per Gear (0-100)
-        self.GEAR_SPEEDS = {0: 0, 1: 30, 2: 50, 3: 75, 4: 100, -1: 60}  # -1 is reverse gear at 60%
-        
-        # Emergency Brake Settings
-        self.EMERGENCY_BRAKE_RATE = 5.0  # Fast deceleration on obstacle detection
+        # Internal bookkeeping
+        self._current_speed = 0
+        self._steering_angle = 0
 
-    def check_obstacles(self):
-        """Read IR sensors. IR sensors are active LOW: 0 = obstacle, 1 = no obstacle"""
-        # Invert the reading so True = obstacle detected
-        self.left_obstacle = not GPIO.input(self.LEFT_IR)
-        self.right_obstacle = not GPIO.input(self.RIGHT_IR)
-        
-        # Print only on state change
-        if self.left_obstacle and not self.last_left_obstacle:
-            print("⚠️  LEFT OBSTACLE DETECTED!")
-        if self.right_obstacle and not self.last_right_obstacle:
-            print("⚠️  RIGHT OBSTACLE DETECTED!")
-        if not self.left_obstacle and self.last_left_obstacle:
-            print("✅ LEFT CLEAR")
-        if not self.right_obstacle and self.last_right_obstacle:
-            print("✅ RIGHT CLEAR")
-        
-        self.last_left_obstacle = self.left_obstacle
-        self.last_right_obstacle = self.right_obstacle
+    # ── raw GPIO helper ─────────────────────────
 
-    def update(self):
-        """Calculates and applies motor speeds based on state"""
-        # Check obstacles first
-        self.check_obstacles()
-        
-        # --- SMART OBSTACLE AVOIDANCE STATE MACHINE ---
-        obstacle_detected = self.left_obstacle or self.right_obstacle
-        
-        if self.is_gas_pressed and obstacle_detected:
-            # Only avoidance while actively moving (gas pressed)
-            if self.avoidance_state == "IDLE":
-                # Trigger: Obstacle detected, start STEERING immediately
-                self.avoidance_state = "STEERING"
-                self.obstacle_clear_timer = 0
-                
-                # Smart steering: Determine direction to steer AWAY from obstacle
-                if self.left_obstacle and self.right_obstacle:
-                    # Both obstacles: steer right (away from both directions)
-                    self.steering_angle = self.safe_steer_angle
-                    print("🚨 BOTH OBSTACLES DETECTED - AUTO-STEERING RIGHT 75°")
-                elif self.left_obstacle:
-                    # Left obstacle: steer RIGHT (away from left)
-                    self.steering_angle = self.safe_steer_angle
-                    print("⚠️  LEFT OBSTACLE DETECTED - STEERING RIGHT 75°")
-                else:  # right_obstacle
-                    # Right obstacle: steer LEFT (away from right)
-                    self.steering_angle = -self.safe_steer_angle
-                    print("⚠️  RIGHT OBSTACLE DETECTED - STEERING LEFT 75°")
-            
-            elif self.avoidance_state == "STEERING":
-                # Continue steering: apply smart steering angle based on current obstacles
-                # This allows dynamic adjustment if situation changes
-                if self.left_obstacle and self.right_obstacle:
-                    # Both obstacles: maintain right steer
-                    self.steering_angle = self.safe_steer_angle
-                elif self.left_obstacle:
-                    # Left obstacle: maintain right steer
-                    self.steering_angle = self.safe_steer_angle
-                else:  # right_obstacle
-                    # Right obstacle: maintain left steer
-                    self.steering_angle = -self.safe_steer_angle
-                
-                # Obstacle gone? Start confirmation timer
-                self.obstacle_clear_timer += 1
+    def _set_raw_motors(self, speed_l, speed_r, l_fwd, r_fwd):
+        """
+        Write direction + PWM to both motors.
+        l_fwd / r_fwd: True = forward, False = reverse.
+        """
+        # Left motor direction
+        if l_fwd:
+            GPIO.output(self.IN1, False)
+            GPIO.output(self.IN2, True)
         else:
-            # No obstacles detected or gas released
-            if self.avoidance_state != "IDLE":
-                # Try to exit avoidance mode
-                if obstacle_detected:
-                    # Obstacle came back but gas released, just stop steering
-                    self.avoidance_state = "IDLE"
-                    self.steering_angle = self.user_steering_angle
-                else:
-                    # Obstacle truly clear - reset steering
-                    self.avoidance_state = "IDLE"
-                    self.steering_angle = self.user_steering_angle
-                    if self.obstacle_clear_timer > 0:
-                        print("✅ OBSTACLE CLEARED - RESUMING NORMAL CONTROL")
-                    self.obstacle_clear_timer = 0
-        
-        # --- SPEED HANDLING ---
-        if self.avoidance_state == "IDLE":
-            # Normal operation: target gear speed
-            base_speed = self.GEAR_SPEEDS.get(self.current_gear, 0)
-            
-            # Deadman Switch: Stop if Gas released or Neutral
-            if not self.is_gas_pressed or self.current_gear == 0:
-                self.current_speed = 0
-                self._set_raw_motors(0, 0, False, False, False, False)
-                return
-
-            # Normal acceleration logic
-            if self.current_speed < base_speed:
-                self.current_speed += self.acceleration_rate
-                if self.current_speed > base_speed:
-                    self.current_speed = base_speed
-            elif self.current_speed > base_speed:
-                self.current_speed -= self.acceleration_rate
-                if self.current_speed < base_speed:
-                    self.current_speed = base_speed
+            GPIO.output(self.IN1, True)
+            GPIO.output(self.IN2, False)
+        # Right motor direction
+        if r_fwd:
+            GPIO.output(self.IN3, False)
+            GPIO.output(self.IN4, True)
         else:
-            # During obstacle avoidance (STEERING): reduce speed for stability while steering
-            # Reduce to 60% of current speed for smoother steering
-            avoidance_speed = self.current_speed * 0.6
-            if self.current_speed > avoidance_speed:
-                self.current_speed -= self.acceleration_rate * 0.5  # Gradual reduction
-                if self.current_speed < avoidance_speed:
-                    self.current_speed = avoidance_speed
+            GPIO.output(self.IN3, True)
+            GPIO.output(self.IN4, False)
 
-        # Steering Physics (Mixing)
-        # Intensity 0.0 to 1.0
-        intensity = abs(self.steering_angle) / 90.0 
-        inner_wheel_factor = 1.0 - (intensity * 0.9) # Inner wheel drops to 10% at max turn
-        
-        left_speed = self.current_speed
-        right_speed = self.current_speed
-        
-        # Note: Using your "Inverted Logic" (False = Forward)
-        # Left Fwd: (False, True) | Right Fwd: (False, True)
-        l_a = False; l_b = True
-        r_a = False; r_b = True
+        self.pwm_a.ChangeDutyCycle(int(max(0, min(100, speed_l))))
+        self.pwm_b.ChangeDutyCycle(int(max(0, min(100, speed_r))))
 
-        if self.steering_angle < -5: # LEFT TURN
-            left_speed = self.current_speed * inner_wheel_factor
-        
-        elif self.steering_angle > 5: # RIGHT TURN
-            right_speed = self.current_speed * inner_wheel_factor
+    # ── steering mixer (differential) ───────────
 
-        self._set_raw_motors(left_speed, right_speed, l_a, l_b, r_a, r_b)
+    def _apply_steering(self, speed, angle, forward=True):
+        """
+        Compute per-wheel speeds from a base speed + steering angle,
+        then write to motors.
+        """
+        turn_factor = abs(angle) / 90.0
+        inner = speed * (1.0 - turn_factor * 0.9)  # drops to 10 % at ±90°
 
-    def _set_raw_motors(self, speed_l, speed_r, la, lb, ra, rb):
-        GPIO.output(self.IN1, la)
-        GPIO.output(self.IN2, lb)
-        GPIO.output(self.IN3, ra)
-        GPIO.output(self.IN4, rb)
-        self.pwm_a.ChangeDutyCycle(int(speed_l))
-        self.pwm_b.ChangeDutyCycle(int(speed_r))
+        left_speed = speed
+        right_speed = speed
+
+        if angle < -5:     # turning LEFT  → slow left wheel
+            left_speed = inner
+        elif angle > 5:    # turning RIGHT → slow right wheel
+            right_speed = inner
+
+        self._set_raw_motors(left_speed, right_speed, forward, forward)
+
+    # ── public API ──────────────────────────────
+
+    def set_speed(self, speed):
+        """Drive forward at *speed* (0-100) using the current steering angle."""
+        speed = max(0, min(100, speed))
+        self._current_speed = speed
+        self._apply_steering(speed, self._steering_angle, forward=True)
 
     def set_steering(self, angle):
-        self.user_steering_angle = angle
-        self.update()
+        """
+        Set steering angle (-90 to +90).  Negative = left, positive = right.
+        Immediately re-applies the current speed with the new angle.
+        """
+        angle = max(-90, min(90, angle))
+        self._steering_angle = angle
+        if self._current_speed > 0:
+            self._apply_steering(self._current_speed, angle, forward=True)
 
-    def set_gear(self, gear):
-        self.current_gear = gear
-        self.current_speed = 0  # Reset acceleration when changing gears
-        self.update()
+    def reverse(self, speed):
+        """Drive both motors in reverse at *speed* (0-100). Steering centred."""
+        speed = max(0, min(100, speed))
+        self._current_speed = speed
+        self._set_raw_motors(speed, speed, False, False)
 
-    def set_gas(self, pressed):
-        self.is_gas_pressed = pressed
-        self.update()
+    def pivot_turn(self, direction, speed=50):
+        """
+        True tank turn: one side forward, the other side reverse.
+        *direction*: "left" or "right".
+        *speed*: PWM % for both motors (default 50).
+        """
+        speed = max(0, min(100, speed))
+        if direction == "left":
+            # Left motor reverse, Right motor forward → car spins left
+            self._set_raw_motors(speed, speed, False, True)
+        else:
+            # Left motor forward, Right motor reverse → car spins right
+            self._set_raw_motors(speed, speed, True, False)
 
-    def emergency_brake(self):
-        self.is_gas_pressed = False
-        # Magnetic Lock
-        GPIO.output([self.IN1, self.IN2, self.IN3, self.IN4], False)
+    def brake(self):
+        """Magnetic lock: short-circuit both H-bridges at 100 % PWM."""
+        GPIO.output(self.IN1, True);  GPIO.output(self.IN2, True)
+        GPIO.output(self.IN3, True);  GPIO.output(self.IN4, True)
         self.pwm_a.ChangeDutyCycle(100)
         self.pwm_b.ChangeDutyCycle(100)
-        time.sleep(0.5)
-        self._set_raw_motors(0, 0, False, False, False, False)
+        self._current_speed = 0
+
+    def stop(self):
+        """Gentle stop: PWM → 0, direction pins LOW (coast)."""
+        GPIO.output(self.IN1, False); GPIO.output(self.IN2, False)
+        GPIO.output(self.IN3, False); GPIO.output(self.IN4, False)
+        self.pwm_a.ChangeDutyCycle(0)
+        self.pwm_b.ChangeDutyCycle(0)
+        self._current_speed = 0
+        self._steering_angle = 0
 
     def cleanup(self):
-        self.pwm_a.stop()
-        self.pwm_b.stop()
+        """Release PWM and GPIO resources."""
+        self.stop()
+        try:
+            self.pwm_a.stop()
+            self.pwm_b.stop()
+        except Exception:
+            pass
         GPIO.cleanup()

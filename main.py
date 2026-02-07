@@ -12,15 +12,8 @@ import re
 from enum import Enum
 from collections import deque
 from sensors import SensorSystem
-
-# ==========================================
-# 🤖 AUTONOMOUS DRIVING STATES
-# ==========================================
-class State(Enum):
-    CRUISING = "CRUISING"      # Normal driving with proportional speed control
-    BRAKING = "BRAKING"        # Proportional braking based on distance
-    REVERSING = "REVERSING"    # Escape maneuver: backing up
-    TURNING = "TURNING"        # Escape maneuver: turning away from obstacle
+from motor import CarSystem
+from autopilot import AutoPilot, State
 
 # ==========================================
 # ⚙️ CONFIGURATION
@@ -150,6 +143,26 @@ except Exception as e:
     sensor_system = DummySensorSystem()
 
 # ==========================================
+# 🏎️ CARSYSTEM + AUTOPILOT INSTANTIATION
+# ==========================================
+car_system = CarSystem()
+
+def _get_sonar_for_autopilot():
+    return get_smoothed_sonar()
+
+def _get_ir_for_autopilot():
+    """Read IR sensors: True = obstacle detected (active LOW, inverted)."""
+    try:
+        left  = not GPIO.input(LEFT_IR)
+        right = not GPIO.input(RIGHT_IR)
+    except Exception:
+        left = False
+        right = False
+    return left, right
+
+autopilot = AutoPilot(car_system, _get_sonar_for_autopilot, _get_ir_for_autopilot)
+
+# ==========================================
 # 🧠 PHYSICS ENGINE (Background Thread)
 # ==========================================
 
@@ -178,11 +191,8 @@ car_state = {
     "sonar_enabled": True,   # Sonar sensor toggle
     # 🤖 AUTONOMOUS DRIVING MODE
     "autonomous_mode": False,  # Smart Driver autonomous mode toggle
-    "autonomous_state": State.CRUISING.value,  # Current autonomous driving state
-    "autonomous_target_speed": 0,  # Target speed calculated by autonomous logic
-    "escape_maneuver_timer": 0,  # Timer for escape maneuver phases
+    "autonomous_state": State.CRUISING.value,  # Current autonomous driving state (read from AutoPilot)
     "last_obstacle_side": "none",  # Track which side detected obstacle for escape logic
-    "dual_obstacle_escape": False,  # Flag for dual obstacle escape scenarios
 }
 
 # ==========================================
@@ -294,11 +304,9 @@ def physics_loop():
             car_state["is_braking"] = True
             car_state["gas_pressed"] = False
             car_state["brake_pressed"] = True
-            # In autonomous mode, also reset to safe state
-            if car_state["autonomous_mode"]:
-                car_state["autonomous_state"] = State.BRAKING.value
-                car_state["autonomous_target_speed"] = 0
-                car_state["escape_maneuver_timer"] = 0
+            # In autonomous mode, AutoPilot owns its own FSM —
+            # the emergency brake GPIO is applied below by the motor-output
+            # section; AutoPilot will detect the obstacle on its next tick.
         elif not car_state["autonomous_mode"]:
             # Enhanced: Combine IR sensors with sonar for better obstacle detection
             ir_obstacle_detected = car_state["ir_enabled"] and (left_obstacle or right_obstacle)
@@ -401,8 +409,8 @@ def physics_loop():
                     car_state["obstacle_state"] = "IDLE"
                 car_state["steer_angle"] = user_angle
         else:
-            # Autonomous mode active - skip manual obstacle avoidance
-            # drive_autonomous() thread controls gear/gas/steer/speed directly
+            # Autonomous mode active — AutoPilot drives motors directly
+            # via CarSystem; physics_loop only reads sensors for telemetry.
             obstacle_state = "IDLE"
             car_state["obstacle_state"] = "IDLE"
         
@@ -413,29 +421,13 @@ def physics_loop():
         if obstacle_state == "IDLE":
             # Check if autonomous mode is active
             if car_state["autonomous_mode"]:
-                # Autonomous mode takes precedence - use autonomous target speed
-                target = car_state["autonomous_target_speed"]
-                auto_state = car_state["autonomous_state"]
-                
-                # During BRAKING: slam to zero immediately (magnetic brake)
-                if auto_state == State.BRAKING.value:
-                    current = 0
-                    car_state["is_braking"] = True
-                # During REVERSING: bypass smooth ramp — apply power directly
-                # (Reverse needs immediate torque to escape, not a 1s ramp-up)
-                elif auto_state == State.REVERSING.value:
-                    current = target
-                    car_state["is_braking"] = False
-                else:
-                    # CRUISING / TURNING: smooth proportional ramping
-                    car_state["is_braking"] = False
-                    if current < target: 
-                        current += ACCEL_RATE
-                    elif current > target: 
-                        current -= COAST_RATE
-                
-                current = max(0, current)
-                car_state["current_pwm"] = current
+                # AutoPilot controls motors directly via CarSystem.
+                # We still need to update car_state["current_pwm"] for
+                # telemetry, but we do NOT write to GPIO here.
+                car_state["current_pwm"] = car_system._current_speed
+                car_state["is_braking"] = False
+                # Skip the rest of throttle physics — fall through to
+                # the motor-output section which will also be skipped.
             else:
                 # Manual mode - existing logic
                 # Check if emergency brake is active - if so, apply brakes and set to Neutral
@@ -533,6 +525,11 @@ def physics_loop():
             car_state["current_pwm"] = current
 
         # --- 3. STEERING MIXER (The Magic) ---
+        # In autonomous mode, CarSystem handles GPIO directly — skip mixer.
+        if car_state["autonomous_mode"]:
+            time.sleep(0.02)
+            continue
+
         # We calculate separate speeds for Left and Right motors
         left_motor_speed = current
         right_motor_speed = current
@@ -596,201 +593,26 @@ def physics_loop():
 
 def drive_autonomous():
     """
-    Smart Driver autonomous driving with Sensor Fusion.
-    Runs at 20Hz (50ms loop). Implements:
-      - Proportional speed control (Zones 1/2/3)
-      - Sensor Fusion: IR blind-spot priority over sonar
-      - 4-state escape maneuver: STOP → REVERSE → TURN → RESUME
-      - Safety timeout: kill motors if stuck reversing >2s
-      - Continuous obstacle monitoring in all states
+    Thin wrapper that ticks the AutoPilot FSM at 20 Hz.
+    All navigation logic lives in autopilot.py.
     """
-    # ── Configuration ──────────────────────────────────
-    CRUISING_SPEED   = 70    # Zone 1 (>80 cm) — reduced from 80% for safety
-    MIN_SPEED        = 25    # Zone 2 floor speed (% PWM) — reduced from 30%
-    DANGER_THRESHOLD = 30    # Zone 3 boundary (cm) — increased from 20cm for safety
-    CAUTION_THRESHOLD= 80    # Zone 2 boundary (cm) — increased from 50cm for safety
-    EMERGENCY_THRESHOLD = 15 # Immediate emergency stop (cm)
-
-    # Escape Maneuver Timing (in 20Hz cycles, 1 cycle = 50ms)
-    STOP_CYCLES      = 6     # 0.3 s  stop (increased for better clearance)
-    REVERSE_CYCLES   = 15    # 0.75 s reverse (increased for more space)
-    TURN_CYCLES      = 25    # 1.25 s turn (increased for better clearance)
-    REVERSE_TIMEOUT  = 40    # 2.0 s  safety kill if still reversing
-
-    # Escape Turn Speeds / Angles
-    REVERSE_SPEED    = 30    # % PWM while reversing
-    TURN_SPEED       = 40    # % PWM while turning
-    NORMAL_TURN_ANGLE= 60    # degrees — standard pivot
-    AGGRO_TURN_ANGLE = 75    # degrees — aggressive pivot (dual obstacle)
-
     while True:
-        # ── Sleep gate — idle when autopilot is off ────
         if not car_state["autonomous_mode"]:
+            if autopilot.is_active:
+                autopilot.stop()
             time.sleep(0.05)
             continue
 
-        # ── Read fused sensor data ────────────────────
-        distance = car_state["sonar_distance"]        # smoothed by moving avg
-        left_ir  = car_state["left_obstacle"]          # bool — True = blocked
-        right_ir = car_state["right_obstacle"]         # bool — True = blocked
-        state    = car_state["autonomous_state"]
-        timer    = car_state["escape_maneuver_timer"]
-        
-        # ── CONTINUOUS SAFETY MONITORING ─────────────────
-        # Check for immediate threats in ALL states, not just during transitions
-        ir_triggered = left_ir or right_ir
-        emergency_close = distance < EMERGENCY_THRESHOLD
-        danger_close = distance < DANGER_THRESHOLD
-        
-        # If immediate emergency, force to BRAKING regardless of current state
-        if (ir_triggered or emergency_close) and state != State.BRAKING.value:
-            print(f"🚨 [AUTONOMOUS] IMMEDIATE THREAT! IR: {ir_triggered}, Sonar: {distance:.1f}cm - EMERGENCY BRAKE")
-            car_state["autonomous_state"] = State.BRAKING.value
-            car_state["escape_maneuver_timer"] = 0
-            car_state["autonomous_target_speed"] = 0
-            car_state["gas_pressed"] = False
-            car_state["brake_pressed"] = True
-            
-            # Record obstacle side
-            if left_ir and right_ir:
-                car_state["last_obstacle_side"] = "both"
-            elif left_ir:
-                car_state["last_obstacle_side"] = "left"
-            elif right_ir:
-                car_state["last_obstacle_side"] = "right"
-            else:
-                car_state["last_obstacle_side"] = "center"
-            
-            # Skip to next cycle to apply brakes immediately
-            time.sleep(0.05)
-            continue
+        if not autopilot.is_active:
+            autopilot.start()
 
-        # ══════════════════════════════════════════════
-        #  STATE: CRUISING — Normal forward driving
-        # ══════════════════════════════════════════════
-        if state == State.CRUISING.value:
+        autopilot.update()
 
-            # ── Sensor Fusion Check ───────────────────
-            # Note: Emergency threats are handled above, this is for planned transitions
-            if danger_close:
-                # → Transition to BRAKING (escape phase 1)
-                car_state["autonomous_state"] = State.BRAKING.value
-                car_state["escape_maneuver_timer"] = 0
-                car_state["last_obstacle_side"] = "center" if not ir_triggered else ("both" if (left_ir and right_ir) else ("left" if left_ir else "right"))
-                print(f"🚨 [AUTONOMOUS] Planned stop — sonar {distance:.1f}cm — ESCAPE MANEUVER")
+        # Mirror state into car_state for telemetry & UI
+        car_state["autonomous_state"] = autopilot.state.value
+        car_state["last_obstacle_side"] = autopilot.turn_direction or "none"
 
-            else:
-                # ── Proportional Speed Control ────────
-                if distance > CAUTION_THRESHOLD:
-                    # Zone 1: Clear path → high speed
-                    target = CRUISING_SPEED
-                else:
-                    # Zone 2: Linear map  distance [DANGER,CAUTION] → speed [MIN,CRUISING]
-                    ratio  = (distance - DANGER_THRESHOLD) / (CAUTION_THRESHOLD - DANGER_THRESHOLD)
-                    target = int(ratio * (CRUISING_SPEED - MIN_SPEED) + MIN_SPEED)
-                    target = max(MIN_SPEED, min(CRUISING_SPEED, target))
-
-                car_state["autonomous_target_speed"] = target
-                car_state["gear"]         = "1"
-                car_state["gas_pressed"]  = True
-                car_state["brake_pressed"]= False
-                car_state["steer_angle"]  = 0   # straight ahead
-
-        # ══════════════════════════════════════════════
-        #  STATE: BRAKING — Escape Phase 1 (Stop 0.2s)
-        # ══════════════════════════════════════════════
-        elif state == State.BRAKING.value:
-            car_state["autonomous_target_speed"] = 0
-            car_state["gas_pressed"]  = False
-            car_state["brake_pressed"]= True
-            car_state["steer_angle"]  = 0
-            car_state["escape_maneuver_timer"] += 1
-
-            if timer >= STOP_CYCLES:
-                car_state["autonomous_state"] = State.REVERSING.value
-                car_state["escape_maneuver_timer"] = 0
-                print("🔄 [AUTONOMOUS] ESCAPE Phase 2 — Reversing to create space")
-
-        # ══════════════════════════════════════════════
-        #  STATE: REVERSING — Escape Phase 2 (Reverse 0.5s)
-        # ══════════════════════════════════════════════
-        elif state == State.REVERSING.value:
-            car_state["autonomous_target_speed"] = REVERSE_SPEED
-            car_state["gear"]          = "R"
-            car_state["gas_pressed"]   = True
-            car_state["brake_pressed"] = False
-            car_state["steer_angle"]   = 0   # straight reverse
-            car_state["escape_maneuver_timer"] += 1
-
-            # ── Safety timeout: kill motors if stuck >2s ──
-            if timer > REVERSE_TIMEOUT:
-                print("⚠️  [AUTONOMOUS] REVERSE TIMEOUT (>2s) — killing motors")
-                car_state["autonomous_target_speed"] = 0
-                car_state["gas_pressed"]  = False
-                car_state["brake_pressed"]= False
-                car_state["gear"]         = "N"
-                car_state["current_pwm"]  = 0
-                car_state["autonomous_state"] = State.CRUISING.value
-                car_state["escape_maneuver_timer"] = 0
-
-            elif timer >= REVERSE_CYCLES:
-                # Reverse complete → Phase 3: Turn
-                car_state["autonomous_state"] = State.TURNING.value
-                car_state["escape_maneuver_timer"] = 0
-
-                # Determine turn direction based on obstacle side
-                side = car_state["last_obstacle_side"]
-                if side == "left":
-                    car_state["steer_angle"] = NORMAL_TURN_ANGLE   # pivot right
-                    print("🔄 [AUTONOMOUS] ESCAPE Phase 3 — Turning RIGHT (left blocked)")
-                elif side == "right":
-                    car_state["steer_angle"] = -NORMAL_TURN_ANGLE  # pivot left
-                    print("🔄 [AUTONOMOUS] ESCAPE Phase 3 — Turning LEFT (right blocked)")
-                else:
-                    # center or both → default right
-                    car_state["steer_angle"] = NORMAL_TURN_ANGLE
-                    print("🔄 [AUTONOMOUS] ESCAPE Phase 3 — Turning RIGHT (default)")
-
-        # ══════════════════════════════════════════════
-        #  STATE: TURNING — Escape Phase 3 (Scan & Turn)
-        # ══════════════════════════════════════════════
-        elif state == State.TURNING.value:
-            car_state["autonomous_target_speed"] = TURN_SPEED
-            car_state["gear"]          = "1"
-            car_state["gas_pressed"]   = True
-            car_state["brake_pressed"] = False
-            car_state["escape_maneuver_timer"] += 1
-
-            # ── Dynamic adjustment for dual obstacles ──
-            side = car_state["last_obstacle_side"]
-            if side == "both":
-                if left_ir and not right_ir:
-                    car_state["steer_angle"] = AGGRO_TURN_ANGLE
-                elif right_ir and not left_ir:
-                    car_state["steer_angle"] = -AGGRO_TURN_ANGLE
-                elif timer > TURN_CYCLES // 2:
-                    import random
-                    car_state["steer_angle"] = AGGRO_TURN_ANGLE if random.random() > 0.5 else -AGGRO_TURN_ANGLE
-
-            # ── Check: path clear? ────────────────────
-            # More conservative clearance requirements
-            path_clear = (distance > CAUTION_THRESHOLD and not left_ir and not right_ir)
-            
-            if path_clear:
-                # All clear → resume cruising
-                car_state["autonomous_state"] = State.CRUISING.value
-                car_state["escape_maneuver_timer"] = 0
-                car_state["steer_angle"]  = 0
-                print("✅ [AUTONOMOUS] Path clear — resuming CRUISING")
-
-            elif timer >= TURN_CYCLES:
-                # Turn timed out, still blocked → retry full escape
-                car_state["autonomous_state"] = State.BRAKING.value
-                car_state["escape_maneuver_timer"] = 0
-                car_state["last_obstacle_side"] = "both"
-                print("⏰ [AUTONOMOUS] Turn timeout — retrying ESCAPE MANEUVER")
-
-        time.sleep(0.05)  # 20Hz = 50ms
+        time.sleep(0.05)  # 20 Hz
 
 # Start the Engine (Thread)
 engine_thread = threading.Thread(target=physics_loop, daemon=True)
@@ -972,11 +794,11 @@ def enable_autonomous():
     """Enable Smart Driver autonomous mode"""
     car_state["autonomous_mode"] = True
     car_state["autonomous_state"] = State.CRUISING.value
-    car_state["escape_maneuver_timer"] = 0
     car_state["last_obstacle_side"] = "none"
     # Force IR and Sonar sensors enabled in autonomous mode for safety
     car_state["ir_enabled"] = True
     car_state["sonar_enabled"] = True
+    autopilot.start()
     print(f"🤖 SMART DRIVER: ENABLED - Autonomous driving active")
     print(f"📡 SAFETY: IR and Sonar sensors force-enabled in autonomous mode")
     return "AUTONOMOUS_ENABLED"
@@ -985,6 +807,8 @@ def enable_autonomous():
 def disable_autonomous():
     """Disable Smart Driver autonomous mode and return to manual control"""
     car_state["autonomous_mode"] = False
+    autopilot.stop()
+    car_system.stop()
     # Reset to safe manual state
     car_state["gas_pressed"] = False
     car_state["brake_pressed"] = False
@@ -1291,11 +1115,11 @@ def on_autonomous_enable(data):
     """Handle Smart Driver autonomous mode enable"""
     car_state["autonomous_mode"] = True
     car_state["autonomous_state"] = State.CRUISING.value
-    car_state["escape_maneuver_timer"] = 0
     car_state["last_obstacle_side"] = "none"
     # Force IR and Sonar sensors enabled in autonomous mode for safety
     car_state["ir_enabled"] = True
     car_state["sonar_enabled"] = True
+    autopilot.start()
     print(f"\n⚙️ [UI Control] 🤖 SMART DRIVER: ENABLED - Autonomous driving active")
     print(f"📡 SAFETY: IR and Sonar sensors force-enabled in autonomous mode")
     emit('autonomous_response', {'status': 'ok', 'autonomous_enabled': True})
@@ -1304,6 +1128,8 @@ def on_autonomous_enable(data):
 def on_autonomous_disable(data):
     """Handle Smart Driver autonomous mode disable"""
     car_state["autonomous_mode"] = False
+    autopilot.stop()
+    car_system.stop()
     # Reset to safe manual state
     car_state["gas_pressed"] = False
     car_state["brake_pressed"] = False
@@ -1410,7 +1236,7 @@ def telemetry_broadcast():
                 # 🤖 Autonomous driving telemetry
                 "autonomous_mode": car_state["autonomous_mode"],
                 "autonomous_state": car_state["autonomous_state"],
-                "autonomous_target_speed": car_state["autonomous_target_speed"],
+                "autonomous_target_speed": car_system._current_speed if car_state["autonomous_mode"] else 0,
                 "sonar_distance": car_state["sonar_distance"],
                 "sonar_enabled": car_state["sonar_enabled"]
             }
@@ -1606,6 +1432,11 @@ if __name__ == "__main__":
         socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
     finally:
         # Safety cleanup
-        pwm_a.stop()
-        pwm_b.stop()
+        autopilot.stop()
+        car_system.cleanup()
+        try:
+            pwm_a.stop()
+            pwm_b.stop()
+        except Exception:
+            pass
         GPIO.cleanup()
