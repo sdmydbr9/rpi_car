@@ -1,6 +1,7 @@
 import RPi.GPIO as GPIO
 from flask import Flask, render_template, send_from_directory, jsonify, request
 from flask_cors import CORS
+from flask_socketio import SocketIO, emit, join_room, leave_room
 import os
 import subprocess
 import sys
@@ -348,6 +349,7 @@ app = Flask(__name__,
             static_url_path='/assets',
             template_folder=DIST_DIR)
 CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Helper function to get local network IP
 def get_local_ip():
@@ -615,13 +617,182 @@ def get_gpu_clock():
 # ==========================================
 # 🌐 WEBSOCKET EVENT HANDLERS
 # ==========================================
-# ==========================================
-# 🌐 HTTP API ENDPOINTS
-# ==========================================
 
-@app.route("/api/telemetry", methods=['GET'])
-def api_telemetry():
-    """Returns current car telemetry data"""
+@socketio.on('connect')
+def on_connect():
+    """Handle client connection"""
+    print(f"\n🔗 [Socket] ✅ CLIENT CONNECTED")
+    print(f"   Client ID: {request.sid}")
+    print(f"   Remote Address: {request.remote_addr}")
+    emit('connection_response', {'data': 'Connected to RC Car'})
+
+@socketio.on('disconnect')
+def on_disconnect():
+    """Handle client disconnection"""
+    print(f"\n🔓 [Socket] ❌ CLIENT DISCONNECTED")
+    print(f"   Client ID: {request.sid}")
+
+@socketio.on('throttle')
+def on_throttle(data):
+    """Handle throttle control"""
+    value = data.get('value', False)
+    if value:
+        car_state["gas_pressed"] = True
+        car_state["brake_pressed"] = False
+        car_state["direction"] = "forward"
+        print(f"\n⚙️ [UI Control] 🚀 THROTTLE PRESSED (Forward)")
+    else:
+        car_state["gas_pressed"] = False
+        print(f"\n⚙️ [UI Control] ⏸️ THROTTLE RELEASED")
+    emit('throttle_response', {'status': 'ok', 'value': value})
+
+@socketio.on('brake')
+def on_brake(data):
+    """Handle brake control"""
+    value = data.get('value', False)
+    car_state["brake_pressed"] = value
+    if value:
+        car_state["gas_pressed"] = False
+        print(f"\n⚙️ [UI Control] 🛑 BRAKE ENGAGED")
+    else:
+        # When brake is released, restore gas if auto-accel is still enabled
+        if car_state["auto_accel_enabled"]:
+            car_state["gas_pressed"] = True
+        print(f"\n⚙️ [UI Control] 🩹 BRAKE RELEASED")
+    emit('brake_response', {'status': 'ok', 'value': value})
+
+@socketio.on('steering')
+def on_steering(data):
+    """Handle steering control (angle -90 to +90)"""
+    try:
+        angle = int(data.get('angle', 0))
+        angle = max(-90, min(90, angle))  # Clamp to -90 to 90
+        car_state["user_steer_angle"] = angle
+        if abs(angle) > 10:
+            car_state["turning"] = "left" if angle < 0 else "right"
+            direction = "⬅️ LEFT" if angle < 0 else "➡️ RIGHT"
+            print(f"\n⚙️ [UI Control] 🎡 STEERING: {direction} ({abs(angle)}°)")
+        else:
+            car_state["turning"] = "straight"
+            print(f"\n⚙️ [UI Control] 🎡 STEERING: ⬆️ CENTER (0°)")
+        emit('steering_response', {'status': 'ok', 'angle': angle})
+    except (ValueError, TypeError) as e:
+        print(f"\n⚠️ [UI Control] ❌ Invalid steering angle: {e}")
+        emit('steering_response', {'status': 'error', 'message': 'Invalid angle'})
+
+@socketio.on('gear_change')
+def on_gear_change(data):
+    """Handle gear selection"""
+    gear = data.get('gear', 'N').upper()
+    if gear in ["R", "N", "1", "2", "3", "S"]:
+        car_state["gear"] = gear
+        gear_names = {'R': '🔙 REVERSE', 'N': '⏸️ NEUTRAL', '1': '1️⃣ 1st', '2': '2️⃣ 2nd', '3': '3️⃣ 3rd', 'S': '⚡ SPORT'}
+        print(f"\n⚙️ [UI Control] 🔧 GEAR: {gear_names.get(gear, gear)}")
+        emit('gear_response', {'status': 'ok', 'gear': gear})
+    else:
+        print(f"\n⚠️ [UI Control] ❌ Invalid gear: {gear}")
+        emit('gear_response', {'status': 'error', 'message': 'Invalid gear'})
+
+@socketio.on('emergency_stop')
+def on_emergency_stop(data):
+    """Handle emergency brake toggle - when ON, car cannot move"""
+    # Toggle the emergency brake state
+    car_state["emergency_brake_active"] = not car_state["emergency_brake_active"]
+    
+    # Always cut power immediately
+    car_state["current_pwm"] = 0
+    
+    # Physics loop checks emergency_brake_active flag and forces speed to 0
+    # We don't reset gas_pressed/brake_pressed so they're preserved when brake is deactivated
+    
+    # Reset obstacle avoidance state to prevent stuck state
+    car_state["obstacle_state"] = "IDLE"
+    car_state["steer_angle"] = 0
+    
+    # Apply magnetic lock ONLY when activating the emergency brake
+    if car_state["emergency_brake_active"]:
+        try:
+            # Magnetic lock: set all direction pins to False, PWM to 100%
+            # NOTE: Do NOT use GPIO.output() on ENA/ENB - they're managed by PWM objects
+            GPIO.output(IN1, False); GPIO.output(IN2, False)
+            GPIO.output(IN3, False); GPIO.output(IN4, False)
+            pwm_a.ChangeDutyCycle(100); pwm_b.ChangeDutyCycle(100)
+        except Exception as e:
+            pass  # GPIO not available
+    
+    state = '🔴 ON' if car_state["emergency_brake_active"] else '🟢 OFF'
+    print(f"\n⚙️ [UI Control] 🚨 EMERGENCY BRAKE: {state}")
+    emit('emergency_stop_response', {'status': 'ok', 'emergency_brake_active': car_state["emergency_brake_active"]})
+
+@socketio.on('auto_accel_enable')
+def on_auto_accel_enable(data):
+    """Handle auto-acceleration enable (server-side auto-throttle)"""
+    car_state["auto_accel_enabled"] = True
+    car_state["gas_pressed"] = True  # Actually engage the throttle
+    print(f"\n⚙️ [UI Control] 🚀 AUTO-ACCEL: ENABLED (auto-throttle mode)")
+    emit('auto_accel_response', {'status': 'ok', 'enabled': True})
+
+@socketio.on('auto_accel_disable')
+def on_auto_accel_disable(data):
+    """Handle auto-acceleration disable"""
+    car_state["auto_accel_enabled"] = False
+    car_state["gas_pressed"] = False
+    print(f"\n⚙️ [UI Control] 🚫 AUTO-ACCEL: DISABLED")
+    emit('auto_accel_response', {'status': 'ok', 'enabled': False})
+
+@socketio.on('ir_toggle')
+def on_ir_toggle(data):
+    """Handle IR sensor toggle"""
+    car_state["ir_enabled"] = not car_state["ir_enabled"]
+    state = '✅ ON' if car_state["ir_enabled"] else '❌ OFF'
+    print(f"\n⚙️ [UI Control] 📡 IR SENSORS: {state}")
+    emit('ir_response', {'status': 'ok', 'ir_enabled': car_state["ir_enabled"]})
+
+@socketio.on('state_request')
+def on_state_request(data):
+    """Send current car state to client"""
+    emit('state_response', car_state)
+
+# Telemetry broadcast thread
+def telemetry_broadcast():
+    """Broadcast telemetry data to all connected clients at 20Hz"""
+    while True:
+        try:
+            pwm = car_state["current_pwm"]
+            fake_rpm = int(pwm * 2.2)
+            fake_speed = round(pwm * 0.025, 1)
+            
+            telemetry_data = {
+                "rpm": fake_rpm,
+                "speed": fake_speed,
+                "current_pwm": pwm,
+                "gear": car_state["gear"],
+                "steer_angle": car_state["steer_angle"],
+                "direction": car_state["direction"],
+                "turning": car_state["turning"],
+                "left_obstacle": car_state["left_obstacle"],
+                "right_obstacle": car_state["right_obstacle"],
+                "gas_pressed": car_state["gas_pressed"],
+                "brake_pressed": car_state["brake_pressed"],
+                "ir_enabled": car_state["ir_enabled"]
+            }
+            
+            socketio.emit('telemetry_update', telemetry_data)
+            time.sleep(0.05)  # 20Hz = 50ms
+        except Exception as e:
+            print(f"❌ Telemetry broadcast error: {e}")
+            time.sleep(0.05)
+
+# Start telemetry broadcaster thread
+telemetry_thread = threading.Thread(target=telemetry_broadcast, daemon=True)
+telemetry_thread.start()
+
+# ==========================================
+# 🌐 HTTP ENDPOINTS (kept for backwards compatibility)
+# ==========================================
+@app.route("/telemetry")
+def telemetry():
+    """Returns current car state for the dashboard"""
     pwm = car_state["current_pwm"]
     
     # Math to fake RPM and KM/H based on power
@@ -637,173 +808,8 @@ def api_telemetry():
         "direction": car_state["direction"],
         "turning": car_state["turning"],
         "left_obstacle": car_state["left_obstacle"],
-        "right_obstacle": car_state["right_obstacle"],
-        "gas_pressed": car_state["gas_pressed"],
-        "brake_pressed": car_state["brake_pressed"],
-        "ir_enabled": car_state["ir_enabled"]
+        "right_obstacle": car_state["right_obstacle"]
     })
-
-@app.route("/api/state", methods=['GET'])
-def api_state():
-    """Returns the complete car state"""
-    return jsonify(car_state)
-
-@app.route("/api/control/throttle", methods=['POST'])
-def api_throttle():
-    """Handle throttle control"""
-    try:
-        data = request.get_json() or {}
-        value = data.get('value', False)
-        
-        if value:
-            # IMPORTANT: Only set gas_pressed if brake is NOT currently being held
-            # This prevents auto-accelerate from overriding an active brake command
-            if not car_state["brake_pressed"]:
-                car_state["gas_pressed"] = True
-                car_state["direction"] = "forward"
-                print(f"\n⚙️ [UI Control] 🚀 THROTTLE PRESSED (Forward)")
-        else:
-            car_state["gas_pressed"] = False
-            print(f"\n⚙️ [UI Control] ⏸️ THROTTLE RELEASED")
-        
-        return jsonify({'status': 'ok', 'value': value})
-    except Exception as e:
-        print(f"❌ Throttle error: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 400
-
-@app.route("/api/control/brake", methods=['POST'])
-def api_brake():
-    """Handle brake control"""
-    try:
-        data = request.get_json() or {}
-        value = data.get('value', False)
-        
-        car_state["brake_pressed"] = value
-        if value:
-            car_state["gas_pressed"] = False
-            print(f"\n⚙️ [UI Control] 🛑 BRAKE ENGAGED")
-        else:
-            # When brake is released, restore gas if auto-accel is still enabled
-            if car_state["auto_accel_enabled"]:
-                car_state["gas_pressed"] = True
-            print(f"\n⚙️ [UI Control] 🩹 BRAKE RELEASED")
-        
-        return jsonify({'status': 'ok', 'value': value})
-    except Exception as e:
-        print(f"❌ Brake error: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 400
-
-@app.route("/api/control/steering", methods=['POST'])
-def api_steering():
-    """Handle steering control (angle -90 to +90)"""
-    try:
-        data = request.get_json() or {}
-        angle = int(data.get('angle', 0))
-        angle = max(-90, min(90, angle))  # Clamp to -90 to 90
-        
-        car_state["user_steer_angle"] = angle
-        if abs(angle) > 10:
-            car_state["turning"] = "left" if angle < 0 else "right"
-            direction = "⬅️ LEFT" if angle < 0 else "➡️ RIGHT"
-            print(f"\n⚙️ [UI Control] 🎡 STEERING: {direction} ({abs(angle)}°)")
-        else:
-            car_state["turning"] = "straight"
-            print(f"\n⚙️ [UI Control] 🎡 STEERING: ⬆️ CENTER (0°)")
-        
-        return jsonify({'status': 'ok', 'angle': angle})
-    except (ValueError, TypeError) as e:
-        print(f"❌ Steering error: {e}")
-        return jsonify({'status': 'error', 'message': f'Invalid angle: {str(e)}'}), 400
-
-@app.route("/api/control/gear", methods=['POST'])
-def api_gear():
-    """Handle gear selection"""
-    try:
-        data = request.get_json() or {}
-        gear = data.get('gear', 'N').upper()
-        
-        if gear in ["R", "N", "1", "2", "3", "S"]:
-            car_state["gear"] = gear
-            gear_names = {'R': '🔙 REVERSE', 'N': '⏸️ NEUTRAL', '1': '1️⃣ 1st', '2': '2️⃣ 2nd', '3': '3️⃣ 3rd', 'S': '⚡ SPORT'}
-            print(f"\n⚙️ [UI Control] 🔧 GEAR: {gear_names.get(gear, gear)}")
-            return jsonify({'status': 'ok', 'gear': gear})
-        else:
-            print(f"❌ Invalid gear: {gear}")
-            return jsonify({'status': 'error', 'message': f'Invalid gear: {gear}'}), 400
-    except Exception as e:
-        print(f"❌ Gear error: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 400
-
-@app.route("/api/control/emergency_stop", methods=['POST'])
-def api_emergency_stop():
-    """Handle emergency brake toggle - when ON, car cannot move"""
-    try:
-        # Toggle the emergency brake state
-        car_state["emergency_brake_active"] = not car_state["emergency_brake_active"]
-        
-        # Always cut power immediately
-        car_state["current_pwm"] = 0
-        
-        # Physics loop checks emergency_brake_active flag and forces speed to 0
-        # We don't reset gas_pressed/brake_pressed so they're preserved when brake is deactivated
-        
-        # Reset obstacle avoidance state to prevent stuck state
-        car_state["obstacle_state"] = "IDLE"
-        car_state["steer_angle"] = 0
-        
-        # Apply magnetic lock ONLY when activating the emergency brake
-        if car_state["emergency_brake_active"]:
-            try:
-                # Magnetic lock: set all direction pins to False, PWM to 100%
-                # NOTE: Do NOT use GPIO.output() on ENA/ENB - they're managed by PWM objects
-                GPIO.output(IN1, False); GPIO.output(IN2, False)
-                GPIO.output(IN3, False); GPIO.output(IN4, False)
-                pwm_a.ChangeDutyCycle(100); pwm_b.ChangeDutyCycle(100)
-            except Exception as e:
-                pass  # GPIO not available
-        
-        state = '🔴 ON' if car_state["emergency_brake_active"] else '🟢 OFF'
-        print(f"\n⚙️ [UI Control] 🚨 EMERGENCY BRAKE: {state}")
-        return jsonify({'status': 'ok', 'emergency_brake_active': car_state["emergency_brake_active"]})
-    except Exception as e:
-        print(f"❌ Emergency stop error: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 400
-
-@app.route("/api/control/auto_accel_enable", methods=['POST'])
-def api_auto_accel_enable():
-    """Handle auto-acceleration enable (server-side auto-throttle)"""
-    try:
-        car_state["auto_accel_enabled"] = True
-        car_state["gas_pressed"] = True  # Actually engage the throttle
-        print(f"\n⚙️ [UI Control] 🚀 AUTO-ACCEL: ENABLED (auto-throttle mode)")
-        return jsonify({'status': 'ok', 'enabled': True})
-    except Exception as e:
-        print(f"❌ Auto accel enable error: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 400
-
-@app.route("/api/control/auto_accel_disable", methods=['POST'])
-def api_auto_accel_disable():
-    """Handle auto-acceleration disable"""
-    try:
-        car_state["auto_accel_enabled"] = False
-        car_state["gas_pressed"] = False
-        print(f"\n⚙️ [UI Control] 🚫 AUTO-ACCEL: DISABLED")
-        return jsonify({'status': 'ok', 'enabled': False})
-    except Exception as e:
-        print(f"❌ Auto accel disable error: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 400
-
-@app.route("/api/control/ir_toggle", methods=['POST'])
-def api_ir_toggle():
-    """Handle IR sensor toggle"""
-    try:
-        car_state["ir_enabled"] = not car_state["ir_enabled"]
-        state = '✅ ON' if car_state["ir_enabled"] else '❌ OFF'
-        print(f"\n⚙️ [UI Control] 📡 IR SENSORS: {state}")
-        return jsonify({'status': 'ok', 'ir_enabled': car_state["ir_enabled"]})
-    except Exception as e:
-        print(f"❌ IR toggle error: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 400
 
 @app.route("/system/status")
 def system_status():
@@ -945,7 +951,7 @@ echo "   IP Address: {ip}"
 if __name__ == "__main__":
     try:
         # Host 0.0.0.0 makes it available on your Wi-Fi
-        app.run(host='0.0.0.0', port=5000, debug=False)
+        socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
     finally:
         # Safety cleanup
         pwm_a.stop()

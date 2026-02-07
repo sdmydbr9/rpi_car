@@ -6,7 +6,7 @@ import { CarTelemetry } from "./CarTelemetry";
 import { GearShifter } from "./GearShifter";
 import { Pedals } from "./Pedals";
 import { ImmersiveHUD } from "../ImmersiveHUD";
-import * as httpClient from "../../lib/httpClient";
+import * as socketClient from "../../lib/socketClient";
 import { useAutoAcceleration } from "../../hooks/useAutoAcceleration";
 
 interface ControlState {
@@ -45,7 +45,7 @@ export const CockpitController = () => {
         const tryConnection = async (ip: string) => {
           console.log(`🔌 [Startup] Attempting connection to ${ip}:5000...`);
           try {
-            await httpClient.connectToServer(ip, 5000);
+            await socketClient.connectToServer(ip, 5000);
             setServerIp(ip);
             setIsConnected(true);
             setStreamUrl(`http://${ip}/stream`);
@@ -91,7 +91,7 @@ export const CockpitController = () => {
     // Subscribe to telemetry updates
     // Note: throttle, brake, and steeringAngle are NOT updated from telemetry - they're controlled only by user input
     // This ensures continuous hold behavior works correctly (the server won't overwrite the UI state)
-    httpClient.onTelemetry((data) => {
+    socketClient.onTelemetry((data) => {
       setControlState(prev => ({
         ...prev,
         gear: data.gear || prev.gear,
@@ -104,7 +104,7 @@ export const CockpitController = () => {
     });
 
     return () => {
-      httpClient.onTelemetry(() => {}); // Unsubscribe
+      socketClient.onTelemetry(() => {}); // Unsubscribe
     };
   }, [isConnected]);
 
@@ -117,7 +117,7 @@ export const CockpitController = () => {
       return;
     }
     setControlState(prev => ({ ...prev, steeringAngle: angle }));
-    httpClient.emitSteering(Math.round(angle));
+    socketClient.emitSteering(Math.round(angle));
   }, [isEngineRunning]);
 
   const handleThrottleChange = useCallback((active: boolean) => {
@@ -127,7 +127,7 @@ export const CockpitController = () => {
       return;
     }
     setControlState(prev => ({ ...prev, throttle: active }));
-    httpClient.emitThrottle(active);
+    socketClient.emitThrottle(active);
   }, [isEngineRunning]);
 
   const handleBrakeChange = useCallback((active: boolean) => {
@@ -137,7 +137,7 @@ export const CockpitController = () => {
       return;
     }
     setControlState(prev => ({ ...prev, brake: active }));
-    httpClient.emitBrake(active);
+    socketClient.emitBrake(active);
   }, [isEngineRunning]);
 
   const handleGearChange = useCallback((gear: string) => {
@@ -147,23 +147,23 @@ export const CockpitController = () => {
       return;
     }
     setControlState(prev => ({ ...prev, gear }));
-    httpClient.emitGearChange(gear);
+    socketClient.emitGearChange(gear);
   }, [isEngineRunning]);
 
   const handleLaunch = useCallback(() => {
     if (!isEngineRunning || isAutoMode) return;
     // Launch: auto-accelerate in current gear
     setIsAutoMode(true);
-    httpClient.emitAutoAccelEnable();
+    socketClient.emitAutoAccelEnable();
   }, [isEngineRunning, isAutoMode]);
 
   const handleDonut = useCallback(() => {
     if (!isEngineRunning || isAutoMode) return;
     // Donut: full throttle + steering
     setIsAutoMode(true);
-    httpClient.emitThrottle(true);
-    httpClient.emitSteering(60);
-    httpClient.emitAutoAccelEnable();
+    socketClient.emitThrottle(true);
+    socketClient.emitSteering(60);
+    socketClient.emitAutoAccelEnable();
   }, [isEngineRunning, isAutoMode]);
 
   const handleEmergencyStop = useCallback(() => {
@@ -173,7 +173,7 @@ export const CockpitController = () => {
       console.log('🏁 Emergency stop ACTIVE');
       setIsAutoMode(false);
       setControlState(prev => ({ ...prev, speed: 0, throttle: false, brake: false, gear: 'N' }));
-      httpClient.emitEmergencyStop();
+      socketClient.emitEmergencyStop();
     }
   }, [isEmergencyStop]);
 
@@ -181,15 +181,15 @@ export const CockpitController = () => {
     if (isEmergencyStop) return; // Cannot enable auto mode during emergency stop
     setIsAutoMode(prev => !prev);
     if (!isAutoMode) {
-      httpClient.emitAutoAccelEnable();
+      socketClient.emitAutoAccelEnable();
     } else {
-      httpClient.emitAutoAccelDisable();
+      socketClient.emitAutoAccelDisable();
     }
   }, [isEmergencyStop, isAutoMode]);
 
   const handleIRToggle = useCallback(() => {
     console.log('🎮 IR sensor toggle');
-    httpClient.emitIRToggle();
+    socketClient.emitIRToggle();
   }, []);
 
   const handleEngineStart = useCallback(() => {
@@ -202,9 +202,9 @@ export const CockpitController = () => {
     console.log('🔧 Engine STOP button clicked');
     setIsEngineRunning(false);
     setIsAutoMode(false);
-    httpClient.emitAutoAccelDisable();
-    httpClient.emitThrottle(false);
-    httpClient.emitBrake(true);
+    socketClient.emitAutoAccelDisable();
+    socketClient.emitThrottle(false);
+    socketClient.emitBrake(true);
     setControlState(prev => ({ ...prev, throttle: false, brake: false, speed: 0 }));
     console.log('✅ Engine stopped');
   }, []);
@@ -219,6 +219,7 @@ export const CockpitController = () => {
     gear: controlState.gear,
     isEngineRunning,
     currentSpeed: controlState.speed,
+    isBrakePressed: controlState.brake,
   });
 
   return (

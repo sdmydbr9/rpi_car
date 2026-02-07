@@ -1,11 +1,12 @@
 import { useEffect, useRef, useCallback } from 'react';
-import * as httpClient from '../lib/httpClient';
+import * as socketClient from '../lib/socketClient';
 
 interface UseAutoAccelerationOptions {
   enabled: boolean;
   gear: string;
   isEngineRunning: boolean;
   currentSpeed: number;
+  isBrakePressed?: boolean;
 }
 
 // Gear speed limits (matching backend)
@@ -27,6 +28,7 @@ export const useAutoAcceleration = ({
   gear,
   isEngineRunning,
   currentSpeed,
+  isBrakePressed = false,
 }: UseAutoAccelerationOptions): void => {
   const accelIntervalRef = useRef<number | null>(null);
   const currentSpeedRef = useRef(currentSpeed);
@@ -43,9 +45,9 @@ export const useAutoAcceleration = ({
       accelIntervalRef.current = null;
     }
 
-    // Stop if conditions aren't met
-    if (!enabled || !isEngineRunning || gear === 'N' || gear === 'R') {
-      httpClient.emitThrottle(false);
+    // Stop if conditions aren't met or if brake is engaged (brake has priority)
+    if (!enabled || !isEngineRunning || gear === 'N' || gear === 'R' || isBrakePressed) {
+      socketClient.emitThrottle(false);
       return;
     }
 
@@ -57,10 +59,10 @@ export const useAutoAcceleration = ({
 
       if (speed < gearLimit) {
         // Increment throttle
-        httpClient.emitThrottle(true);
+        socketClient.emitThrottle(true);
       } else {
         // At limit, maintain throttle
-        httpClient.emitThrottle(true);
+        socketClient.emitThrottle(true);
       }
     }, 200); // Increment every 200ms for smooth acceleration
 
@@ -69,9 +71,9 @@ export const useAutoAcceleration = ({
         clearInterval(accelIntervalRef.current);
         accelIntervalRef.current = null;
       }
-      httpClient.emitThrottle(false);
+      socketClient.emitThrottle(false);
     };
-  }, [enabled, isEngineRunning, gear]);
+  }, [enabled, isEngineRunning, gear, isBrakePressed]);
 };
 
 export default useAutoAcceleration;
