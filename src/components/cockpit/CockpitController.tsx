@@ -167,13 +167,20 @@ export const CockpitController = () => {
   }, [isEngineRunning, isAutoMode]);
 
   const handleEmergencyStop = useCallback(() => {
-    console.log('🏁 Emergency stop toggled:', !isEmergencyStop);
-    setIsEmergencyStop(prev => !prev);
-    if (!isEmergencyStop) {
+    const newEmergencyStopState = !isEmergencyStop;
+    console.log('🏁 Emergency stop toggled:', newEmergencyStopState);
+    setIsEmergencyStop(newEmergencyStopState);
+    
+    if (newEmergencyStopState) {
+      // Activating emergency stop
       console.log('🏁 Emergency stop ACTIVE');
       setIsAutoMode(false);
       setControlState(prev => ({ ...prev, speed: 0, throttle: false, brake: false, gear: 'N' }));
       socketClient.emitEmergencyStop();
+    } else {
+      // Deactivating emergency stop
+      console.log('🏁 Emergency stop RELEASED');
+      socketClient.emitEmergencyStopRelease();
     }
   }, [isEmergencyStop]);
 

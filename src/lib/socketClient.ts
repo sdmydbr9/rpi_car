@@ -161,6 +161,18 @@ export function emitEmergencyStop(): void {
 }
 
 /**
+ * Emit emergency stop release
+ */
+export function emitEmergencyStopRelease(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🚨 EMERGENCY STOP RELEASED`);
+    socket.emit('emergency_stop_release', {});
+  } else {
+    console.warn(`[UI Control] ⚠️ Cannot emit emergency stop release - socket not connected`, { socket: !!socket, connected: socket?.connected });
+  }
+}
+
+/**
  * Enable auto-acceleration mode
  */
 export function emitAutoAccelEnable(): void {
@@ -206,6 +218,7 @@ export default {
   emitSteering,
   emitGearChange,
   emitEmergencyStop,
+  emitEmergencyStopRelease,
   emitAutoAccelEnable,
   emitAutoAccelDisable,
   emitIRToggle,
