@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { X, Wifi, Zap, Power } from "lucide-react";
 import { useGameFeedback } from "@/hooks/useGameFeedback";
 
@@ -41,6 +41,11 @@ export const ImmersiveHUD = ({
 }: ImmersiveHUDProps) => {
   const { triggerHaptic, playSound } = useGameFeedback();
   const [eBrakeActive, setEBrakeActive] = useState(false);
+  
+  // Sync emergency brake state with parent component
+  useEffect(() => {
+    setEBrakeActive(isEmergencyStop);
+  }, [isEmergencyStop]);
   const [steeringDirection, setSteeringDirection] = useState<'left' | 'right' | null>(null);
   
   // RPM simulation based on speed and throttle
@@ -66,13 +71,10 @@ export const ImmersiveHUD = ({
   }, [onThrottleChange]);
   
   const handleEBrake = useCallback(() => {
-    setEBrakeActive(prev => !prev);
     triggerHaptic('heavy');
     playSound('emergency');
-    if (!eBrakeActive) {
-      onEmergencyStop();
-    }
-  }, [eBrakeActive, triggerHaptic, playSound, onEmergencyStop]);
+    onEmergencyStop();
+  }, [triggerHaptic, playSound, onEmergencyStop]);
 
   const handleSteerLeft = useCallback(() => {
     setSteeringDirection('left');
@@ -99,12 +101,7 @@ export const ImmersiveHUD = ({
   if (!isOpen) return null;
 
   return (
-    <div className={`fixed inset-0 z-50 ${isEmergencyStop || eBrakeActive ? 'animate-pulse' : ''}`}>
-      {/* Emergency border flash */}
-      {(isEmergencyStop || eBrakeActive) && (
-        <div className="absolute inset-0 border-4 border-destructive z-50 pointer-events-none animate-pulse" />
-      )}
-      
+    <div className={`fixed inset-0 z-50`}>
       {/* Background Layer - Camera Feed */}
       <div className="absolute inset-0 z-0 bg-background">
         {streamUrl ? (
