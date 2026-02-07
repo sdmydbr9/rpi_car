@@ -768,7 +768,10 @@ def telemetry_broadcast():
                 "right_obstacle": car_state["right_obstacle"],
                 "gas_pressed": car_state["gas_pressed"],
                 "brake_pressed": car_state["brake_pressed"],
-                "ir_enabled": car_state["ir_enabled"]
+                "ir_enabled": car_state["ir_enabled"],
+                "temperature": get_cpu_temperature(),
+                "cpu_clock": get_cpu_clock(),
+                "gpu_clock": get_gpu_clock()
             }
             
             socketio.emit('telemetry_update', telemetry_data)
@@ -802,7 +805,10 @@ def telemetry():
         "direction": car_state["direction"],
         "turning": car_state["turning"],
         "left_obstacle": car_state["left_obstacle"],
-        "right_obstacle": car_state["right_obstacle"]
+        "right_obstacle": car_state["right_obstacle"],
+        "temperature": get_cpu_temperature(),
+        "cpu_clock": get_cpu_clock(),
+        "gpu_clock": get_gpu_clock()
     })
 
 @app.route("/system/status")

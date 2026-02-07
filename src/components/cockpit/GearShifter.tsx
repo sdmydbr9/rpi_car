@@ -104,7 +104,7 @@ export const GearShifter = ({
             transition-all duration-100 touch-feedback
             ${isEmergencyStop
               ? 'bg-destructive border-destructive text-destructive-foreground'
-              : 'bg-card border-destructive/50 text-destructive hover:bg-destructive/20'
+              : 'bg-card border-destructive text-destructive hover:bg-destructive/20'
             }
           `}
         >
@@ -121,7 +121,7 @@ export const GearShifter = ({
             transition-all duration-100 touch-feedback disabled:opacity-50
             ${isAutoMode
               ? 'bg-primary border-primary text-primary-foreground'
-              : 'bg-card border-primary/50 text-primary hover:bg-primary/20'
+              : 'bg-card border-primary text-primary hover:bg-primary/20'
             }
           `}
         >
@@ -139,10 +139,10 @@ export const GearShifter = ({
             w-9 h-9 mx-auto rounded-full border-2 flex items-center justify-center
             transition-all duration-100 touch-feedback
             ${!isEngineRunning
-              ? 'bg-muted border-muted/50 text-muted-foreground cursor-not-allowed opacity-50'
+              ? 'bg-muted border-muted text-muted-foreground cursor-not-allowed opacity-50'
               : isIREnabled
               ? 'bg-primary border-primary text-primary-foreground'
-              : 'bg-card border-primary/50 text-primary hover:bg-primary/20'
+              : 'bg-card border-primary text-primary hover:bg-primary/20'
             }
           `}
           title={isIREnabled ? 'IR Sensors: ON' : 'IR Sensors: OFF'}
@@ -165,7 +165,7 @@ export const GearShifter = ({
             flex-1 rounded-md border-2 flex flex-col items-center justify-center p-0.5 h-7
             transition-all duration-100 touch-feedback
             ${isEngineRunning
-              ? 'bg-muted border-muted/50 text-muted-foreground cursor-not-allowed opacity-50'
+              ? 'bg-muted border-muted text-muted-foreground cursor-not-allowed opacity-50'
               : 'bg-primary border-primary text-primary-foreground hover:bg-primary/90'
             }
           `}
@@ -182,7 +182,7 @@ export const GearShifter = ({
             flex-1 rounded-md border-2 flex flex-col items-center justify-center p-0.5 h-7
             transition-all duration-100 touch-feedback
             ${!isEngineRunning
-              ? 'bg-muted border-muted/50 text-muted-foreground cursor-not-allowed opacity-50'
+              ? 'bg-muted border-muted text-muted-foreground cursor-not-allowed opacity-50'
               : 'bg-destructive border-destructive text-destructive-foreground hover:bg-destructive/90'
             }
           `}

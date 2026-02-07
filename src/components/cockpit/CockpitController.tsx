@@ -15,6 +15,10 @@ interface ControlState {
   brake: boolean;
   gear: string;
   speed: number;
+  temperature: number; // CPU temperature in Celsius
+  cpuClock: number; // CPU clock speed in MHz
+  gpuClock: number; // GPU clock speed in MHz
+  rpm: number; // RPM
 }
 
 export const CockpitController = () => {
@@ -24,6 +28,10 @@ export const CockpitController = () => {
     brake: false,
     gear: "N",
     speed: 0,
+    temperature: 0,
+    cpuClock: 0,
+    gpuClock: 0,
+    rpm: 0,
   });
   const [isConnected, setIsConnected] = useState(false);
   const [serverIp, setServerIp] = useState("");
@@ -96,6 +104,11 @@ export const CockpitController = () => {
         ...prev,
         gear: data.gear || prev.gear,
         speed: data.current_pwm || prev.speed,
+        // Only show system metrics when engine is running
+        temperature: isEngineRunning ? (data.temperature || prev.temperature) : 0,
+        cpuClock: isEngineRunning ? (data.cpu_clock || prev.cpuClock) : 0,
+        gpuClock: isEngineRunning ? (data.gpu_clock || prev.gpuClock) : 0,
+        rpm: isEngineRunning ? (data.rpm || prev.rpm) : 0,
         // DO NOT update throttle and brake from telemetry - these are user-controlled inputs
         // that must maintain their state while held
       }));
@@ -106,7 +119,7 @@ export const CockpitController = () => {
     return () => {
       socketClient.onTelemetry(() => {}); // Unsubscribe
     };
-  }, [isConnected]);
+  }, [isConnected, isEngineRunning]);
 
 
 
@@ -212,7 +225,7 @@ export const CockpitController = () => {
     socketClient.emitAutoAccelDisable();
     socketClient.emitThrottle(false);
     socketClient.emitBrake(true);
-    setControlState(prev => ({ ...prev, throttle: false, brake: false, speed: 0 }));
+    setControlState(prev => ({ ...prev, throttle: false, brake: false, speed: 0, temperature: 0, cpuClock: 0, gpuClock: 0, rpm: 0 }));
     console.log('✅ Engine stopped');
   }, []);
 
@@ -286,6 +299,10 @@ export const CockpitController = () => {
               brake={controlState.brake}
               gear={controlState.gear}
               speed={controlState.speed}
+              temperature={controlState.temperature}
+              cpuClock={controlState.cpuClock}
+              gpuClock={controlState.gpuClock}
+              rpm={controlState.rpm}
               onLaunch={handleLaunch}
               onDonut={handleDonut}
               isEngineRunning={isEngineRunning}

@@ -19,6 +19,9 @@ export interface TelemetryData {
   gas_pressed: boolean;
   brake_pressed: boolean;
   ir_enabled: boolean;
+  temperature?: number;
+  cpu_clock?: number;
+  gpu_clock?: number;
 }
 
 /**
