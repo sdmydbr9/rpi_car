@@ -211,6 +211,30 @@ export function emitIRToggle(): void {
   }
 }
 
+/**
+ * Toggle SONAR sensor control
+ */
+export function emitSonarToggle(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎮 SONAR: TOGGLED`);
+    socket.emit('sonar_toggle', {});
+  } else {
+    console.warn(`[UI Control] ⚠️ Cannot emit sonar toggle - socket not connected`, { socket: !!socket, connected: socket?.connected });
+  }
+}
+
+/**
+ * Toggle Autopilot control
+ */
+export function emitAutopilotToggle(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎮 AUTOPILOT: TOGGLED`);
+    socket.emit('autopilot_toggle', {});
+  } else {
+    console.warn(`[UI Control] ⚠️ Cannot emit autopilot toggle - socket not connected`, { socket: !!socket, connected: socket?.connected });
+  }
+}
+
 export default {
   connectToServer,
   disconnectFromServer,
@@ -225,4 +249,6 @@ export default {
   emitAutoAccelEnable,
   emitAutoAccelDisable,
   emitIRToggle,
+  emitSonarToggle,
+  emitAutopilotToggle,
 };

@@ -38,6 +38,8 @@ export const CockpitController = () => {
   const [isEmergencyStop, setIsEmergencyStop] = useState(false);
   const [isAutoMode, setIsAutoMode] = useState(false);
   const [isIREnabled, setIsIREnabled] = useState(true);
+  const [isSonarEnabled, setIsSonarEnabled] = useState(true);
+  const [isAutopilotEnabled, setIsAutopilotEnabled] = useState(false);
   const [isImmersiveView, setIsImmersiveView] = useState(false);
   const [streamUrl, setStreamUrl] = useState<string>("");
   const [isEngineRunning, setIsEngineRunning] = useState(false);
@@ -212,6 +214,18 @@ export const CockpitController = () => {
     socketClient.emitIRToggle();
   }, []);
 
+  const handleSonarToggle = useCallback(() => {
+    console.log('🎮 SONAR sensor toggle');
+    setIsSonarEnabled(prev => !prev);
+    socketClient.emitSonarToggle();
+  }, []);
+
+  const handleAutopilotToggle = useCallback(() => {
+    console.log('🎮 Autopilot toggle');
+    setIsAutopilotEnabled(prev => !prev);
+    socketClient.emitAutopilotToggle();
+  }, []);
+
   const handleEngineStart = useCallback(() => {
     console.log('🔧 Engine START button clicked');
     setIsEngineRunning(true);
@@ -317,9 +331,13 @@ export const CockpitController = () => {
               isEmergencyStop={isEmergencyStop}
               isAutoMode={isAutoMode}
               isIREnabled={isIREnabled}
+              isSonarEnabled={isSonarEnabled}
+              isAutopilotEnabled={isAutopilotEnabled}
               onEmergencyStop={handleEmergencyStop}
               onAutoMode={handleAutoMode}
               onIRToggle={handleIRToggle}
+              onSonarToggle={handleSonarToggle}
+              onAutopilotToggle={handleAutopilotToggle}
               isEnabled={isEngineRunning}
               isEngineRunning={isEngineRunning}
               onEngineStart={handleEngineStart}

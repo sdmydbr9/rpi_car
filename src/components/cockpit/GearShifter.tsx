@@ -1,4 +1,4 @@
-import { OctagonX, Zap, Power, PowerOff, Radio } from "lucide-react";
+import { OctagonX, Zap, Power, PowerOff, Radio, Eye, Radar, Plane, X, Navigation } from "lucide-react";
 
 interface GearShifterProps {
   currentGear: string;
@@ -6,9 +6,13 @@ interface GearShifterProps {
   isEmergencyStop: boolean;
   isAutoMode: boolean;
   isIREnabled: boolean;
+  isSonarEnabled: boolean;
+  isAutopilotEnabled: boolean;
   onEmergencyStop: () => void;
   onAutoMode: () => void;
   onIRToggle: () => void;
+  onSonarToggle: () => void;
+  onAutopilotToggle: () => void;
   isEnabled?: boolean;
   isEngineRunning?: boolean;
   onEngineStart?: () => void;
@@ -23,9 +27,13 @@ export const GearShifter = ({
   isEmergencyStop,
   isAutoMode,
   isIREnabled,
+  isSonarEnabled,
+  isAutopilotEnabled,
   onEmergencyStop,
   onAutoMode,
   onIRToggle,
+  onSonarToggle,
+  onAutopilotToggle,
   isEnabled = true,
   isEngineRunning = false,
   onEngineStart,
@@ -38,11 +46,112 @@ export const GearShifter = ({
   ];
 
   return (
-    <div className="flex flex-col items-center h-full pt-1 pb-1 px-1 overflow-hidden">
+    <div className="flex flex-col items-center h-full pt-1 pb-1 px-1.5 overflow-hidden bg-gradient-to-b from-background to-background/80">
+      {/* LIVE TELEMETRY Header */}
+      <div className="text-[7px] sm:text-[8px] font-bold racing-text text-muted-foreground tracking-wider mb-1.5">
+        LIVE TELEMETRY
+      </div>
+
+      {/* E-STOP and AUTO OFF - Side by Side Pill Shaped */}
+      <div className="flex w-full gap-1 mb-1.5">
+        {/* E-STOP Button - Pill Shaped */}
+        <button
+          onClick={onEmergencyStop}
+          className={`
+            flex-1 rounded-full border-2 flex flex-col items-center justify-center py-1.5 px-2
+            transition-all duration-100 touch-feedback font-bold racing-text
+            ${isEmergencyStop
+              ? 'bg-destructive border-destructive text-destructive-foreground shadow-lg shadow-destructive/50'
+              : 'bg-card border-destructive/60 text-destructive hover:bg-destructive/20 hover:border-destructive'
+            }
+          `}
+        >
+          <X className="w-3.5 h-3.5 mb-0.5" />
+          <span className="text-[7px] sm:text-[8px] leading-tight">E-STOP</span>
+        </button>
+
+        {/* AUTO OFF Button - Pill Shaped */}
+        <button
+          onClick={onAutoMode}
+          disabled={isEmergencyStop}
+          className={`
+            flex-1 rounded-full border-2 flex flex-col items-center justify-center py-1.5 px-2
+            transition-all duration-100 touch-feedback font-bold racing-text disabled:opacity-50
+            ${isAutoMode
+              ? 'bg-primary border-primary text-primary-foreground shadow-lg shadow-primary/50'
+              : 'bg-card border-primary/60 text-primary hover:bg-primary/20 hover:border-primary'
+            }
+          `}
+        >
+          <Zap className="w-3.5 h-3.5 mb-0.5" />
+          <span className="text-[7px] sm:text-[8px] leading-tight">AUTO {isAutoMode ? "ON" : "OFF"}</span>
+        </button>
+      </div>
+
+      {/* IR and SONAR and AUTOPILOT - Side by Side Round Buttons */}
+      <div className="flex w-full gap-1 mb-1.5">
+        {/* IR Button - Round */}
+        <button
+          onClick={onIRToggle}
+          disabled={!isEngineRunning}
+          className={`
+            w-12 h-12 rounded-full border-2 flex items-center justify-center
+            transition-all duration-100 touch-feedback font-bold
+            ${!isEngineRunning
+              ? 'bg-muted border-muted text-muted-foreground cursor-not-allowed opacity-50'
+              : isIREnabled
+              ? 'bg-amber-500/30 border-amber-500 text-amber-500 shadow-lg'
+              : 'bg-card border-amber-500/40 text-amber-500/60 hover:bg-amber-500/20 hover:border-amber-500'
+            }
+          `}
+          title={isIREnabled ? 'IR: ON' : 'IR: OFF'}
+        >
+          <Eye className="w-5 h-5" />
+        </button>
+
+        {/* SONAR Button - Round */}
+        <button
+          onClick={onSonarToggle}
+          disabled={!isEngineRunning}
+          className={`
+            w-12 h-12 rounded-full border-2 flex items-center justify-center
+            transition-all duration-100 touch-feedback font-bold
+            ${!isEngineRunning
+              ? 'bg-muted border-muted text-muted-foreground cursor-not-allowed opacity-50'
+              : isSonarEnabled
+              ? 'bg-primary border-primary text-primary-foreground shadow-lg'
+              : 'bg-card border-primary/60 text-primary hover:bg-primary/20 hover:border-primary'
+            }
+          `}
+          title={isSonarEnabled ? 'SONAR: ON' : 'SONAR: OFF'}
+        >
+          <Radar className="w-5 h-5" />
+        </button>
+
+        {/* AUTOPILOT - Round Button */}
+        <button
+          onClick={onAutopilotToggle}
+          disabled={!isEngineRunning || isEmergencyStop}
+          className={`
+            w-12 h-12 rounded-full border-2 flex items-center justify-center
+            transition-all duration-100 touch-feedback font-bold
+            ${!isEngineRunning || isEmergencyStop
+              ? 'bg-muted border-muted text-muted-foreground cursor-not-allowed opacity-50'
+              : isAutopilotEnabled
+              ? 'bg-primary border-primary text-primary-foreground shadow-lg'
+              : 'bg-card border-primary/60 text-primary hover:bg-primary/20 hover:border-primary'
+            }
+          `}
+          title={isAutopilotEnabled ? 'AUTOPILOT: ON' : 'AUTOPILOT: OFF'}
+        >
+          <Navigation className="w-5 h-5" />
+        </button>
+      </div>
+
       {/* Gearbox Grid Container */}
-      <div className="bg-card border-2 border-border rounded-lg p-2 space-y-1.5">
+      <div className="bg-card border-2 border-border rounded-lg p-1.5 space-y-1 mb-1.5">
         {gearLayout.map((row, rowIdx) => (
-          <div key={rowIdx} className="flex gap-1.5 justify-center">
+          <div key={rowIdx} className="flex gap-1 justify-center">
             {row.map((gear) => {
               const isActive = currentGear === gear;
               const isReverse = gear === "R";
@@ -53,7 +162,7 @@ export const GearShifter = ({
                   onClick={() => onGearChange(gear)}
                   disabled={!isEnabled}
                   className={`
-                    w-8 h-8 sm:w-9 sm:h-9 rounded-lg border-2 text-xs sm:text-sm font-bold racing-text
+                    w-7 h-7 sm:w-8 sm:h-8 rounded-lg border-2 text-[10px] sm:text-xs font-bold racing-text
                     transition-all duration-150 touch-feedback flex items-center justify-center
                     ${!isEnabled
                       ? 'bg-muted/40 border-muted/30 text-muted-foreground opacity-50 cursor-not-allowed'
@@ -72,123 +181,44 @@ export const GearShifter = ({
           </div>
         ))}
       </div>
-      
-      {/* Telemetry Wave */}
-      <div className="w-full mt-2 overflow-hidden h-3 sm:h-4 border border-border rounded bg-card/50">
-        <svg className="w-[200%] h-full animate-telemetry" viewBox="0 0 200 30" preserveAspectRatio="none">
-          <path
-            d="M0,15 Q10,5 20,15 T40,15 T60,15 T80,15 T100,15 T120,15 T140,15 T160,15 T180,15 T200,15"
-            fill="none"
-            stroke="hsl(var(--primary))"
-            strokeWidth="1.5"
-            className="opacity-70"
-          />
-          <path
-            d="M0,15 Q10,25 20,15 T40,15 T60,15 T80,15 T100,15 T120,15 T140,15 T160,15 T180,15 T200,15"
-            fill="none"
-            stroke="hsl(var(--primary))"
-            strokeWidth="1"
-            className="opacity-40"
-          />
-        </svg>
-      </div>
-      <div className="text-[5px] sm:text-[7px] text-muted-foreground racing-text mt-0.5 mb-2">TELEMETRY</div>
-      
-      {/* Emergency Brake and AUTO Mode Buttons */}
-      <div className="flex gap-1 mt-1 w-full px-1">
-        {/* Emergency Brake Button */}
-        <button
-          onClick={onEmergencyStop}
-          className={`
-            flex-1 rounded-md border-2 flex flex-col items-center justify-center p-0.5 h-7
-            transition-all duration-100 touch-feedback
-            ${isEmergencyStop
-              ? 'bg-destructive border-destructive text-destructive-foreground'
-              : 'bg-card border-destructive text-destructive hover:bg-destructive/20'
-            }
-          `}
-        >
-          <OctagonX className="w-3 h-3" />
-          <span className="text-[4px] sm:text-[5px] font-bold racing-text leading-tight">BRAKE</span>
-        </button>
-        
-        {/* AUTO Button */}
-        <button
-          onClick={onAutoMode}
-          disabled={isEmergencyStop}
-          className={`
-            flex-1 rounded-md border-2 flex flex-col items-center justify-center p-0.5 h-7
-            transition-all duration-100 touch-feedback disabled:opacity-50
-            ${isAutoMode
-              ? 'bg-primary border-primary text-primary-foreground'
-              : 'bg-card border-primary text-primary hover:bg-primary/20'
-            }
-          `}
-        >
-          <Zap className="w-3 h-3" />
-          <span className="text-[4px] sm:text-[5px] font-bold racing-text leading-tight">AUTO</span>
-        </button>
-      </div>
-
-      {/* IR Sensor Button */}
-      <div className="flex gap-1 mt-1 w-full px-1">
-        <button
-          onClick={onIRToggle}
-          disabled={!isEngineRunning}
-          className={`
-            w-9 h-9 mx-auto rounded-full border-2 flex items-center justify-center
-            transition-all duration-100 touch-feedback
-            ${!isEngineRunning
-              ? 'bg-muted border-muted text-muted-foreground cursor-not-allowed opacity-50'
-              : isIREnabled
-              ? 'bg-primary border-primary text-primary-foreground'
-              : 'bg-card border-primary text-primary hover:bg-primary/20'
-            }
-          `}
-          title={isIREnabled ? 'IR Sensors: ON' : 'IR Sensors: OFF'}
-        >
-          <Radio className="w-3.5 h-3.5" />
-        </button>
-        <div className="flex-1" />
-      </div>
 
       {/* Spacer */}
       <div className="flex-1" />
 
       {/* START and STOP Buttons */}
-      <div className="flex gap-1 w-full px-1 pb-1">
-        {/* START Button */}
+      <div className="flex gap-1.5 w-full">
+        {/* START Button - Pill Shaped */}
         <button
           onClick={onEngineStart}
           disabled={isEngineRunning}
           className={`
-            flex-1 rounded-md border-2 flex flex-col items-center justify-center p-0.5 h-7
-            transition-all duration-100 touch-feedback
+            flex-1 rounded-full border-2 flex flex-col items-center justify-center py-2 px-1.5
+            transition-all duration-100 touch-feedback font-bold racing-text
             ${isEngineRunning
               ? 'bg-muted border-muted text-muted-foreground cursor-not-allowed opacity-50'
-              : 'bg-primary border-primary text-primary-foreground hover:bg-primary/90'
+              : 'bg-primary border-primary text-primary-foreground hover:bg-primary/90 shadow-lg'
             }
           `}
         >
-          <Power className="w-3 h-3" />
-          <span className="text-[4px] sm:text-[5px] font-bold racing-text leading-tight">START</span>
+          <Power className="w-4 h-4 mb-0.5" />
+          <span className="text-[7px] sm:text-[8px] leading-tight">START</span>
         </button>
 
-        {/* STOP Button */}
+        {/* STOP Button - Pill Shaped */}
         <button
           onClick={onEngineStop}
           disabled={!isEngineRunning}
           className={`
-            flex-1 rounded-md border-2 flex flex-col items-center justify-center p-0.5 h-7
-            transition-all duration-100 touch-feedback
+            flex-1 rounded-full border-2 flex flex-col items-center justify-center py-2 px-1.5
+            transition-all duration-100 touch-feedback font-bold racing-text
             ${!isEngineRunning
               ? 'bg-muted border-muted text-muted-foreground cursor-not-allowed opacity-50'
-              : 'bg-destructive border-destructive text-destructive-foreground hover:bg-destructive/90'
+              : 'bg-destructive border-destructive text-destructive-foreground hover:bg-destructive/90 shadow-lg'
             }
           `}
         >
-          <PowerOff className="w-3 h-3" />
-          <span className="text-[4px] sm:text-[5px] font-bold racing-text leading-tight">STOP</span>
+          <PowerOff className="w-4 h-4 mb-0.5" />
+          <span className="text-[7px] sm:text-[8px] leading-tight">STOP</span>
         </button>
       </div>
     </div>
