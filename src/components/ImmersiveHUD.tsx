@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback } from "react";
 import { X, Wifi, Zap, Power } from "lucide-react";
 import { useGameFeedback } from "@/hooks/useGameFeedback";
 
@@ -41,11 +41,6 @@ export const ImmersiveHUD = ({
 }: ImmersiveHUDProps) => {
   const { triggerHaptic, playSound } = useGameFeedback();
   const [eBrakeActive, setEBrakeActive] = useState(false);
-  
-  // Sync emergency brake state with parent component
-  useEffect(() => {
-    setEBrakeActive(isEmergencyStop);
-  }, [isEmergencyStop]);
   const [steeringDirection, setSteeringDirection] = useState<'left' | 'right' | null>(null);
   
   // RPM simulation based on speed and throttle
@@ -71,10 +66,13 @@ export const ImmersiveHUD = ({
   }, [onThrottleChange]);
   
   const handleEBrake = useCallback(() => {
+    setEBrakeActive(prev => !prev);
     triggerHaptic('heavy');
     playSound('emergency');
-    onEmergencyStop();
-  }, [triggerHaptic, playSound, onEmergencyStop]);
+    if (!eBrakeActive) {
+      onEmergencyStop();
+    }
+  }, [eBrakeActive, triggerHaptic, playSound, onEmergencyStop]);
 
   const handleSteerLeft = useCallback(() => {
     setSteeringDirection('left');
@@ -101,84 +99,81 @@ export const ImmersiveHUD = ({
   if (!isOpen) return null;
 
   return (
-    <div className={`fixed inset-0 z-50`}>
+    <div className={`fixed inset-0 z-50 ${isEmergencyStop || eBrakeActive ? 'animate-pulse' : ''}`}>
+      {/* Emergency border flash */}
+      {(isEmergencyStop || eBrakeActive) && (
+        <div className="absolute inset-0 border-4 border-destructive z-50 pointer-events-none animate-pulse" />
+      )}
+      
       {/* Background Layer - Camera Feed */}
       <div className="absolute inset-0 z-0 bg-background">
-        {streamUrl ? (
-          <img 
-            src={streamUrl} 
-            alt="Live Feed" 
-            className="w-full h-full object-cover"
-          />
-        ) : (
-          <div className="w-full h-full bg-gradient-to-b from-secondary to-background flex items-center justify-center">
-            <div className="text-center">
-              <div className="text-4xl racing-text text-muted-foreground mb-2">HELMET CAM</div>
-              <div className="text-sm text-muted-foreground/50">Awaiting video feed...</div>
-              {/* Simulated track view placeholder */}
-              <div className="mt-8 w-64 h-32 mx-auto border border-primary/30 rounded-lg bg-card/30 backdrop-blur-sm flex items-center justify-center">
-                <div className="text-xs text-muted-foreground racing-text">TRACK VIEW</div>
-              </div>
+        <div className="w-full h-full bg-gradient-to-b from-secondary to-background flex items-center justify-center">
+          <div className="text-center">
+            <div className="text-4xl racing-text text-muted-foreground mb-2">HELMET CAM</div>
+            <div className="text-sm text-muted-foreground/50">Awaiting video feed...</div>
+            {/* Simulated track view placeholder */}
+            <div className="mt-8 w-64 h-32 mx-auto border border-primary/30 rounded-lg bg-card/30 backdrop-blur-sm flex items-center justify-center">
+              <div className="text-xs text-muted-foreground racing-text">TRACK VIEW</div>
             </div>
           </div>
-        )}
+        </div>
       </div>
       
       {/* HUD Layer */}
       <div className="absolute inset-0 z-10 pointer-events-none">
         
-        {/* Steering Zones - Left and Right tap areas */}
-        <div className="absolute inset-0 flex pointer-events-auto">
-          {/* Left Steering Zone */}
-          <button
-            onTouchStart={handleSteerLeft}
-            onTouchEnd={handleSteerEnd}
-            onMouseDown={handleSteerLeft}
-            onMouseUp={handleSteerEnd}
-            onMouseLeave={handleSteerEnd}
-            className={`flex-1 h-full flex items-center justify-start pl-8 transition-all ${
-              steeringDirection === 'left' ? 'bg-primary/10' : ''
-            }`}
-          >
-            {/* Left indicator */}
-            <div className={`flex items-center gap-2 transition-all ${
-              steeringDirection === 'left' ? 'opacity-100 scale-110' : 'opacity-30'
-            }`}>
-              <svg className="w-8 h-8 text-primary" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M15 19l-7-7 7-7" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
-              </svg>
-              <span className="text-xs racing-text text-primary">LEFT</span>
-            </div>
-          </button>
-          
-          {/* Center dead zone - no steering */}
-          <div className="w-1/3 h-full pointer-events-none" />
-          
-          {/* Right Steering Zone */}
-          <button
-            onTouchStart={handleSteerRight}
-            onTouchEnd={handleSteerEnd}
-            onMouseDown={handleSteerRight}
-            onMouseUp={handleSteerEnd}
-            onMouseLeave={handleSteerEnd}
-            className={`flex-1 h-full flex items-center justify-end pr-8 transition-all ${
-              steeringDirection === 'right' ? 'bg-primary/10' : ''
-            }`}
-          >
-            {/* Right indicator */}
-            <div className={`flex items-center gap-2 transition-all ${
-              steeringDirection === 'right' ? 'opacity-100 scale-110' : 'opacity-30'
-            }`}>
-              <span className="text-xs racing-text text-primary">RIGHT</span>
-              <svg className="w-8 h-8 text-primary" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M9 5l7 7-7 7" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
-              </svg>
-            </div>
-          </button>
-        </div>
-        
+         {/* Steering Zones - Left and Right tap areas */}
+         <div className="absolute inset-0 flex pointer-events-auto">
+           {/* Left Steering Zone */}
+           <button
+             onTouchStart={handleSteerLeft}
+             onTouchEnd={handleSteerEnd}
+             onMouseDown={handleSteerLeft}
+             onMouseUp={handleSteerEnd}
+             onMouseLeave={handleSteerEnd}
+             className={`flex-1 h-full flex items-center justify-start pl-8 transition-all ${
+               steeringDirection === 'left' ? 'bg-primary/10' : ''
+             }`}
+           >
+             {/* Left indicator */}
+             <div className={`flex items-center gap-2 transition-all ${
+               steeringDirection === 'left' ? 'opacity-100 scale-110' : 'opacity-30'
+             }`}>
+               <svg className="w-8 h-8 text-primary" viewBox="0 0 24 24" fill="currentColor">
+                 <path d="M15 19l-7-7 7-7" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+               </svg>
+               <span className="text-xs racing-text text-primary">LEFT</span>
+             </div>
+           </button>
+           
+           {/* Center dead zone - no steering */}
+           <div className="w-1/3 h-full pointer-events-none" />
+           
+           {/* Right Steering Zone */}
+           <button
+             onTouchStart={handleSteerRight}
+             onTouchEnd={handleSteerEnd}
+             onMouseDown={handleSteerRight}
+             onMouseUp={handleSteerEnd}
+             onMouseLeave={handleSteerEnd}
+             className={`flex-1 h-full flex items-center justify-end pr-8 transition-all ${
+               steeringDirection === 'right' ? 'bg-primary/10' : ''
+             }`}
+           >
+             {/* Right indicator */}
+             <div className={`flex items-center gap-2 transition-all ${
+               steeringDirection === 'right' ? 'opacity-100 scale-110' : 'opacity-30'
+             }`}>
+               <span className="text-xs racing-text text-primary">RIGHT</span>
+               <svg className="w-8 h-8 text-primary" viewBox="0 0 24 24" fill="currentColor">
+                 <path d="M9 5l7 7-7 7" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+               </svg>
+             </div>
+           </button>
+         </div>
+         
         {/* Top Center - Status Bar */}
-        <div className="absolute top-2 left-1/2 -translate-x-1/2 pointer-events-auto z-20">
+         <div className="absolute top-2 left-1/2 -translate-x-1/2 pointer-events-auto z-20">
           <div className="flex items-center gap-3 px-4 py-1.5 rounded-full bg-background/40 backdrop-blur-md border border-border/50">
             {/* Auto Pilot Toggle */}
             <button
@@ -216,7 +211,7 @@ export const ImmersiveHUD = ({
         </div>
         
         {/* Top Left - RPM Gauge */}
-        <div className="absolute top-4 left-4 z-20 pointer-events-none">
+         <div className="absolute top-4 left-4 z-20 pointer-events-none">
           <div className="w-24 h-24 rounded-full bg-background/40 backdrop-blur-md border border-border/50 flex flex-col items-center justify-center">
             <svg viewBox="0 0 100 100" className={`w-20 h-20 ${isRedline ? 'animate-[shake_0.1s_infinite]' : ''}`}>
               {/* Background arc */}
@@ -248,15 +243,15 @@ export const ImmersiveHUD = ({
             <div className="text-[10px] racing-text text-primary -mt-2">RPM</div>
           </div>
         </div>
-
-        {/* Gear Shifter Section */}
-        <div className="absolute top-40 right-4 z-20 pointer-events-auto">
-          <div className="bg-background/40 backdrop-blur-md border border-border/50 rounded-lg p-3">
-            <div className="text-[10px] racing-text text-muted-foreground mb-2 text-center">GEAR</div>
-            <div className="grid grid-cols-3 gap-1">
+        
+        {/* Gear Shifter Section - Compact, beside speedometer */}
+        <div className="absolute top-4 right-40 z-20 pointer-events-auto">
+          <div className="bg-background/40 backdrop-blur-md border border-border/50 rounded-lg p-2">
+            <div className="text-[8px] racing-text text-muted-foreground mb-1 text-center">GEAR</div>
+            <div className="grid grid-cols-3 gap-0.5">
               <button
                 onClick={() => handleGearChange('S')}
-                className={`w-8 h-8 rounded text-xs font-bold racing-text transition-all ${
+                className={`w-5 h-5 rounded text-[10px] font-bold racing-text transition-all ${
                   gear === 'S'
                     ? 'bg-primary text-primary-foreground glow-teal'
                     : 'bg-muted/50 text-muted-foreground hover:bg-muted'
@@ -266,7 +261,7 @@ export const ImmersiveHUD = ({
               </button>
               <button
                 onClick={() => handleGearChange('3')}
-                className={`w-8 h-8 rounded text-xs font-bold racing-text transition-all ${
+                className={`w-5 h-5 rounded text-[10px] font-bold racing-text transition-all ${
                   gear === '3'
                     ? 'bg-primary text-primary-foreground glow-teal'
                     : 'bg-muted/50 text-muted-foreground hover:bg-muted'
@@ -276,7 +271,7 @@ export const ImmersiveHUD = ({
               </button>
               <button
                 onClick={() => handleGearChange('2')}
-                className={`w-8 h-8 rounded text-xs font-bold racing-text transition-all ${
+                className={`w-5 h-5 rounded text-[10px] font-bold racing-text transition-all ${
                   gear === '2'
                     ? 'bg-primary text-primary-foreground glow-teal'
                     : 'bg-muted/50 text-muted-foreground hover:bg-muted'
@@ -286,7 +281,7 @@ export const ImmersiveHUD = ({
               </button>
               <button
                 onClick={() => handleGearChange('1')}
-                className={`w-8 h-8 rounded text-xs font-bold racing-text transition-all ${
+                className={`w-5 h-5 rounded text-[10px] font-bold racing-text transition-all ${
                   gear === '1'
                     ? 'bg-primary text-primary-foreground glow-teal'
                     : 'bg-muted/50 text-muted-foreground hover:bg-muted'
@@ -296,7 +291,7 @@ export const ImmersiveHUD = ({
               </button>
               <button
                 onClick={() => handleGearChange('N')}
-                className={`w-8 h-8 rounded text-xs font-bold racing-text transition-all ${
+                className={`w-5 h-5 rounded text-[10px] font-bold racing-text transition-all ${
                   gear === 'N'
                     ? 'bg-primary text-primary-foreground glow-teal'
                     : 'bg-muted/50 text-muted-foreground hover:bg-muted'
@@ -306,7 +301,7 @@ export const ImmersiveHUD = ({
               </button>
               <button
                 onClick={() => handleGearChange('R')}
-                className={`w-8 h-8 rounded text-xs font-bold racing-text transition-all ${
+                className={`w-5 h-5 rounded text-[10px] font-bold racing-text transition-all ${
                   gear === 'R'
                     ? 'bg-destructive text-destructive-foreground glow-red'
                     : 'bg-muted/50 text-muted-foreground hover:bg-muted'
@@ -318,10 +313,9 @@ export const ImmersiveHUD = ({
           </div>
         </div>
 
-
         
         {/* Top Right - Speed & Gear */}
-        <div className="absolute top-4 right-4 z-20 pointer-events-none">
+         <div className="absolute top-4 right-4 z-20 pointer-events-none">
           <div className="flex items-center gap-2 px-4 py-3 rounded-lg bg-background/40 backdrop-blur-md border border-border/50">
             <div className="text-right">
               <div className="text-3xl racing-number font-bold text-foreground text-glow-teal">
@@ -340,9 +334,9 @@ export const ImmersiveHUD = ({
         </div>
         
         {/* Bottom Left - Brake Zone */}
-        <div className="absolute bottom-4 left-4 pointer-events-auto z-20">
+         <div className="absolute bottom-4 left-4 pointer-events-auto z-20">
           <div className="flex flex-col items-start gap-2">
-            {/* Emergency Brake Toggle */}
+            {/* E-Brake Toggle */}
             <button
               onClick={handleEBrake}
               className={`px-3 py-1.5 rounded text-xs racing-text border transition-all ${
@@ -351,7 +345,7 @@ export const ImmersiveHUD = ({
                   : 'bg-background/40 backdrop-blur-md text-muted-foreground border-border/50 hover:border-destructive'
               }`}
             >
-              EMERGENCY BRAKE {eBrakeActive ? 'ON' : 'OFF'}
+              E-BRAKE {eBrakeActive ? 'ON' : 'OFF'}
             </button>
             
             {/* Brake Pedal */}
@@ -377,7 +371,7 @@ export const ImmersiveHUD = ({
         </div>
         
         {/* Bottom Right - Throttle Zone */}
-        <div className="absolute bottom-4 right-4 pointer-events-auto z-20">
+         <div className="absolute bottom-4 right-4 pointer-events-auto z-20">
           <button
             onTouchStart={handleThrottleStart}
             onTouchEnd={handleThrottleEnd}
