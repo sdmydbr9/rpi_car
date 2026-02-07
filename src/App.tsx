@@ -6,6 +6,7 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { useEffect } from "react";
 import Index from "./pages/Index";
 import NotFound from "./pages/NotFound";
+import { OrientationLock } from "./components/OrientationLock";
 
 const queryClient = new QueryClient();
 
@@ -56,6 +57,7 @@ const App = () => {
       <TooltipProvider>
         <Toaster />
         <Sonner />
+        <OrientationLock />
         <BrowserRouter>
           <Routes>
             <Route path="/" element={<Index />} />
