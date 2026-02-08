@@ -69,18 +69,18 @@ class AutoPilot:
 
     # ── Tuning constants ───────────────────────────────
     FRONT_CRITICAL_CM    = 5      # Front sonar: escape trigger threshold
-    REAR_BLOCKED_CM      = 1     # Rear sonar: refuse to reverse below this
-    REAR_CRITICAL_CM     = 2      # Rear sonar: interrupt reverse below this
-    DANGER_CM            = 30     # Below this → escape maneuver (IR or sonar)
-    FULL_SPEED_CM        = 80    # Above this → max cruise speed
-    MAX_SPEED            = 60     # PWM % at full cruise
+    REAR_BLOCKED_CM      = 3     # Rear sonar: refuse to reverse below this
+    REAR_CRITICAL_CM     = 5      # Rear sonar: interrupt reverse below this
+    DANGER_CM            = 40     # Below this → escape maneuver (IR or sonar)
+    FULL_SPEED_CM        = 100    # Above this → max cruise speed
+    MAX_SPEED            = 80     # PWM % at full cruise
     MIN_SPEED            = 30     # PWM % at DANGER_CM boundary
     REVERSE_SPEED        = 40     # PWM % while reversing
-    PIVOT_SPEED          = 50     # PWM % while pivoting
-    REVERSE_DURATION     = 3.0    # max seconds of reverse (sum of micro-steps)
-    REVERSE_STEP         = 0.5    # seconds per reverse micro-step
-    PIVOT_DURATION       = 0.8    # seconds
-    RECOVERY_DURATION    = 0.5    # seconds
+    PIVOT_SPEED          = 50    # PWM % while pivoting
+    REVERSE_DURATION     = 0.8    # max seconds of reverse (sum of micro-steps)
+    REVERSE_STEP         = 1.0    # seconds per reverse micro-step
+    PIVOT_DURATION       = 1.0    # seconds
+    RECOVERY_DURATION    = 1.0    # seconds
     STUCK_RECHECK_INTERVAL = 1.0  # seconds between re-checking while stuck
     SONAR_HISTORY_LEN    = 3      # median filter window
 
