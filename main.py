@@ -115,20 +115,14 @@ try:
 except Exception as e:
     print(f"⚠️  IR sensor setup error: {e}")
 
-# Setup PWM
-try:
-    pwm_a = GPIO.PWM(ENA, FREQ)
-    pwm_b = GPIO.PWM(ENB, FREQ)
-    pwm_a.start(0)
-    pwm_b.start(0)
-except Exception as e:
-    print(f"⚠️  PWM setup error: {e}")
-    # Create dummy PWM objects for testing
-    class DummyPWM:
-        def ChangeDutyCycle(self, val): pass
-        def stop(self): pass
-    pwm_a = DummyPWM()
-    pwm_b = DummyPWM()
+# ── CarSystem owns the ONLY PWM channels on ENA / ENB ────────────
+# Creating module-level PWMs here and again inside CarSystem caused
+# RPi.GPIO to raise RuntimeError ("A PWM object already exists"),
+# forcing CarSystem to fall back to DummyPWM (silent no-ops).
+# Fix: let CarSystem create them first; physics_loop reuses them.
+car_system = CarSystem()
+pwm_a = car_system.pwm_a
+pwm_b = car_system.pwm_b
 
 # Initialize Sensor System
 try:
@@ -144,9 +138,10 @@ except Exception as e:
     sensor_system = DummySensorSystem()
 
 # ==========================================
-# 🏎️ CARSYSTEM + AUTOPILOT INSTANTIATION
+# 🏎️ AUTOPILOT INSTANTIATION
 # ==========================================
-car_system = CarSystem()
+# CarSystem was already created above (before sensor init) to avoid
+# duplicate-PWM conflicts.  Only the autopilot wiring remains here.
 
 def _get_sonar_for_autopilot():
     return get_smoothed_sonar()
@@ -328,6 +323,7 @@ def physics_loop():
     last_left_obstacle = False
     last_right_obstacle = False
     target_steer_angle = 0   # Target angle during steering phase
+    was_autonomous = False   # Track autonomous → manual transition
     
     while True:
         # --- CHECK IR SENSORS ---
@@ -627,8 +623,19 @@ def physics_loop():
         # --- 3. STEERING MIXER (The Magic) ---
         # In autonomous mode, CarSystem handles GPIO directly — skip mixer.
         if car_state["autonomous_mode"]:
+            was_autonomous = True
             time.sleep(0.02)
             continue
+
+        # ── Autonomous → Manual transition guard ──────────────────────
+        # When we just left autonomous mode, current_pwm may still hold
+        # the autopilot's last speed (mirrored above).  Force it to zero
+        # so physics_loop doesn't coast the car at the old speed.
+        if was_autonomous:
+            current = 0
+            car_state["current_pwm"] = 0
+            car_state["is_braking"] = False
+            was_autonomous = False
 
         # We calculate separate speeds for Left and Right motors
         left_motor_speed = current
@@ -695,11 +702,21 @@ def drive_autonomous():
     """
     Thin wrapper that ticks the AutoPilot FSM at 20 Hz.
     All navigation logic lives in autopilot.py.
+
+    IMPORTANT – only the SocketIO / HTTP handlers call autopilot.start().
+    This thread only *ticks* the FSM and handles emergency-brake pausing.
+    Previously an unconditional ``if not is_active: start()`` here caused
+    a race on disable: the handler called stop() but this thread restarted
+    the autopilot before autonomous_mode was set to False, producing a
+    ~0.5 s forward surge.
     """
+    emergency_stopped = False        # track if WE paused the autopilot
+
     while True:
         if not car_state["autonomous_mode"]:
             if autopilot.is_active:
                 autopilot.stop()
+            emergency_stopped = False
             time.sleep(0.05)
             continue
 
@@ -707,11 +724,19 @@ def drive_autonomous():
         if car_state["emergency_brake_active"]:
             if autopilot.is_active:
                 autopilot.stop()  # Cuts motors immediately
+                emergency_stopped = True
             time.sleep(0.05)
             continue
 
+        # Resume ONLY after emergency brake release (not after a mode-disable stop)
         if not autopilot.is_active:
-            autopilot.start()
+            if emergency_stopped:
+                autopilot.start()
+                emergency_stopped = False
+            else:
+                # Autopilot was stopped by the disable handler; don't restart.
+                time.sleep(0.05)
+                continue
 
         autopilot.update()
 
@@ -918,10 +943,12 @@ def enable_autonomous():
 @app.route("/autonomous_disable")
 def disable_autonomous():
     """Disable Smart Driver autonomous mode and return to manual control"""
+    # ── FIX: set mode flag FIRST so drive_autonomous cannot restart
     car_state["autonomous_mode"] = False
+    # Now stop hardware
     autopilot.stop()
     car_system.stop()
-    # Reset to safe manual state
+    car_state["current_pwm"] = 0
     car_state["gas_pressed"] = False
     car_state["brake_pressed"] = False
     car_state["gear"] = "N"
@@ -1245,10 +1272,15 @@ def on_autonomous_enable(data):
 @socketio.on('autonomous_disable')
 def on_autonomous_disable(data):
     """Handle Smart Driver autonomous mode disable"""
+    # ── FIX: set mode flag FIRST so drive_autonomous cannot restart
+    # the autopilot between stop() and the flag change (race condition
+    # that caused ~0.5 s forward surge on disable).
     car_state["autonomous_mode"] = False
+    # Now stop hardware — drive_autonomous sees False and won't restart
     autopilot.stop()
     car_system.stop()
     # Reset to safe manual state
+    car_state["current_pwm"] = 0
     car_state["gas_pressed"] = False
     car_state["brake_pressed"] = False
     car_state["gear"] = "N"

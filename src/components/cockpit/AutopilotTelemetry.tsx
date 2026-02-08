@@ -1,4 +1,4 @@
-import { Navigation, AlertTriangle, RotateCcw, OctagonX, Compass, Activity, Gauge, Ruler } from "lucide-react";
+import { Navigation, AlertTriangle, RotateCcw, OctagonX, Compass, Activity, Gauge, Ruler, Play, Square } from "lucide-react";
 
 export type AutopilotStatus = 
   | "CRUISING" 
@@ -13,8 +13,10 @@ interface AutopilotTelemetryProps {
   accelerationPercent: number;
   distanceToObstacle: number; // in cm
   eBrakeActive?: boolean;
+  isRunning?: boolean;
   onEmergencyStop?: () => void;
   onAutopilotToggle?: () => void;
+  onStartStop?: () => void;
 }
 
 const STATUS_CONFIG: Record<AutopilotStatus, {
@@ -80,8 +82,10 @@ export const AutopilotTelemetry = ({
   accelerationPercent,
   distanceToObstacle,
   eBrakeActive = false,
+  isRunning = false,
   onEmergencyStop,
   onAutopilotToggle,
+  onStartStop,
 }: AutopilotTelemetryProps) => {
   const config = STATUS_CONFIG[status];
   const StatusIcon = config.icon;
@@ -97,21 +101,30 @@ export const AutopilotTelemetry = ({
     <div className="flex flex-col items-center h-full py-1 px-1 overflow-hidden gap-1">
       {/* Header */}
       <div className="flex items-center gap-1">
-        <Navigation className="w-3 h-3 sm:w-4 sm:h-4 text-primary animate-pulse" />
-        <span className="racing-text text-[8px] sm:text-xs text-primary font-bold">AUTOPILOT</span>
+        <Navigation className={`w-3 h-3 sm:w-4 sm:h-4 ${isRunning ? 'text-primary animate-pulse' : 'text-muted-foreground'}`} />
+        <span className={`racing-text text-[8px] sm:text-xs font-bold ${isRunning ? 'text-primary' : 'text-muted-foreground'}`}>AUTOPILOT</span>
       </div>
       
       {/* Status Display */}
       <div className={`
-        w-full p-1.5 rounded border-2 ${config.borderColor} ${config.bgColor}
-        flex flex-col items-center gap-0.5 transition-all duration-300
+        w-full p-1.5 rounded border-2 transition-all duration-300
+        flex flex-col items-center gap-0.5
+        ${isRunning 
+          ? `${config.borderColor} ${config.bgColor}` 
+          : 'border-muted-foreground/30 bg-muted/10'}
       `}>
-        <StatusIcon className={`w-5 h-5 sm:w-6 sm:h-6 ${config.color} ${status === "PANIC_BRAKE" || status === "STUCK" ? "animate-pulse" : ""}`} />
-        <span className={`racing-text text-[10px] sm:text-xs font-bold ${config.color}`}>
-          {config.label}
+        <StatusIcon className={`w-5 h-5 sm:w-6 sm:h-6 ${
+          isRunning 
+            ? `${config.color} ${status === "PANIC_BRAKE" || status === "STUCK" ? "animate-pulse" : ""}` 
+            : 'text-muted-foreground'
+        }`} />
+        <span className={`racing-text text-[10px] sm:text-xs font-bold ${
+          isRunning ? config.color : 'text-muted-foreground'
+        }`}>
+          {isRunning ? config.label : 'STANDBY'}
         </span>
         <span className="text-[6px] sm:text-[8px] text-muted-foreground text-center leading-tight">
-          {config.description}
+          {isRunning ? config.description : 'Press start to begin'}
         </span>
       </div>
       
@@ -165,27 +178,37 @@ export const AutopilotTelemetry = ({
       </div>
       
       {/* Telemetry Wave - Active indicator */}
-      <div className="w-full overflow-hidden h-3 sm:h-4 border border-primary/50 rounded bg-primary/10">
-        <svg className="w-[200%] h-full animate-telemetry" viewBox="0 0 200 30" preserveAspectRatio="none">
-          <path
-            d="M0,15 Q10,5 20,15 T40,15 T60,15 T80,15 T100,15 T120,15 T140,15 T160,15 T180,15 T200,15"
-            fill="none"
-            stroke="hsl(var(--primary))"
-            strokeWidth="2"
-            className="opacity-90"
-          />
-          <path
-            d="M0,15 Q10,25 20,15 T40,15 T60,15 T80,15 T100,15 T120,15 T140,15 T160,15 T180,15 T200,15"
-            fill="none"
-            stroke="hsl(var(--primary))"
-            strokeWidth="1.5"
-            className="opacity-60"
-          />
-        </svg>
+      <div className={`w-full overflow-hidden h-3 sm:h-4 border rounded ${isRunning ? 'border-primary/50 bg-primary/10' : 'border-muted-foreground/30 bg-muted/20'}`}>
+        {isRunning ? (
+          <svg className="w-[200%] h-full animate-telemetry" viewBox="0 0 200 30" preserveAspectRatio="none">
+            <path
+              d="M0,15 Q10,5 20,15 T40,15 T60,15 T80,15 T100,15 T120,15 T140,15 T160,15 T180,15 T200,15"
+              fill="none"
+              stroke="hsl(var(--primary))"
+              strokeWidth="2"
+              className="opacity-90"
+            />
+            <path
+              d="M0,15 Q10,25 20,15 T40,15 T60,15 T80,15 T100,15 T120,15 T140,15 T160,15 T180,15 T200,15"
+              fill="none"
+              stroke="hsl(var(--primary))"
+              strokeWidth="1.5"
+              className="opacity-60"
+            />
+          </svg>
+        ) : (
+          <svg className="w-full h-full" viewBox="0 0 200 30" preserveAspectRatio="none">
+            <line x1="0" y1="15" x2="200" y2="15" stroke="hsl(var(--muted-foreground))" strokeWidth="1" className="opacity-30" />
+          </svg>
+        )}
       </div>
-      <div className="text-[5px] sm:text-[7px] text-primary racing-text font-bold">AUTOPILOT ACTIVE</div>
+      <div className={`text-[5px] sm:text-[7px] racing-text font-bold ${
+        isRunning ? 'text-primary' : 'text-muted-foreground'
+      }`}>
+        {isRunning ? 'AUTOPILOT ACTIVE' : 'AUTOPILOT STANDBY'}
+      </div>
       
-      {/* Control Buttons Below Telemetry */}
+      {/* Control Buttons: E-BRAKE | EXIT | START/STOP */}
       <div className="flex gap-1 w-full mt-1">
         {/* E-BRAKE Button */}
         <button
@@ -208,8 +231,8 @@ export const AutopilotTelemetry = ({
             <path d="M95.1,82.3l-41-3.7c-0.7-0.1-1.4-0.4-1.8-1L46,69.3l9.6-4.9l1.7,2.4c1.5,2.2,4.8,3,7,1.5c0.9-0.6,1.6-1.5,1.9-2.5    c1.4,0.5,3,0.3,4.3-0.6c0.9-0.6,1.5-1.4,1.8-2.4c1.4,0.5,3.1,0.3,4.4-0.6c1.4-0.9,2.1-2.4,2.1-4c1.5,0,2.9-0.6,4-1.9    c1.3-1.7,1.3-4.1,0.1-5.9l7.3-3.7c0.9-0.4,1.1-1.5,0.6-2.3l-0.5-0.8l1.9-1c0.9-0.4,1.1-1.5,0.6-2.3l-1.3-1.9    c-0.5-0.7-1.3-0.9-2.1-0.5L87.1,39L86.5,38c-0.5-0.7-1.3-0.9-2.1-0.5l-4.5,2.3l-2.8-5.5c-1.7-3.2-4.6-5.6-8.1-6.4l-8.7-2.2    l-2.2-3.1l0.7-0.5c1.1-0.8,1.4-2.3,0.6-3.4l-5.1-7.4c-0.8-1.1-2.3-1.4-3.4-0.6L32.4,23.5c-1.1,0.8-1.4,2.3-0.6,3.4l5.1,7.4    c0.8,1.1,2.3,1.4,3.4,0.6l0.7-0.5l2.2,3.2l-0.3,0.8c-1.6,3.6-1.2,7.8,1,11.1c1.3,1.9,2.9,4.1,4.8,6.4l-9.3,4.8l-2.5-3.3    c-0.8-1-2.1-1.3-3.2-0.8L4,71c-0.9,0.4-1.5,1.4-1.5,2.4v13.7c0,1.4,1.2,2.6,2.6,2.6h89.8c1.4,0,2.6-1.2,2.6-2.6V85    C97.5,83.6,96.5,82.5,95.1,82.3z M41.1,28.8c-1.1,0.7-2.5,0.5-3.3-0.6c-0.7-1.1-0.5-2.5,0.6-3.3c1.1-0.7,2.5-0.5,3.3,0.6    C42.4,26.6,42.1,28.1,41.1,28.8z M62.6,65.7c-0.8,0.6-2,0.4-2.6-0.5l-3-4.4c-0.6-0.8-0.4-2,0.5-2.6c0.9-0.6,2-0.4,2.6,0.5l3,4.4    C63.6,63.9,63.4,65.1,62.6,65.7z M68.7,62.6c-0.8,0.6-2,0.4-2.6-0.5l-4.1-6c-0.6-0.9-0.4-2,0.5-2.6c0.9-0.6,2-0.4,2.6,0.5l4.1,6    C69.8,60.8,69.6,62,68.7,62.6z M75,59.6c-0.8,0.6-2,0.4-2.6-0.5l-3.2-4.6c0.7-0.1,1.3-0.3,1.9-0.7l1.5-1l2.9,4.2    C76.1,57.9,75.9,59,75,59.6z M78.2,49l2.2,3.2c0.6,0.8,0.4,2-0.5,2.6c-0.8,0.6-2,0.4-2.6-0.5l-2.2-3.2l2.7-1.8    C78,49.2,78.1,49.1,78.2,49z M46.5,47.6c-1.6-2.4-1.9-5.4-0.7-8.1l0.7-1.6c0.2-0.5,0.2-1.1-0.2-1.5l-2.7-3.9l11.9-8.2L58,28    c0.2,0.3,0.5,0.5,0.9,0.6l9.3,2.3c2.6,0.7,4.9,2.4,6.1,4.8l3.1,6c0.9,1.7,0.3,3.9-1.3,4.9l-6.7,4.4c-0.8,0.5-1.9,0.3-2.5-0.5    c-0.3-0.4-0.4-0.9-0.3-1.4c0.1-0.5,0.4-0.9,0.8-1.2l4.7-3c0.7-0.4,0.9-1.3,0.6-2L71.1,40c-0.4-0.8-1.3-1.1-2.1-0.7    c-0.8,0.4-1.1,1.3-0.7,2.1l0.8,1.6c-6,1-8.7-3.6-8.8-3.9c-0.4-0.7-1.4-1-2.1-0.6L58,38.6c-0.6,0.4-0.9,1.3-0.5,2    c1,1.9,3.6,4.6,7.6,5.4c-0.7,0.6-1.1,1.3-1.4,2.2l-12.1,6.2C49.5,52,47.8,49.6,46.5,47.6z" fill="currentColor"/>
           </svg>
         </button>
-        
-        {/* Autopilot Toggle Button */}
+
+        {/* Autopilot Exit Button */}
         <button
           onClick={onAutopilotToggle}
           className={`
@@ -217,6 +240,7 @@ export const AutopilotTelemetry = ({
             transition-all duration-100 touch-feedback font-bold racing-text
             bg-card border-gold/60 text-gold hover:bg-gold/20 hover:border-gold
           `}
+          title="Exit Autopilot Mode"
         >
           <svg
             className="w-10 h-10"
@@ -230,6 +254,29 @@ export const AutopilotTelemetry = ({
             <path d="m22.375 22.375c14.375-14.375 37.234-15.172 52.562-2.4375l-2.9375 0.1875c-0.85938 0.046875-1.5156 0.79688-1.4688 1.6562 0.046875 0.82812 0.73438 1.4688 1.5625 1.4688h0.09375l6.6094-0.42188c0.078125 0 0.14062-0.046875 0.21875-0.0625 0.10938-0.015625 0.21875-0.046875 0.32812-0.09375s0.1875-0.125 0.28125-0.1875c0.0625-0.046875 0.125-0.0625 0.1875-0.125 0 0 0-0.03125 0.03125-0.046875 0.078125-0.078125 0.125-0.1875 0.1875-0.28125 0.046875-0.078125 0.10938-0.14062 0.14062-0.23438 0.03125-0.078125 0.03125-0.17188 0.046875-0.26562 0.015625-0.10938 0.046875-0.21875 0.046875-0.34375v-0.046875l-0.42188-6.6094c-0.0625-0.85938-0.78125-1.5156-1.6562-1.4688-0.85938 0.046875-1.5156 0.79688-1.4688 1.6562l0.17188 2.7656c-16.531-13.703-41.203-12.828-56.719 2.6875-10.25 10.25-14.484 24.844-11.328 39.016 0.15625 0.73438 0.8125 1.2188 1.5312 1.2188 0.10938 0 0.23438 0 0.34375-0.03125 0.84375-0.1875 1.375-1.0156 1.1875-1.8594-2.9219-13.125 1-26.625 10.5-36.125z" fill="currentColor"/>
             <path d="m91.172 40.828c-0.1875-0.84375-1.0156-1.375-1.8594-1.1875s-1.375 1.0156-1.1875 1.8594c2.9219 13.125-1 26.625-10.5 36.125-14.375 14.375-37.234 15.172-52.562 2.4375l2.9375-0.1875c0.85938-0.046875 1.5156-0.79688 1.4688-1.6562s-0.78125-1.5-1.6562-1.4688l-6.6094 0.42188c-0.078125 0-0.14062 0.046875-0.21875 0.0625-0.10938 0.015625-0.21875 0.046875-0.32812 0.09375s-0.1875 0.125-0.28125 0.1875c-0.0625 0.046875-0.125 0.0625-0.1875 0.125 0 0 0 0.03125-0.03125 0.046875-0.078125 0.078125-0.125 0.1875-0.1875 0.28125-0.046875 0.078125-0.10938 0.14062-0.14062 0.23438-0.03125 0.078125-0.03125 0.17188-0.046875 0.26562-0.015625 0.10938-0.046875 0.21875-0.046875 0.34375v0.046875l0.42188 6.6094c0.046875 0.82812 0.73438 1.4688 1.5625 1.4688h0.09375c0.85938-0.046875 1.5156-0.79688 1.4688-1.6562l-0.17188-2.7656c7.7812 6.4531 17.344 9.7031 26.922 9.7031 10.797 0 21.609-4.1094 29.828-12.344 10.25-10.25 14.484-24.844 11.328-39.016z" fill="currentColor"/>
           </svg>
+        </button>
+
+        {/* START / STOP Button */}
+        <button
+          onClick={onStartStop}
+          disabled={eBrakeActive}
+          className={`
+            flex-1 rounded-full border-2 flex items-center justify-center
+            transition-all duration-100 touch-feedback font-bold racing-text
+            ${eBrakeActive
+              ? 'bg-card border-muted-foreground/30 text-muted-foreground cursor-not-allowed opacity-50'
+              : isRunning
+                ? 'bg-card border-amber-500/60 text-amber-500 hover:bg-amber-500/20 hover:border-amber-500 shadow-md shadow-amber-500/20'
+                : 'bg-card border-emerald-500/60 text-emerald-500 hover:bg-emerald-500/20 hover:border-emerald-500 shadow-md shadow-emerald-500/20'
+            }
+          `}
+          title={isRunning ? 'Stop Autopilot' : 'Start Autopilot'}
+        >
+          {isRunning ? (
+            <Square className="w-7 h-7" />
+          ) : (
+            <Play className="w-7 h-7" />
+          )}
         </button>
       </div>
     </div>

@@ -65,6 +65,7 @@ export const CockpitController = () => {
   const [isIREnabled, setIsIREnabled] = useState(true);
   const [isSonarEnabled, setIsSonarEnabled] = useState(true);
   const [isAutopilotEnabled, setIsAutopilotEnabled] = useState(false);
+  const [isAutopilotRunning, setIsAutopilotRunning] = useState(false);
   const [isImmersiveView, setIsImmersiveView] = useState(false);
   const [eBrakeActive, setEBrakeActive] = useState(false);
   const [streamUrl, setStreamUrl] = useState<string>("");
@@ -155,7 +156,7 @@ export const CockpitController = () => {
       // Update IR enabled state from telemetry
       setIsIREnabled(data.ir_enabled ?? true);
       // Update autonomous telemetry
-      if (data.autonomous_mode !== undefined) setIsAutopilotEnabled(data.autonomous_mode);
+      if (data.autonomous_mode !== undefined) setIsAutopilotRunning(data.autonomous_mode);
       if (data.autonomous_state) setAutonomousState(data.autonomous_state);
       if (data.sonar_distance !== undefined) setSonarDistance(data.sonar_distance);
       if (data.autonomous_target_speed !== undefined) setAutonomousTargetSpeed(data.autonomous_target_speed);
@@ -243,6 +244,7 @@ export const CockpitController = () => {
       console.log('🏁 Emergency stop ACTIVE');
       setIsAutoMode(false);
       setIsAutopilotEnabled(false);
+      setIsAutopilotRunning(false);
       setControlState(prev => ({ ...prev, speed: 0, throttle: false, brake: false, gear: 'N' }));
       socketClient.emitEmergencyStop();
       socketClient.emitAutoAccelDisable();
@@ -282,10 +284,11 @@ export const CockpitController = () => {
       console.log('🛑 E-brake ACTIVE');
       setIsEmergencyStop(true);
       setIsAutopilotEnabled(false);
+      setIsAutopilotRunning(false);
       setControlState(prev => ({ ...prev, speed: 0, throttle: false, brake: false, gear: 'N' }));
       socketClient.emitEmergencyStop();
-      if (isAutopilotEnabled) {
-        socketClient.emitAutopilotToggle();
+      if (isAutopilotRunning) {
+        socketClient.emitAutopilotDisable();
       }
     } else {
       // Deactivating e-brake
@@ -293,7 +296,7 @@ export const CockpitController = () => {
       setIsEmergencyStop(false);
       socketClient.emitEmergencyStopRelease();
     }
-  }, [eBrakeActive, isAutopilotEnabled]);
+  }, [eBrakeActive, isAutopilotRunning]);
 
   const handleAutoMode = useCallback(() => {
     if (isEmergencyStop) return; // Cannot enable auto mode during emergency stop
@@ -307,36 +310,51 @@ export const CockpitController = () => {
 
   const handleIRToggle = useCallback(() => {
     console.log('🎮 IR sensor toggle');
-    if (isAutopilotEnabled) {
+    if (isAutopilotRunning) {
       console.log('🚫 IR sensors cannot be toggled in autonomous mode');
       return;
     }
     socketClient.emitIRToggle();
-  }, [isAutopilotEnabled]);
+  }, [isAutopilotRunning]);
 
   const handleSonarToggle = useCallback(() => {
     console.log('🎮 SONAR sensor toggle');
-    if (isAutopilotEnabled) {
+    if (isAutopilotRunning) {
       console.log('🚫 Sonar sensor cannot be toggled in autonomous mode');
       return;
     }
     setIsSonarEnabled(prev => !prev);
     socketClient.emitSonarToggle();
-  }, [isAutopilotEnabled]);
+  }, [isAutopilotRunning]);
 
+  // Toggle autopilot VIEW (does not start/stop the autopilot FSM)
   const handleAutopilotToggle = useCallback(() => {
-    console.log('🎮 Autopilot toggle');
-    if (eBrakeActive) {
-      console.log('🚫 Cannot enable autopilot while e-brake is active');
+    console.log('🎮 Autopilot view toggle');
+    if (eBrakeActive || isEmergencyStop) {
+      console.log('🚫 Cannot open autopilot while e-brake/emergency stop is active');
       return;
     }
-    if (isEmergencyStop) {
-      console.log('🚫 Cannot enable autopilot while emergency stop is active');
+    const entering = !isAutopilotEnabled;
+    if (!entering && isAutopilotRunning) {
+      // Exiting autopilot view while running → stop the autopilot first
+      socketClient.emitAutopilotDisable();
+    }
+    setIsAutopilotEnabled(entering);
+  }, [eBrakeActive, isEmergencyStop, isAutopilotEnabled, isAutopilotRunning]);
+
+  // Actually start / stop the autopilot FSM on the server
+  const handleAutopilotStartStop = useCallback(() => {
+    console.log('🎮 Autopilot start/stop, currently running:', isAutopilotRunning);
+    if (eBrakeActive || isEmergencyStop) {
+      console.log('🚫 Cannot start autopilot while e-brake/emergency stop is active');
       return;
     }
-    setIsAutopilotEnabled(prev => !prev);
-    socketClient.emitAutopilotToggle();
-  }, [eBrakeActive, isEmergencyStop]);
+    if (isAutopilotRunning) {
+      socketClient.emitAutopilotDisable();
+    } else {
+      socketClient.emitAutopilotEnable();
+    }
+  }, [eBrakeActive, isEmergencyStop, isAutopilotRunning]);
 
   const handleEngineStart = useCallback(() => {
     console.log('🔧 Engine START button clicked');
@@ -447,8 +465,10 @@ export const CockpitController = () => {
                 accelerationPercent={autonomousTargetSpeed}
                 distanceToObstacle={sonarDistance}
                 eBrakeActive={eBrakeActive}
+                isRunning={isAutopilotRunning}
                 onEmergencyStop={handleAutopilotEBrake}
                 onAutopilotToggle={handleAutopilotToggle}
+                onStartStop={handleAutopilotStartStop}
               />
             ) : (
               <GearShifter 

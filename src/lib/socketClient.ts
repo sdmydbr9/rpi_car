@@ -262,6 +262,30 @@ export function emitAutopilotToggle(): void {
   }
 }
 
+/**
+ * Explicitly enable Autopilot (idempotent — safe to call if already enabled)
+ */
+export function emitAutopilotEnable(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎮 AUTOPILOT: ENABLE`);
+    socket.emit('autonomous_enable', {});
+  } else {
+    console.warn(`[UI Control] ⚠️ Cannot emit autopilot enable - socket not connected`);
+  }
+}
+
+/**
+ * Explicitly disable Autopilot (idempotent — safe to call if already disabled)
+ */
+export function emitAutopilotDisable(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎮 AUTOPILOT: DISABLE`);
+    socket.emit('autonomous_disable', {});
+  } else {
+    console.warn(`[UI Control] ⚠️ Cannot emit autopilot disable - socket not connected`);
+  }
+}
+
 export default {
   connectToServer,
   disconnectFromServer,
@@ -278,4 +302,6 @@ export default {
   emitIRToggle,
   emitSonarToggle,
   emitAutopilotToggle,
+  emitAutopilotEnable,
+  emitAutopilotDisable,
 };
