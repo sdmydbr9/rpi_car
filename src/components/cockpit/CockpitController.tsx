@@ -253,6 +253,25 @@ export const CockpitController = () => {
     }
   }, [isEmergencyStop]);
 
+  // Autopilot-specific e-brake: stops the car but stays in autopilot mode
+  const handleAutopilotEBrake = useCallback(() => {
+    const newEBrakeState = !eBrakeActive;
+    console.log('🛑 Autopilot E-brake toggled:', newEBrakeState);
+    setEBrakeActive(newEBrakeState);
+    setIsEmergencyStop(newEBrakeState);
+    
+    if (newEBrakeState) {
+      // Activating e-brake while in autopilot - stop car but remain in autopilot mode
+      console.log('🛑 Autopilot E-brake ACTIVE - car stopped, autopilot paused');
+      setControlState(prev => ({ ...prev, speed: 0, throttle: false, brake: false }));
+      socketClient.emitEmergencyStop();
+    } else {
+      // Deactivating e-brake while in autopilot - resume autopilot
+      console.log('🛑 Autopilot E-brake RELEASED - resuming autopilot');
+      socketClient.emitEmergencyStopRelease();
+    }
+  }, [eBrakeActive]);
+
   const handleEBrakeToggle = useCallback(() => {
     const newEBrakeState = !eBrakeActive;
     console.log('🛑 E-brake toggled:', newEBrakeState);
@@ -427,7 +446,8 @@ export const CockpitController = () => {
                 status={autonomousState as any}
                 accelerationPercent={autonomousTargetSpeed}
                 distanceToObstacle={sonarDistance}
-                onEmergencyStop={handleEmergencyStop}
+                eBrakeActive={eBrakeActive}
+                onEmergencyStop={handleAutopilotEBrake}
                 onAutopilotToggle={handleAutopilotToggle}
               />
             ) : (

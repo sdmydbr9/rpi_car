@@ -12,6 +12,7 @@ interface AutopilotTelemetryProps {
   status: AutopilotStatus;
   accelerationPercent: number;
   distanceToObstacle: number; // in cm
+  eBrakeActive?: boolean;
   onEmergencyStop?: () => void;
   onAutopilotToggle?: () => void;
 }
@@ -78,6 +79,7 @@ export const AutopilotTelemetry = ({
   status,
   accelerationPercent,
   distanceToObstacle,
+  eBrakeActive = false,
   onEmergencyStop,
   onAutopilotToggle,
 }: AutopilotTelemetryProps) => {
@@ -185,13 +187,15 @@ export const AutopilotTelemetry = ({
       
       {/* Control Buttons Below Telemetry */}
       <div className="flex gap-1 w-full mt-1">
-        {/* E-STOP Button */}
+        {/* E-BRAKE Button */}
         <button
           onClick={onEmergencyStop}
           className={`
             flex-1 rounded-full border-2 flex items-center justify-center
             transition-all duration-100 touch-feedback font-bold racing-text
-            bg-destructive border-destructive text-destructive-foreground hover:bg-destructive/90 shadow-lg
+            ${eBrakeActive 
+              ? 'bg-destructive border-destructive text-destructive-foreground hover:bg-destructive/90 shadow-lg shadow-destructive/50 animate-pulse' 
+              : 'bg-card border-destructive/40 text-destructive/70 hover:bg-destructive/20 hover:border-destructive'}
           `}
         >
           <svg 

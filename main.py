@@ -514,11 +514,18 @@ def physics_loop():
         if obstacle_state == "IDLE":
             # Check if autonomous mode is active
             if car_state["autonomous_mode"]:
-                # AutoPilot controls motors directly via CarSystem.
-                # We still need to update car_state["current_pwm"] for
-                # telemetry, but we do NOT write to GPIO here.
-                car_state["current_pwm"] = car_system._current_speed
-                car_state["is_braking"] = False
+                # Even in autopilot, the emergency brake must override everything
+                if car_state["emergency_brake_active"]:
+                    car_state["current_pwm"] = 0
+                    car_state["is_braking"] = True
+                    car_state["gear"] = "N"
+                    car_system.stop()  # Immediately cut motors
+                else:
+                    # AutoPilot controls motors directly via CarSystem.
+                    # We still need to update car_state["current_pwm"] for
+                    # telemetry, but we do NOT write to GPIO here.
+                    car_state["current_pwm"] = car_system._current_speed
+                    car_state["is_braking"] = False
                 # Skip the rest of throttle physics — fall through to
                 # the motor-output section which will also be skipped.
             else:
@@ -693,6 +700,13 @@ def drive_autonomous():
         if not car_state["autonomous_mode"]:
             if autopilot.is_active:
                 autopilot.stop()
+            time.sleep(0.05)
+            continue
+
+        # Emergency brake overrides autopilot — pause the FSM and stop motors
+        if car_state["emergency_brake_active"]:
+            if autopilot.is_active:
+                autopilot.stop()  # Cuts motors immediately
             time.sleep(0.05)
             continue
 
@@ -1139,6 +1153,12 @@ def on_emergency_stop(data):
     
     # Always cut power immediately
     car_state["current_pwm"] = 0
+    
+    # If in autopilot mode and e-brake activated, stop motors immediately
+    if car_state["emergency_brake_active"] and car_state["autonomous_mode"]:
+        car_system.stop()
+        if autopilot.is_active:
+            autopilot.stop()
     
     # Reset obstacle avoidance state to prevent stuck state
     car_state["obstacle_state"] = "IDLE"
