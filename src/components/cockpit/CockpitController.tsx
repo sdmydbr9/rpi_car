@@ -4,6 +4,7 @@ import { SteeringWheel } from "./SteeringWheel";
 import { CameraFeed } from "./CameraFeed";
 import { CarTelemetry } from "./CarTelemetry";
 import { GearShifter } from "./GearShifter";
+import { AutopilotTelemetry } from "./AutopilotTelemetry";
 import { Pedals } from "./Pedals";
 import { ImmersiveHUD } from "../ImmersiveHUD";
 import * as socketClient from "../../lib/socketClient";
@@ -241,8 +242,10 @@ export const CockpitController = () => {
       // Activating emergency stop
       console.log('🏁 Emergency stop ACTIVE');
       setIsAutoMode(false);
+      setIsAutopilotEnabled(false);
       setControlState(prev => ({ ...prev, speed: 0, throttle: false, brake: false, gear: 'N' }));
       socketClient.emitEmergencyStop();
+      socketClient.emitAutoAccelDisable();
     } else {
       // Deactivating emergency stop
       console.log('🏁 Emergency stop RELEASED');
@@ -259,15 +262,19 @@ export const CockpitController = () => {
       // Activating e-brake
       console.log('🛑 E-brake ACTIVE');
       setIsEmergencyStop(true);
+      setIsAutopilotEnabled(false);
       setControlState(prev => ({ ...prev, speed: 0, throttle: false, brake: false, gear: 'N' }));
       socketClient.emitEmergencyStop();
+      if (isAutopilotEnabled) {
+        socketClient.emitAutopilotToggle();
+      }
     } else {
       // Deactivating e-brake
       console.log('🛑 E-brake RELEASED');
       setIsEmergencyStop(false);
       socketClient.emitEmergencyStopRelease();
     }
-  }, [eBrakeActive]);
+  }, [eBrakeActive, isAutopilotEnabled]);
 
   const handleAutoMode = useCallback(() => {
     if (isEmergencyStop) return; // Cannot enable auto mode during emergency stop
@@ -300,9 +307,17 @@ export const CockpitController = () => {
 
   const handleAutopilotToggle = useCallback(() => {
     console.log('🎮 Autopilot toggle');
+    if (eBrakeActive) {
+      console.log('🚫 Cannot enable autopilot while e-brake is active');
+      return;
+    }
+    if (isEmergencyStop) {
+      console.log('🚫 Cannot enable autopilot while emergency stop is active');
+      return;
+    }
     setIsAutopilotEnabled(prev => !prev);
     socketClient.emitAutopilotToggle();
-  }, []);
+  }, [eBrakeActive, isEmergencyStop]);
 
   const handleEngineStart = useCallback(() => {
     console.log('🔧 Engine START button clicked');
@@ -400,35 +415,42 @@ export const CockpitController = () => {
               onLaunch={handleLaunch}
               onDonut={handleDonut}
               isEngineRunning={isEngineRunning}
-              isAutopilotEnabled={isAutopilotEnabled}
-              autonomousState={autonomousState}
-              sonarDistance={sonarDistance}
-              autonomousTargetSpeed={autonomousTargetSpeed}
               sensors={sensors}
               requiresService={requiresService}
             />
           </div>
           
-          {/* Right Zone: Gear Shifter */}
+          {/* Right Zone: Gear Shifter or Autopilot Telemetry */}
           <div className="flex-[0.25] border-l border-border/30 racing-panel m-0.5 overflow-hidden">
-            <GearShifter 
-              currentGear={controlState.gear} 
-              onGearChange={handleGearChange}
-              isEmergencyStop={isEmergencyStop}
-              isAutoMode={isAutoMode}
-              isIREnabled={isIREnabled}
-              isSonarEnabled={isSonarEnabled}
-              isAutopilotEnabled={isAutopilotEnabled}
-              onEmergencyStop={handleEmergencyStop}
-              onAutoMode={handleAutoMode}
-              onIRToggle={handleIRToggle}
-              onSonarToggle={handleSonarToggle}
-              onAutopilotToggle={handleAutopilotToggle}
-              isEnabled={isEngineRunning}
-              isEngineRunning={isEngineRunning}
-              onEngineStart={handleEngineStart}
-              onEngineStop={handleEngineStop}
-            />
+            {isAutopilotEnabled ? (
+              <AutopilotTelemetry
+                status={autonomousState as any}
+                accelerationPercent={autonomousTargetSpeed}
+                distanceToObstacle={sonarDistance}
+                onEmergencyStop={handleEmergencyStop}
+                onAutopilotToggle={handleAutopilotToggle}
+              />
+            ) : (
+              <GearShifter 
+                currentGear={controlState.gear} 
+                onGearChange={handleGearChange}
+                isEmergencyStop={isEmergencyStop}
+                isAutoMode={isAutoMode}
+                isIREnabled={isIREnabled}
+                isSonarEnabled={isSonarEnabled}
+                isAutopilotEnabled={isAutopilotEnabled}
+                eBrakeActive={eBrakeActive}
+                onEmergencyStop={handleEmergencyStop}
+                onAutoMode={handleAutoMode}
+                onIRToggle={handleIRToggle}
+                onSonarToggle={handleSonarToggle}
+                onAutopilotToggle={handleAutopilotToggle}
+                isEnabled={isEngineRunning}
+                isEngineRunning={isEngineRunning}
+                onEngineStart={handleEngineStart}
+                onEngineStop={handleEngineStop}
+              />
+            )}
           </div>
         </div>
         

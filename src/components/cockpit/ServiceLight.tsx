@@ -60,11 +60,15 @@ export const ServiceLight = ({ sensors, requiresService }: ServiceIndicatorProps
             relative w-6 h-6 sm:w-7 sm:h-7 rounded-full border-2 flex items-center justify-center
             transition-all duration-200 touch-feedback
             ${requiresService 
-              ? 'border-yellow-500 bg-card cursor-pointer hover:bg-yellow-500/20' 
-              : 'border-muted bg-card/50 cursor-default opacity-60'
+              ? 'border-yellow-500 bg-transparent cursor-pointer' 
+              : 'border-muted-foreground/40 bg-transparent cursor-default opacity-60'
             }
           `}
           disabled={!requiresService}
+          style={{
+            outline: 'none',
+            boxShadow: requiresService ? '0 0 0 1px rgb(234, 179, 8)' : 'none'
+          }}
         >
           <Wrench 
             className={`
@@ -74,14 +78,7 @@ export const ServiceLight = ({ sensors, requiresService }: ServiceIndicatorProps
                 : 'text-muted-foreground'
               }
             `}
-            style={{
-              filter: requiresService ? 'drop-shadow(0 0 4px hsl(var(--warning)))' : 'none'
-            }}
           />
-          {/* Pulsating ring effect when service required */}
-          {requiresService && (
-            <span className="absolute inset-0 rounded-full border-2 border-yellow-500 animate-ping opacity-40" />
-          )}
         </button>
       </PopoverTrigger>
       

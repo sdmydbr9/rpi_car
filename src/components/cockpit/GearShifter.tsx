@@ -8,6 +8,7 @@ interface GearShifterProps {
   isIREnabled: boolean;
   isSonarEnabled: boolean;
   isAutopilotEnabled: boolean;
+  eBrakeActive: boolean;
   onEmergencyStop: () => void;
   onAutoMode: () => void;
   onIRToggle: () => void;
@@ -29,6 +30,7 @@ export const GearShifter = ({
   isIREnabled,
   isSonarEnabled,
   isAutopilotEnabled,
+  eBrakeActive,
   onEmergencyStop,
   onAutoMode,
   onIRToggle,
@@ -52,23 +54,20 @@ export const GearShifter = ({
         LIVE TELEMETRY
       </div>
 
-      {/* E-STOP and AUTO OFF - Side by Side Pill Shaped */}
+      {/* E-STOP and AUTO OFF - Side by Side Round Buttons */}
       <div className="flex w-full gap-1 mb-1.5">
-        {/* E-STOP Button - Pill Shaped */}
+        {/* E-STOP Button - Round */}
         <button
           onClick={onEmergencyStop}
-          className={`
-            flex-1 rounded-full border-2 flex items-center justify-center
-            transition-all duration-100 touch-feedback font-bold racing-text
-            ${isEmergencyStop
-              ? 'bg-destructive border-destructive text-destructive-foreground shadow-lg shadow-destructive/50'
-              : 'bg-card border-destructive/60 text-destructive hover:bg-destructive/20 hover:border-destructive'
-            }
-          `}
+          className="flex-1 rounded-full bg-transparent flex items-center justify-center transition-all duration-100 touch-feedback font-bold racing-text"
+          style={{
+            outline: 'none',
+            border: '2px solid rgb(239, 68, 68)'
+          }}
         >
           <svg 
             className="w-10 h-10" 
-            style={{ color: 'currentColor' }}
+            style={{ color: isEmergencyStop ? 'rgb(239, 68, 68)' : 'rgb(107, 114, 128)' }}
             xmlns="http://www.w3.org/2000/svg" 
             version="1.1" 
             viewBox="0 0 100 125"
@@ -77,22 +76,19 @@ export const GearShifter = ({
           </svg>
         </button>
 
-        {/* AUTO OFF Button - Pill Shaped */}
+        {/* AUTO OFF Button - Round */}
         <button
           onClick={onAutoMode}
-          disabled={isEmergencyStop}
-          className={`
-            flex-1 rounded-full border-2 flex items-center justify-center
-            transition-all duration-100 touch-feedback font-bold racing-text disabled:opacity-50
-            ${isAutoMode
-              ? 'bg-primary border-primary text-primary-foreground shadow-lg shadow-primary/50'
-              : 'bg-card border-primary/60 text-primary hover:bg-primary/20 hover:border-primary'
-            }
-          `}
+          disabled={isEmergencyStop || isAutopilotEnabled}
+          className="flex-1 rounded-full bg-transparent flex items-center justify-center transition-all duration-100 touch-feedback font-bold racing-text disabled:opacity-50 disabled:cursor-not-allowed"
+          style={{
+            outline: 'none',
+            border: '2px solid rgb(0, 184, 163)'
+          }}
         >
           <svg 
             className="w-10 h-10" 
-            style={{ color: 'currentColor' }}
+            style={{ color: (isEmergencyStop || isAutopilotEnabled) ? 'rgb(107, 114, 128)' : (isAutoMode ? 'rgb(0, 184, 163)' : 'rgb(107, 114, 128)') }}
             xmlns="http://www.w3.org/2000/svg" 
             version="1.0" 
             viewBox="0 0 29.59 27.84375"
@@ -108,27 +104,16 @@ export const GearShifter = ({
         <button
           onClick={onIRToggle}
           disabled={!isEngineRunning || isAutopilotEnabled}
-          className={`
-            w-12 h-12 rounded-full border-2 flex items-center justify-center relative
-            transition-all duration-100 touch-feedback font-bold
-            ${!isEngineRunning || isAutopilotEnabled
-              ? 'bg-muted border-muted text-muted-foreground cursor-not-allowed opacity-50'
-              : isIREnabled
-              ? 'bg-green-500/20 border-green-500 shadow-lg'
-              : 'bg-white/10 border-white/30 hover:bg-white/20 hover:border-white/40'
-            }
-          `}
+          className="w-12 h-12 rounded-full bg-transparent flex items-center justify-center transition-all duration-100 touch-feedback font-bold disabled:opacity-50 disabled:cursor-not-allowed"
+          style={{
+            outline: 'none',
+            border: '2px solid rgb(34, 197, 94)'
+          }}
           title={isAutopilotEnabled ? 'IR: LOCKED (Autonomous Mode)' : (isIREnabled ? 'IR: ON' : 'IR: OFF')}
         >
-          {/* Red diagonal line overlay when IR is off */}
-          {!isIREnabled && isEngineRunning && (
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <div className="w-full h-0.5 bg-red-500 transform rotate-45 origin-center"></div>
-            </div>
-          )}
           <svg 
             className="w-10 h-10" 
-            style={{ color: isIREnabled ? '#22c55e' : '#f3f4f6' }}
+            style={{ color: (!isEngineRunning || isAutopilotEnabled) ? 'rgb(107, 114, 128)' : (isIREnabled ? 'rgb(34, 197, 94)' : 'rgb(107, 114, 128)') }}
             xmlns="http://www.w3.org/2000/svg" 
             version="1.1" 
             viewBox="-5.0 -10.0 110.0 135.0"
@@ -153,27 +138,16 @@ export const GearShifter = ({
         <button
           onClick={onSonarToggle}
           disabled={!isEngineRunning || isAutopilotEnabled}
-          className={`
-            w-12 h-12 rounded-full border-2 flex items-center justify-center relative
-            transition-all duration-100 touch-feedback font-bold
-            ${!isEngineRunning || isAutopilotEnabled
-              ? 'bg-muted border-muted text-muted-foreground cursor-not-allowed opacity-50'
-              : isSonarEnabled
-              ? 'bg-blue-500/20 border-blue-500 shadow-lg'
-              : 'bg-white/10 border-white/30 hover:bg-white/20 hover:border-white/40'
-            }
-          `}
+          className="w-12 h-12 rounded-full bg-transparent flex items-center justify-center transition-all duration-100 touch-feedback font-bold disabled:opacity-50 disabled:cursor-not-allowed"
+          style={{
+            outline: 'none',
+            border: '2px solid rgb(59, 130, 246)'
+          }}
           title={isAutopilotEnabled ? 'SONAR: LOCKED (Autonomous Mode)' : (isSonarEnabled ? 'SONAR: ON' : 'SONAR: OFF')}
         >
-          {/* Red diagonal line overlay when Sonar is off */}
-          {!isSonarEnabled && isEngineRunning && (
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <div className="w-full h-0.5 bg-red-500 transform rotate-45 origin-center"></div>
-            </div>
-          )}
           <svg 
             className="w-10 h-10" 
-            style={{ color: isSonarEnabled ? '#3b82f6' : '#f3f4f6' }}
+            style={{ color: (!isEngineRunning || isAutopilotEnabled) ? 'rgb(107, 114, 128)' : (isSonarEnabled ? 'rgb(59, 130, 246)' : 'rgb(107, 114, 128)') }}
             xmlns="http://www.w3.org/2000/svg" 
             version="1.1" 
             viewBox="-5.0 -10.0 110.0 135.0"
@@ -195,28 +169,17 @@ export const GearShifter = ({
         {/* AUTOPILOT - Round Button */}
         <button
           onClick={onAutopilotToggle}
-          disabled={!isEngineRunning || isEmergencyStop}
-          className={`
-            w-12 h-12 rounded-full border-2 flex items-center justify-center relative
-            transition-all duration-100 touch-feedback font-bold
-            ${!isEngineRunning || isEmergencyStop
-              ? 'bg-muted border-muted text-muted-foreground cursor-not-allowed opacity-50'
-              : isAutopilotEnabled
-              ? 'bg-green-500/20 border-green-500 shadow-lg'
-              : 'bg-yellow-500/10 border-yellow-500/60 hover:bg-yellow-500/20 hover:border-yellow-500'
-            }
-          `}
+          disabled={!isEngineRunning || isEmergencyStop || eBrakeActive}
+          className="w-12 h-12 rounded-full bg-transparent flex items-center justify-center transition-all duration-100 touch-feedback font-bold disabled:opacity-50 disabled:cursor-not-allowed"
+          style={{
+            outline: 'none',
+            border: isAutopilotEnabled ? '2px solid transparent' : '2px solid rgb(234, 179, 8)'
+          }}
           title={isAutopilotEnabled ? 'AUTOPILOT: ON' : 'AUTOPILOT: OFF'}
         >
-          {/* Red diagonal line overlay when Autopilot is off */}
-          {!isAutopilotEnabled && isEngineRunning && !isEmergencyStop && (
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <div className="w-full h-0.5 bg-red-500 transform rotate-45 origin-center"></div>
-            </div>
-          )}
           <svg 
             className="w-10 h-10" 
-            style={{ color: isAutopilotEnabled ? '#22c55e' : '#f3f4f6' }}
+            style={{ color: (!isEngineRunning || isEmergencyStop || eBrakeActive) ? 'rgb(107, 114, 128)' : (isAutopilotEnabled ? 'rgb(34, 197, 94)' : 'rgb(107, 114, 128)') }}
             xmlns="http://www.w3.org/2000/svg" 
             version="1.1" 
             viewBox="-5.0 -10.0 110.0 135.0"
@@ -247,7 +210,7 @@ export const GearShifter = ({
             <path d="m50 3.875c-5.1094 0-9.2656 4.1562-9.2656 9.2656 0 4.5625 3.3438 8.3594 7.7031 9.1094 0.51562 0.09375 1.0312 0.14062 1.5625 0.14062s1.0469-0.046875 1.5625-0.14062c4.3594-0.75 7.7031-4.5469 7.7031-9.1094 0-5.1094-4.1562-9.2656-9.2656-9.2656z"/>
             <path d="m80.562 3.875c-5.1094 0-9.25 4.1562-9.25 9.2656 0 4.5625 3.3281 8.3594 7.6875 9.1094 0.51562 0.09375 1.0312 0.14062 1.5625 0.14062s1.0625-0.046875 1.5625-0.14062c4.3594-0.75 7.7031-4.5469 7.7031-9.1094 0-5.1094-4.1562-9.2656-9.2656-9.2656z"/>
             <path d="m80.566 69.422c0.86328 0 1.5625-0.69922 1.5625-1.5625v-45.609c-0.50781 0.085938-1.0273 0.14062-1.5625 0.14062s-1.0547-0.054687-1.5625-0.14062v26.188h-27.441v-26.188c-0.50781 0.085938-1.0273 0.14062-1.5625 0.14062s-1.0547-0.054687-1.5625-0.14062v26.188h-27.441v-26.188c-0.50781 0.085938-1.0273 0.14062-1.5625 0.14062s-1.0547-0.054687-1.5625-0.14062v54.043c0.50781-0.085938 1.0273-0.14062 1.5625-0.14062s1.0547 0.054687 1.5625 0.14062v-24.73h27.441v24.73c0.50781-0.085938 1.0273-0.14062 1.5625-0.14062s1.0547 0.054687 1.5625 0.14062v-24.73h27.441v16.297c0 0.86328 0.69922 1.5625 1.5625 1.5625z"/>
-            <path d="m82.688 74.695h-8.3672c-0.86328 0-1.5625 0.69922-1.5625 1.5625v18.305c0 0.86328 0.69922 1.5625 1.5625 1.5625 0.86328 0 1.5625-0.69922 1.5625-1.5625v-7.5898h5.125l4.4141 8.3203c0.28125 0.52734 0.82031 0.82812 1.3828 0.82812 0.24609 0 0.49609-0.058594 0.73047-0.18359 0.76172-0.40625 1.0547-1.3516 0.64844-2.1133l-3.7812-7.125c2.2969-0.73047 3.9609-2.8828 3.9609-5.4141v-0.91406c0-3.1328-2.5469-5.6797-5.6797-5.6797z" style={{ fill: currentGear === "R" ? "rgb(20, 184, 166)" : "currentColor", transition: "fill 0.2s" }} />
+            <path d="m82.688 74.695h-8.3672c-0.86328 0-1.5625 0.69922-1.5625 1.5625v18.305c0 0.86328 0.69922 1.5625 1.5625 1.5625 0.86328 0 1.5625-0.69922 1.5625-1.5625v-7.5898h5.125l4.4141 8.3203c0.28125 0.52734 0.82031 0.82812 1.3828 0.82812 0.24609 0 0.49609-0.058594 0.73047-0.18359 0.76172-0.40625 1.0547-1.3516 0.64844-2.1133l-3.7812-7.125c2.2969-0.73047 3.9609-2.8828 3.9609-5.4141v-0.91406c0-3.1328-2.5469-5.6797-5.6797-5.6797z" style={{ fill: currentGear === "R" ? "rgb(20, 184, 166)" : "currentColor", opacity: (isEnabled && !isAutopilotEnabled) ? 1 : 0.5, transition: "fill 0.2s, opacity 0.2s" }} />
           </g>
 
           {/* Invisible click handler for R */}
@@ -257,8 +220,8 @@ export const GearShifter = ({
             r="9.1"
             fill="transparent"
             stroke="transparent"
-            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5 }}
-            onClick={() => isEnabled && onGearChange("R")}
+            style={{ cursor: (isEnabled && !isAutopilotEnabled) ? 'pointer' : 'not-allowed', opacity: (isEnabled && !isAutopilotEnabled) ? 1 : 0.5 }}
+            onClick={() => (isEnabled && !isAutopilotEnabled) && onGearChange("R")}
           />
 
           {/* Interactive Gear Selection Overlays */}
@@ -270,8 +233,8 @@ export const GearShifter = ({
             fill={currentGear === "S" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.02)"}
             stroke={currentGear === "S" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.1)"}
             strokeWidth={currentGear === "S" ? "1" : "0.5"}
-            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s, strokeWidth 0.2s' }}
-            onClick={() => isEnabled && onGearChange("S")}
+            style={{ cursor: (isEnabled && !isAutopilotEnabled) ? 'pointer' : 'not-allowed', opacity: (isEnabled && !isAutopilotEnabled) ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s, strokeWidth 0.2s' }}
+            onClick={() => (isEnabled && !isAutopilotEnabled) && onGearChange("S")}
           />
           <text
             x="19.4"
@@ -294,8 +257,8 @@ export const GearShifter = ({
             fill={currentGear === "3" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.02)"}
             stroke={currentGear === "3" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.1)"}
             strokeWidth={currentGear === "3" ? "1" : "0.5"}
-            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s, strokeWidth 0.2s' }}
-            onClick={() => isEnabled && onGearChange("3")}
+            style={{ cursor: (isEnabled && !isAutopilotEnabled) ? 'pointer' : 'not-allowed', opacity: (isEnabled && !isAutopilotEnabled) ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s, strokeWidth 0.2s' }}
+            onClick={() => (isEnabled && !isAutopilotEnabled) && onGearChange("3")}
           />
           <text
             x="50"
@@ -318,8 +281,8 @@ export const GearShifter = ({
             fill={currentGear === "2" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.02)"}
             stroke={currentGear === "2" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.1)"}
             strokeWidth={currentGear === "2" ? "1" : "0.5"}
-            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s, strokeWidth 0.2s' }}
-            onClick={() => isEnabled && onGearChange("2")}
+            style={{ cursor: (isEnabled && !isAutopilotEnabled) ? 'pointer' : 'not-allowed', opacity: (isEnabled && !isAutopilotEnabled) ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s, strokeWidth 0.2s' }}
+            onClick={() => (isEnabled && !isAutopilotEnabled) && onGearChange("2")}
           />
           <text
             x="80.6"
@@ -342,8 +305,8 @@ export const GearShifter = ({
             fill={currentGear === "1" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.02)"}
             stroke={currentGear === "1" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.1)"}
             strokeWidth={currentGear === "1" ? "1" : "0.5"}
-            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s, strokeWidth 0.2s' }}
-            onClick={() => isEnabled && onGearChange("1")}
+            style={{ cursor: (isEnabled && !isAutopilotEnabled) ? 'pointer' : 'not-allowed', opacity: (isEnabled && !isAutopilotEnabled) ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s, strokeWidth 0.2s' }}
+            onClick={() => (isEnabled && !isAutopilotEnabled) && onGearChange("1")}
           />
           <text
             x="19.4"
@@ -366,8 +329,8 @@ export const GearShifter = ({
             fill={currentGear === "N" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.02)"}
             stroke={currentGear === "N" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.1)"}
             strokeWidth={currentGear === "N" ? "1" : "0.5"}
-            style={{ cursor: isEnabled ? 'pointer' : 'not-allowed', opacity: isEnabled ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s, strokeWidth 0.2s' }}
-            onClick={() => isEnabled && onGearChange("N")}
+            style={{ cursor: (isEnabled && !isAutopilotEnabled) ? 'pointer' : 'not-allowed', opacity: (isEnabled && !isAutopilotEnabled) ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s, strokeWidth 0.2s' }}
+            onClick={() => (isEnabled && !isAutopilotEnabled) && onGearChange("N")}
           />
           <text
             x="50"
@@ -392,37 +355,31 @@ export const GearShifter = ({
 
       {/* START and STOP Buttons */}
       <div className="flex gap-1.5 w-full">
-        {/* START Button - Pill Shaped */}
+        {/* START Button - Round */}
         <button
           onClick={onEngineStart}
-          disabled={isEngineRunning}
-          className={`
-            flex-1 rounded-full border-2 flex flex-col items-center justify-center py-1.5 px-1
-            transition-all duration-100 touch-feedback font-bold racing-text
-            ${isEngineRunning
-              ? 'bg-muted border-muted text-muted-foreground cursor-not-allowed opacity-50'
-              : 'bg-primary border-primary text-primary-foreground hover:bg-primary/90 shadow-lg'
-            }
-          `}
+          disabled={isEngineRunning || isAutopilotEnabled}
+          className="flex-1 rounded-full bg-transparent flex flex-col items-center justify-center py-1.5 px-1 transition-all duration-100 touch-feedback font-bold racing-text disabled:opacity-50 disabled:cursor-not-allowed"
+          style={{
+            outline: 'none',
+            border: '2px solid rgb(0, 184, 163)'
+          }}
         >
-          <Power className="w-3 h-3 mb-0.5" />
+          <Power className="w-3 h-3 mb-0.5" style={{ color: (isEngineRunning || isAutopilotEnabled) ? 'rgb(107, 114, 128)' : (isEngineRunning ? 'rgb(0, 184, 163)' : 'rgb(107, 114, 128)') }} />
           <span className="text-[6px] sm:text-[7px] leading-tight">START</span>
         </button>
 
-        {/* STOP Button - Pill Shaped */}
+        {/* STOP Button - Round */}
         <button
           onClick={onEngineStop}
           disabled={!isEngineRunning}
-          className={`
-            flex-1 rounded-full border-2 flex flex-col items-center justify-center py-1.5 px-1
-            transition-all duration-100 touch-feedback font-bold racing-text
-            ${!isEngineRunning
-              ? 'bg-muted border-muted text-muted-foreground cursor-not-allowed opacity-50'
-              : 'bg-destructive border-destructive text-destructive-foreground hover:bg-destructive/90 shadow-lg'
-            }
-          `}
+          className="flex-1 rounded-full bg-transparent flex flex-col items-center justify-center py-1.5 px-1 transition-all duration-100 touch-feedback font-bold racing-text disabled:opacity-50 disabled:cursor-not-allowed"
+          style={{
+            outline: 'none',
+            border: '2px solid rgb(239, 68, 68)'
+          }}
         >
-          <PowerOff className="w-3 h-3 mb-0.5" />
+          <PowerOff className="w-3 h-3 mb-0.5" style={{ color: !isEngineRunning ? 'rgb(107, 114, 128)' : 'rgb(239, 68, 68)' }} />
           <span className="text-[6px] sm:text-[7px] leading-tight">STOP</span>
         </button>
       </div>
