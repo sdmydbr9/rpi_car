@@ -139,6 +139,7 @@ except Exception as e:
     # Create dummy sensor system for testing
     class DummySensorSystem:
         def get_sonar_distance(self): return 100
+        def get_rear_sonar_distance(self): return 100
         def get_ir_status(self): return False, False
     sensor_system = DummySensorSystem()
 
@@ -150,6 +151,13 @@ car_system = CarSystem()
 def _get_sonar_for_autopilot():
     return get_smoothed_sonar()
 
+def _get_rear_sonar_for_autopilot():
+    """Read rear sonar distance via sensor_system."""
+    try:
+        return sensor_system.get_rear_sonar_distance()
+    except Exception:
+        return -1
+
 def _get_ir_for_autopilot():
     """Read IR sensors: True = obstacle detected (active LOW, inverted)."""
     try:
@@ -160,7 +168,7 @@ def _get_ir_for_autopilot():
         right = False
     return left, right
 
-autopilot = AutoPilot(car_system, _get_sonar_for_autopilot, _get_ir_for_autopilot)
+autopilot = AutoPilot(car_system, _get_sonar_for_autopilot, _get_ir_for_autopilot, _get_rear_sonar_for_autopilot)
 
 # ==========================================
 # 🧠 PHYSICS ENGINE (Background Thread)
@@ -193,6 +201,14 @@ car_state = {
     "autonomous_mode": False,  # Smart Driver autonomous mode toggle
     "autonomous_state": State.CRUISING.value,  # Current autonomous driving state (read from AutoPilot)
     "last_obstacle_side": "none",  # Track which side detected obstacle for escape logic
+    # 🚨 SENSOR HEALTH STATUS
+    "sensor_status": {
+        "front_sonar": "OK",  # OK, WARNING, FAILED
+        "rear_sonar": "OK",
+        "left_ir": "OK",
+        "right_ir": "OK",
+    },
+    "service_light_active": False,  # True if any sensor has error/warning
 }
 
 # ==========================================
@@ -227,6 +243,83 @@ def get_smoothed_sonar():
     if sonar_buffer:
         return sum(sonar_buffer) / len(sonar_buffer)
     return 100  # Safe default
+
+# ==========================================
+# 🚨 SENSOR HEALTH CHECK
+# ==========================================
+
+def check_sensor_health():
+    """
+    Periodically check sensor health and update car_state["sensor_status"]
+    Returns a dict with health status for each sensor
+    """
+    sensor_status = {
+        "front_sonar": "OK",
+        "rear_sonar": "OK",
+        "left_ir": "OK",
+        "right_ir": "OK",
+    }
+    
+    has_error = False
+    
+    try:
+        # Check Front Sonar
+        dist_front = sensor_system.get_sonar_distance()
+        if dist_front == -1:
+            sensor_status["front_sonar"] = "FAILED"
+            has_error = True
+        elif dist_front < 5:
+            sensor_status["front_sonar"] = "WARNING"
+            has_error = True
+        else:
+            sensor_status["front_sonar"] = "OK"
+    except Exception as e:
+        sensor_status["front_sonar"] = "FAILED"
+        has_error = True
+    
+    try:
+        # Check Rear Sonar
+        dist_rear = sensor_system.get_rear_sonar_distance()
+        if dist_rear == -1:
+            sensor_status["rear_sonar"] = "FAILED"
+            has_error = True
+        elif dist_rear < 5:
+            sensor_status["rear_sonar"] = "WARNING"
+            has_error = True
+        else:
+            sensor_status["rear_sonar"] = "OK"
+    except Exception as e:
+        sensor_status["rear_sonar"] = "FAILED"
+        has_error = True
+    
+    try:
+        # Check IR Sensors
+        left_blocked, right_blocked = sensor_system.get_ir_status()
+        # IR sensors are working if they return a boolean value
+        sensor_status["left_ir"] = "OK"
+        sensor_status["right_ir"] = "OK"
+    except Exception as e:
+        sensor_status["left_ir"] = "FAILED"
+        sensor_status["right_ir"] = "FAILED"
+        has_error = True
+    
+    # Update car_state with sensor status
+    car_state["sensor_status"] = sensor_status
+    car_state["service_light_active"] = has_error
+    
+    return sensor_status
+
+def sensor_monitor():
+    """
+    Background thread that periodically checks sensor health every 5 seconds
+    """
+    while True:
+        try:
+            check_sensor_health()
+            time.sleep(5)  # Check every 5 seconds
+        except Exception as e:
+            print(f"❌ Sensor monitor error: {e}")
+            time.sleep(5)
 
 def physics_loop():
     # Note: obstacle_state is now in car_state, not a local variable
@@ -622,6 +715,11 @@ engine_thread.start()
 autonomous_thread = threading.Thread(target=drive_autonomous, daemon=True)
 autonomous_thread.start()
 print("🤖 Smart Driver autonomous system initialized")
+
+# Start the Sensor Monitor Thread
+sensor_monitor_thread = threading.Thread(target=sensor_monitor, daemon=True)
+sensor_monitor_thread.start()
+print("🚨 Sensor health monitor initialized")
 
 # ==========================================
 # 🌐 WEB SERVER (Flask + SocketIO)
@@ -1238,7 +1336,10 @@ def telemetry_broadcast():
                 "autonomous_state": car_state["autonomous_state"],
                 "autonomous_target_speed": car_system._current_speed if car_state["autonomous_mode"] else 0,
                 "sonar_distance": car_state["sonar_distance"],
-                "sonar_enabled": car_state["sonar_enabled"]
+                "sonar_enabled": car_state["sonar_enabled"],
+                # 🚨 Sensor health status
+                "sensor_status": car_state["sensor_status"],
+                "service_light_active": car_state["service_light_active"]
             }
             
             socketio.emit('telemetry_update', telemetry_data)

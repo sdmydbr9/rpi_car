@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { Rocket, RotateCcw, Radar, Navigation, AlertTriangle } from "lucide-react";
+import { ServiceLight } from "./ServiceLight";
 import { Speedometer } from "./Speedometer";
 import { Gauge } from "./Gauge";
+import type { SensorStatus } from "./ServiceLight";
 
 interface CarTelemetryProps {
   steeringAngle: number;
@@ -20,6 +22,8 @@ interface CarTelemetryProps {
   autonomousState?: string;
   sonarDistance?: number;
   autonomousTargetSpeed?: number;
+  serviceLightActive?: boolean;
+  sensorStatus?: SensorStatus;
 }
 
 export const CarTelemetry = ({
@@ -39,6 +43,8 @@ export const CarTelemetry = ({
   autonomousState = "CRUISING",
   sonarDistance = 100,
   autonomousTargetSpeed = 0,
+  serviceLightActive = false,
+  sensorStatus,
 }: CarTelemetryProps) => {
   const [launchActive, setLaunchActive] = useState(false);
   const [donutActive, setDonutActive] = useState(false);
@@ -58,7 +64,7 @@ export const CarTelemetry = ({
   return (
     <div className="flex flex-col items-center justify-center h-full p-0.5 overflow-auto gap-1">
       {/* First Row: Temperature, CPU, GPU Gauges - Smaller */}
-      <div className="flex gap-1 justify-center flex-wrap">
+      <div className="flex gap-1 justify-center flex-wrap items-end">
         <Gauge 
           value={temperature}
           min={30}
@@ -86,6 +92,10 @@ export const CarTelemetry = ({
           unit="MHz"
           isEngineRunning={isEngineRunning}
           size="small"
+        />
+        <ServiceLight 
+          isActive={serviceLightActive}
+          sensorStatus={sensorStatus}
         />
       </div>
 

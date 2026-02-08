@@ -8,6 +8,7 @@ import { Pedals } from "./Pedals";
 import { ImmersiveHUD } from "../ImmersiveHUD";
 import * as socketClient from "../../lib/socketClient";
 import { useAutoAcceleration } from "../../hooks/useAutoAcceleration";
+import type { SensorStatus } from "./ServiceLight";
 
 interface ControlState {
   steeringAngle: number;
@@ -48,6 +49,14 @@ export const CockpitController = () => {
   const [autonomousState, setAutonomousState] = useState<string>("CRUISING");
   const [sonarDistance, setSonarDistance] = useState<number>(100);
   const [autonomousTargetSpeed, setAutonomousTargetSpeed] = useState<number>(0);
+  // Sensor health state
+  const [sensorStatus, setSensorStatus] = useState<SensorStatus>({
+    front_sonar: 'OK',
+    rear_sonar: 'OK',
+    left_ir: 'OK',
+    right_ir: 'OK',
+  });
+  const [serviceLightActive, setServiceLightActive] = useState(false);
   const autoAccelIntervalRef = useRef<number | null>(null);
   const connectionTimeoutRef = useRef<number | null>(null);
   const autoConnectAttemptedRef = useRef(false);
@@ -127,6 +136,9 @@ export const CockpitController = () => {
       if (data.sonar_distance !== undefined) setSonarDistance(data.sonar_distance);
       if (data.autonomous_target_speed !== undefined) setAutonomousTargetSpeed(data.autonomous_target_speed);
       if (data.sonar_enabled !== undefined) setIsSonarEnabled(data.sonar_enabled);
+      // Update sensor health status
+      if (data.sensor_status) setSensorStatus(data.sensor_status);
+      if (data.service_light_active !== undefined) setServiceLightActive(data.service_light_active);
     });
 
     return () => {
@@ -365,6 +377,8 @@ export const CockpitController = () => {
               autonomousState={autonomousState}
               sonarDistance={sonarDistance}
               autonomousTargetSpeed={autonomousTargetSpeed}
+              serviceLightActive={serviceLightActive}
+              sensorStatus={sensorStatus}
             />
           </div>
           
