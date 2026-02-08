@@ -22,6 +22,29 @@ interface ControlState {
   rpm: number; // RPM
 }
 
+// Helper function to convert old sensor format to new format
+const convertSensorStatus = (
+  oldStatus: Record<string, string>
+): SensorStatus[] => {
+  const sensorNameMap: Record<string, string> = {
+    front_sonar: 'Front Sonar',
+    rear_sonar: 'Rear Sonar',
+    left_ir: 'Left IR',
+    right_ir: 'Right IR',
+  };
+
+  const statusMap: Record<string, 'ok' | 'warning' | 'error'> = {
+    'OK': 'ok',
+    'WARNING': 'warning',
+    'FAILED': 'error',
+  };
+
+  return Object.entries(oldStatus).map(([key, value]) => ({
+    name: sensorNameMap[key] || key,
+    status: statusMap[value.toUpperCase()] || 'ok',
+  }));
+};
+
 export const CockpitController = () => {
   const [controlState, setControlState] = useState<ControlState>({
     steeringAngle: 0,
@@ -50,13 +73,13 @@ export const CockpitController = () => {
   const [sonarDistance, setSonarDistance] = useState<number>(100);
   const [autonomousTargetSpeed, setAutonomousTargetSpeed] = useState<number>(0);
   // Sensor health state
-  const [sensorStatus, setSensorStatus] = useState<SensorStatus>({
-    front_sonar: 'OK',
-    rear_sonar: 'OK',
-    left_ir: 'OK',
-    right_ir: 'OK',
-  });
-  const [serviceLightActive, setServiceLightActive] = useState(false);
+  const [sensors, setSensors] = useState<SensorStatus[]>([
+    { name: 'Front Sonar', status: 'ok' },
+    { name: 'Rear Sonar', status: 'ok' },
+    { name: 'Left IR', status: 'ok' },
+    { name: 'Right IR', status: 'ok' },
+  ]);
+  const [requiresService, setRequiresService] = useState(false);
   const autoAccelIntervalRef = useRef<number | null>(null);
   const connectionTimeoutRef = useRef<number | null>(null);
   const autoConnectAttemptedRef = useRef(false);
@@ -137,8 +160,12 @@ export const CockpitController = () => {
       if (data.autonomous_target_speed !== undefined) setAutonomousTargetSpeed(data.autonomous_target_speed);
       if (data.sonar_enabled !== undefined) setIsSonarEnabled(data.sonar_enabled);
       // Update sensor health status
-      if (data.sensor_status) setSensorStatus(data.sensor_status);
-      if (data.service_light_active !== undefined) setServiceLightActive(data.service_light_active);
+      if (data.sensor_status) {
+        const convertedSensors = convertSensorStatus(data.sensor_status);
+        setSensors(convertedSensors);
+        const hasError = convertedSensors.some(s => s.status !== 'ok');
+        setRequiresService(hasError);
+      }
     });
 
     return () => {
@@ -377,8 +404,8 @@ export const CockpitController = () => {
               autonomousState={autonomousState}
               sonarDistance={sonarDistance}
               autonomousTargetSpeed={autonomousTargetSpeed}
-              serviceLightActive={serviceLightActive}
-              sensorStatus={sensorStatus}
+              sensors={sensors}
+              requiresService={requiresService}
             />
           </div>
           

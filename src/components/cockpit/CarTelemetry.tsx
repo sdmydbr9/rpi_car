@@ -1,9 +1,8 @@
 import { useState } from "react";
 import { Rocket, RotateCcw, Radar, Navigation, AlertTriangle } from "lucide-react";
-import { ServiceLight } from "./ServiceLight";
+import { ServiceLight, type SensorStatus } from "./ServiceLight";
 import { Speedometer } from "./Speedometer";
 import { Gauge } from "./Gauge";
-import type { SensorStatus } from "./ServiceLight";
 
 interface CarTelemetryProps {
   steeringAngle: number;
@@ -22,8 +21,8 @@ interface CarTelemetryProps {
   autonomousState?: string;
   sonarDistance?: number;
   autonomousTargetSpeed?: number;
-  serviceLightActive?: boolean;
-  sensorStatus?: SensorStatus;
+  sensors?: SensorStatus[];
+  requiresService?: boolean;
 }
 
 export const CarTelemetry = ({
@@ -43,8 +42,8 @@ export const CarTelemetry = ({
   autonomousState = "CRUISING",
   sonarDistance = 100,
   autonomousTargetSpeed = 0,
-  serviceLightActive = false,
-  sensorStatus,
+  sensors = [],
+  requiresService = false,
 }: CarTelemetryProps) => {
   const [launchActive, setLaunchActive] = useState(false);
   const [donutActive, setDonutActive] = useState(false);
@@ -94,8 +93,8 @@ export const CarTelemetry = ({
           size="small"
         />
         <ServiceLight 
-          isActive={serviceLightActive}
-          sensorStatus={sensorStatus}
+          sensors={sensors}
+          requiresService={requiresService}
         />
       </div>
 
