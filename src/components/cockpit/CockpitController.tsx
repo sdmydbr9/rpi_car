@@ -84,6 +84,7 @@ export const CockpitController = () => {
   ]);
   const [requiresService, setRequiresService] = useState(false);
   const [tuning, setTuning] = useState<TuningConstants>(DEFAULT_TUNING);
+  const [backendDefaults, setBackendDefaults] = useState<TuningConstants>(DEFAULT_TUNING);
   const autoAccelIntervalRef = useRef<number | null>(null);
   const connectionTimeoutRef = useRef<number | null>(null);
   const autoConnectAttemptedRef = useRef(false);
@@ -138,6 +139,19 @@ export const CockpitController = () => {
     if (!isConnected) {
       return;
     }
+
+    // Subscribe to tuning sync from backend (fires on connect + after tuning_request)
+    socketClient.onTuningSync((data) => {
+      console.log('⚙️ Tuning sync from backend:', data);
+      if (data.tuning) {
+        setTuning(data.tuning as unknown as TuningConstants);
+      }
+      if (data.defaults) {
+        setBackendDefaults(data.defaults as unknown as TuningConstants);
+      }
+    });
+    // Also explicitly request in case the connect event was missed
+    socketClient.requestTuning();
 
     // Subscribe to telemetry updates
     // Note: throttle, brake, and steeringAngle are NOT updated from telemetry - they're controlled only by user input
@@ -418,6 +432,7 @@ export const CockpitController = () => {
           isConnected={isConnected}
           tuning={tuning}
           onTuningChange={setTuning}
+          backendDefaults={backendDefaults}
         />
         
         {/* Main Content - Fixed Layout (No Responsive Changes) */}

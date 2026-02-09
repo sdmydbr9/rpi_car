@@ -113,6 +113,27 @@ class AutoPilot:
     UTURN_DURATION        = 0.8     # seconds (tuneable)
     ESCAPE_CLEAR_CM       = 20      # cm: path considered clear → reset counter
 
+    # All tunable keys (used for serialisation)
+    TUNING_KEYS = [
+        'FRONT_CRITICAL_CM', 'REAR_BLOCKED_CM', 'REAR_CRITICAL_CM',
+        'DANGER_CM', 'FULL_SPEED_CM', 'MAX_SPEED', 'MIN_SPEED',
+        'REVERSE_SPEED', 'PIVOT_SPEED', 'REVERSE_DURATION', 'REVERSE_STEP',
+        'PIVOT_DURATION', 'RECOVERY_DURATION', 'STUCK_RECHECK_INTERVAL',
+        'SONAR_HISTORY_LEN', 'STUCK_DISTANCE_THRESH', 'STUCK_TIME_THRESH',
+        'STUCK_BOOST_STEP', 'STUCK_BOOST_MAX', 'STUCK_MOVE_RESET',
+        'MAX_NORMAL_ESCAPES', 'UTURN_SPEED', 'UTURN_DURATION', 'ESCAPE_CLEAR_CM',
+    ]
+
+    def get_tuning(self):
+        """Return current tuning constants as a dict."""
+        return {k: getattr(self, k) for k in self.TUNING_KEYS}
+
+    @classmethod
+    def get_default_tuning(cls):
+        """Return the original class-level default tuning constants."""
+        # Read from the class itself (not an instance) to get compile-time defaults
+        return {k: getattr(AutoPilot, k) for k in cls.TUNING_KEYS}
+
     def __init__(self, car, get_sonar, get_ir, get_rear_sonar=None):
         self._car            = car
         self._get_sonar      = get_sonar

@@ -154,21 +154,24 @@ const TUNING_GROUPS: { title: string; params: ParamConfig[] }[] = [
 interface SettingsDialogProps {
   tuning: TuningConstants;
   onTuningChange: (tuning: TuningConstants) => void;
+  backendDefaults?: TuningConstants;
 }
 
 const ParamRow = ({
   config,
   value,
   onChange,
+  backendDefault,
 }: {
   config: ParamConfig;
   value: number;
   onChange: (val: number) => void;
+  backendDefault: number;
 }) => {
   const [showInfo, setShowInfo] = useState(false);
   const clamp = (v: number) => Math.min(config.max, Math.max(config.min, v));
   const decimals = config.step < 1 ? 1 : 0;
-  const defaultVal = DEFAULT_TUNING[config.key];
+  const defaultVal = backendDefault;
 
   const handleManualChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const raw = e.target.value;
@@ -265,7 +268,7 @@ const CollapsibleGroup = ({
   );
 };
 
-export const SettingsDialog = ({ tuning, onTuningChange }: SettingsDialogProps) => {
+export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAULT_TUNING }: SettingsDialogProps) => {
   const [isOpen, setIsOpen] = useState(false);
   const [synced, setSynced] = useState(false);
 
@@ -288,10 +291,10 @@ export const SettingsDialog = ({ tuning, onTuningChange }: SettingsDialogProps) 
   }, [tuning, sendTuningToBackend]);
 
   const handleResetDefaults = useCallback(() => {
-    const defaults = { ...DEFAULT_TUNING };
+    const defaults = { ...backendDefaults };
     onTuningChange(defaults);
     sendTuningToBackend(defaults);
-  }, [onTuningChange, sendTuningToBackend]);
+  }, [backendDefaults, onTuningChange, sendTuningToBackend]);
 
   return (
     <>
@@ -331,6 +334,7 @@ export const SettingsDialog = ({ tuning, onTuningChange }: SettingsDialogProps) 
                       config={param}
                       value={tuning[param.key]}
                       onChange={(val) => handleParamChange(param.key, val)}
+                      backendDefault={backendDefaults[param.key]}
                     />
                   ))}
                 </CollapsibleGroup>

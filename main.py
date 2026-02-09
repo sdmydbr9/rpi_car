@@ -165,6 +165,12 @@ def _get_ir_for_autopilot():
 
 autopilot = AutoPilot(car_system, _get_sonar_for_autopilot, _get_ir_for_autopilot, _get_rear_sonar_for_autopilot)
 
+# Store a copy of the original class-level defaults (immutable reference for reset)
+_AUTOPILOT_DEFAULT_TUNING = AutoPilot.get_default_tuning()
+
+# Active tuning state — persists across UI reconnections
+_active_tuning = dict(_AUTOPILOT_DEFAULT_TUNING)
+
 # ==========================================
 # 🧠 PHYSICS ENGINE (Background Thread)
 # ==========================================
@@ -1082,6 +1088,11 @@ def on_connect():
     car_state["emergency_brake_active"] = False
     print(f"   Emergency brakes reset to OFF")
     emit('connection_response', {'data': 'Connected to RC Car'})
+    # Send current tuning state so UI stays in sync after refresh
+    emit('tuning_sync', {
+        'tuning': _active_tuning,
+        'defaults': _AUTOPILOT_DEFAULT_TUNING,
+    })
 
 @socketio.on('disconnect')
 def on_disconnect():
@@ -1304,14 +1315,17 @@ def on_autopilot_toggle(data):
 
 @socketio.on('tuning_update')
 def on_tuning_update(data):
-    """Apply tuning constants from the UI to the running AutoPilot instance."""
+    """Apply tuning constants from the UI to the running AutoPilot instance
+    and persist in _active_tuning so new clients pick them up."""
     tuning = data.get('tuning', {})
     applied = []
     for key, value in tuning.items():
         attr = key.upper()
         if hasattr(autopilot, attr):
             try:
-                setattr(autopilot, attr, type(getattr(autopilot, attr))(value))
+                cast_value = type(getattr(AutoPilot, attr))(value)  # cast to original type
+                setattr(autopilot, attr, cast_value)
+                _active_tuning[attr] = cast_value
                 applied.append(attr)
             except Exception as e:
                 print(f"⚠️ [Tuning] Failed to set {attr}={value}: {e}")
@@ -1322,6 +1336,14 @@ def on_tuning_update(data):
         autopilot._rear_sonar_history = deque(autopilot._rear_sonar_history, maxlen=new_len)
     print(f"\n⚙️ [Tuning] Applied {len(applied)} constants from UI: {applied}")
     emit('tuning_response', {'status': 'ok', 'applied': applied})
+
+@socketio.on('tuning_request')
+def on_tuning_request(data):
+    """Send current active tuning and defaults to the requesting client."""
+    emit('tuning_sync', {
+        'tuning': _active_tuning,
+        'defaults': _AUTOPILOT_DEFAULT_TUNING,
+    })
 
 @socketio.on('state_request')
 def on_state_request(data):

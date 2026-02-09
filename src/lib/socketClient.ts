@@ -83,6 +83,34 @@ export function connectToServer(serverIp: string, port: number = 5000): Promise<
   });
 }
 
+// Tuning sync callback
+let tuningSyncCallback: ((data: { tuning: Record<string, number>; defaults: Record<string, number> }) => void) | null = null;
+
+/**
+ * Subscribe to tuning sync events from the backend.
+ * Called automatically on connect and in response to tuning_request.
+ */
+export function onTuningSync(callback: (data: { tuning: Record<string, number>; defaults: Record<string, number> }) => void): void {
+  tuningSyncCallback = callback;
+  if (socket) {
+    socket.off('tuning_sync');  // avoid duplicate listeners
+    socket.on('tuning_sync', (data) => {
+      console.log(`[Socket] ⚙️ Tuning sync received from backend`);
+      if (tuningSyncCallback) tuningSyncCallback(data);
+    });
+  }
+}
+
+/**
+ * Explicitly request current tuning from the backend
+ */
+export function requestTuning(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] ⚙️ Requesting current tuning from backend`);
+    socket.emit('tuning_request', {});
+  }
+}
+
 /**
  * Disconnect from the backend
  */
@@ -318,4 +346,6 @@ export default {
   emitAutopilotEnable,
   emitAutopilotDisable,
   emitTuningUpdate,
+  onTuningSync,
+  requestTuning,
 };
