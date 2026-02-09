@@ -100,7 +100,7 @@ export const CockpitController = () => {
             await socketClient.connectToServer(ip, 5000);
             setServerIp(ip);
             setIsConnected(true);
-            setStreamUrl(`http://${ip}/stream`);
+            setStreamUrl(`http://${ip}:5000/video_feed`);
             console.log(`✅ [Startup] Successfully connected to ${ip}`);
             return true;
           } catch (error) {
@@ -442,7 +442,7 @@ export const CockpitController = () => {
             {/* Camera Feed */}
             <div className="h-[30%] min-h-0 p-0.5 border-none border-b border-border/30">
               <div onClick={handleImmersiveViewToggle} className="cursor-pointer h-full w-full">
-                <CameraFeed isConnected={isConnected} />
+                <CameraFeed isConnected={isConnected} streamUrl={streamUrl} />
               </div>
             </div>
             

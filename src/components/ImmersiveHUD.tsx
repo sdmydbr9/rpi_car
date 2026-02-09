@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { X, Wifi, Zap, Power } from "lucide-react";
+import { X, Wifi, Zap, Power, VideoOff } from "lucide-react";
 import { useGameFeedback } from "@/hooks/useGameFeedback";
 
 interface ImmersiveHUDProps {
@@ -107,16 +107,34 @@ export const ImmersiveHUD = ({
       
       {/* Background Layer - Camera Feed */}
       <div className="absolute inset-0 z-0 bg-background">
-        <div className="w-full h-full bg-gradient-to-b from-secondary to-background flex items-center justify-center">
-          <div className="text-center">
-            <div className="text-4xl racing-text text-muted-foreground mb-2">HELMET CAM</div>
-            <div className="text-sm text-muted-foreground/50">Awaiting video feed...</div>
-            {/* Simulated track view placeholder */}
-            <div className="mt-8 w-64 h-32 mx-auto border border-primary/30 rounded-lg bg-card/30 backdrop-blur-sm flex items-center justify-center">
-              <div className="text-xs text-muted-foreground racing-text">TRACK VIEW</div>
+        {streamUrl ? (
+          <>
+            <img
+              src={streamUrl}
+              alt="Live Camera Feed"
+              className="w-full h-full object-cover"
+              onError={(e) => {
+                // Hide the broken image and show fallback
+                (e.target as HTMLImageElement).style.display = 'none';
+              }}
+            />
+            {/* Subtle vignette overlay for better HUD readability */}
+            <div 
+              className="absolute inset-0"
+              style={{
+                background: 'radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.4) 100%)',
+              }}
+            />
+          </>
+        ) : (
+          <div className="w-full h-full bg-gradient-to-b from-secondary to-background flex items-center justify-center">
+            <div className="text-center">
+              <VideoOff className="w-12 h-12 text-muted-foreground/50 mx-auto mb-2" />
+              <div className="text-2xl racing-text text-muted-foreground mb-2">NO VIDEO FEED</div>
+              <div className="text-sm text-muted-foreground/50">Camera not connected</div>
             </div>
           </div>
-        </div>
+        )}
       </div>
       
       {/* HUD Layer */}

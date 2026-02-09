@@ -56,7 +56,7 @@ export const SteeringWheel = ({ onAngleChange, angle, isEnabled = true }: Steeri
     <div className="flex flex-col items-center justify-center h-full p-1 overflow-hidden">
       <div
         ref={wheelRef}
-        className={`relative cursor-grab active:cursor-grabbing touch-none select-none w-[min(38vw,14rem)] aspect-[5/4] ${!isEnabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+        className={`relative cursor-grab active:cursor-grabbing touch-none select-none w-[min(46vw,18rem)] aspect-square ${!isEnabled ? 'opacity-50 cursor-not-allowed' : ''}`}
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
@@ -113,10 +113,10 @@ export const SteeringWheel = ({ onAngleChange, angle, isEnabled = true }: Steeri
             {/* Center Display */}
             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[55%] h-[55%] racing-panel flex flex-col items-center justify-center">
               {/* AMG Logo */}
-              <div className="text-[5px] sm:text-[7px] text-primary racing-text">AMG</div>
-              
+              <div className="text-xs sm:text-sm text-primary racing-text">AMG</div>
+
               {/* Angle Display */}
-              <div className={`text-base sm:text-xl md:text-2xl racing-number ${isDragging ? 'text-primary text-glow-teal' : 'text-foreground'}`}>
+              <div className={`text-lg sm:text-2xl md:text-3xl racing-number ${isDragging ? 'text-primary text-glow-teal' : 'text-foreground'}`}>
                 {Math.round(angle)}°
               </div>
               

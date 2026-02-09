@@ -1,5 +1,5 @@
 import RPi.GPIO as GPIO
-from flask import Flask, render_template, send_from_directory, jsonify, request
+from flask import Flask, render_template, send_from_directory, jsonify, request, Response
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import os
@@ -9,6 +9,7 @@ import time
 import threading
 import socket
 import re
+import cv2
 from enum import Enum
 from collections import deque
 from sensors import SensorSystem
@@ -82,6 +83,43 @@ def check_and_build():
 
 # Run the check immediately
 check_and_build()
+
+# ==========================================
+# 📷 CAMERA SETUP
+# ==========================================
+try:
+    from picamera2 import Picamera2
+    picam2 = Picamera2()
+    cam_config = picam2.create_video_configuration(
+        main={"size": (640, 480), "format": "BGR888"}
+    )
+    picam2.configure(cam_config)
+    picam2.start()
+    CAMERA_AVAILABLE = True
+    print("✅ Camera initialized successfully!")
+except Exception as e:
+    CAMERA_AVAILABLE = False
+    picam2 = None
+    print(f"⚠️  Camera not available: {e}")
+    print("   Video feed will be disabled.")
+
+def generate_camera_frames():
+    """Generator that yields MJPEG frames from the Pi camera."""
+    while True:
+        try:
+            if not CAMERA_AVAILABLE or picam2 is None:
+                time.sleep(1)
+                continue
+            frame = picam2.capture_array()
+            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            if not ret:
+                continue
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        except Exception as e:
+            print(f"❌ Camera frame error: {e}")
+            time.sleep(0.1)
 
 # ==========================================
 # 🚗 HARDWARE SETUP
@@ -808,9 +846,20 @@ def api_server_ip():
 def serve_root_files(filename):
     return send_from_directory(DIST_DIR, filename)
 
+# --- CAMERA VIDEO FEED ---
+@app.route('/video_feed')
+def video_feed():
+    """MJPEG streaming route for live camera feed."""
+    if not CAMERA_AVAILABLE:
+        return "Camera not available", 503
+    return Response(generate_camera_frames(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
 # Print server info on startup
 print(f"🌐 Server IP Address: {get_local_ip()}")
 print(f"📱 Mobile devices can connect via: http://{get_local_ip()}:5000")
+if CAMERA_AVAILABLE:
+    print(f"📷 Camera feed available at: http://{get_local_ip()}:5000/video_feed")
 
 # --- CONTROLS ---
 
