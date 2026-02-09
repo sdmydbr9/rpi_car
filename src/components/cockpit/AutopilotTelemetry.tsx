@@ -1,4 +1,4 @@
-import { Navigation, AlertTriangle, RotateCcw, OctagonX, Compass, Activity, Gauge, Ruler, Play, Square } from "lucide-react";
+import { Navigation, AlertTriangle, RotateCcw, OctagonX, Compass, Activity, Gauge, Ruler, Play, Square, RefreshCw } from "lucide-react";
 
 export type AutopilotStatus = 
   | "CRUISING" 
@@ -6,7 +6,8 @@ export type AutopilotStatus =
   | "REVERSING" 
   | "STUCK" 
   | "PIVOTING" 
-  | "RECOVERY";
+  | "RECOVERY"
+  | "UTURN";
 
 interface AutopilotTelemetryProps {
   status: AutopilotStatus;
@@ -75,6 +76,24 @@ const STATUS_CONFIG: Record<AutopilotStatus, {
     borderColor: "border-success",
     description: "Stabilizing sensors",
   },
+  UTURN: {
+    icon: RefreshCw,
+    label: "U-TURN",
+    color: "text-orange-500",
+    bgColor: "bg-orange-500/20",
+    borderColor: "border-orange-500",
+    description: "180° spin escape maneuver",
+  },
+};
+
+// Fallback config for unknown states to prevent crashes
+const FALLBACK_CONFIG = {
+  icon: Activity,
+  label: "UNKNOWN",
+  color: "text-muted-foreground",
+  bgColor: "bg-muted/20",
+  borderColor: "border-muted-foreground",
+  description: "Unknown state",
 };
 
 export const AutopilotTelemetry = ({
@@ -87,7 +106,7 @@ export const AutopilotTelemetry = ({
   onAutopilotToggle,
   onStartStop,
 }: AutopilotTelemetryProps) => {
-  const config = STATUS_CONFIG[status];
+  const config = STATUS_CONFIG[status] || FALLBACK_CONFIG;
   const StatusIcon = config.icon;
   
   // Determine distance warning level

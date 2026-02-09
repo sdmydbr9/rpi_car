@@ -9,6 +9,7 @@ States
   PIVOTING      True tank turn (opposite wheels) to face away from obstacle
   RECOVERY      Brief pause to let sensors stabilise before resuming
   STUCK         Emergency stop — car is pinned between front and rear obstacles
+  UTURN         180° spin escape after repeated failed escape attempts
 
 Sensor layout
 ─────────────
@@ -29,6 +30,20 @@ Sensor noise
   Sonar glitch filter: maintains a rolling window of recent readings.
   Single 0 cm / negative spikes are discarded; the median of the window
   is used as the "true" distance, eliminating single-reading glitches.
+
+Smart Power Management (Anti-Stuck Logic)
+─────────────────────────────────────────
+  While cruising with throttle > 0, monitors sonar distance continuously.
+  If distance hasn't changed by ±2 cm for 1.0 s, adds +5 % PWM boost per
+  second (capped at 80 % PWM).  Resets to default speed once movement is
+  detected (distance change > 5 cm).
+
+Escalating Escape Maneuvers
+───────────────────────────
+  Tracks consecutive failed escape attempts (failed_attempts counter).
+  Attempts 1-2: standard Reverse + Pivot.  Attempt 3+: executes a 180°
+  U-Turn (high-speed spin for 0.8 s).  Counter resets when path clears
+  (> 20 cm).
 """
 
 import random
@@ -46,6 +61,7 @@ class State(Enum):
     PIVOTING    = "PIVOTING"
     RECOVERY    = "RECOVERY"
     STUCK       = "STUCK"
+    UTURN       = "UTURN"
 
 
 # ── AutoPilot ──────────────────────────────────────────
@@ -77,12 +93,25 @@ class AutoPilot:
     MIN_SPEED            = 30     # PWM % at DANGER_CM boundary
     REVERSE_SPEED        = 40     # PWM % while reversing
     PIVOT_SPEED          = 50    # PWM % while pivoting
-    REVERSE_DURATION     = 0.8    # max seconds of reverse (sum of micro-steps)
+    REVERSE_DURATION     = 1    # max seconds of reverse (sum of micro-steps)
     REVERSE_STEP         = 1.0    # seconds per reverse micro-step
     PIVOT_DURATION       = 1.0    # seconds
     RECOVERY_DURATION    = 1.0    # seconds
     STUCK_RECHECK_INTERVAL = 1.0  # seconds between re-checking while stuck
     SONAR_HISTORY_LEN    = 3      # median filter window
+
+    # ── Smart Power Management constants ───────────
+    STUCK_DISTANCE_THRESH = 2       # cm: distance change below this = "not moving"
+    STUCK_TIME_THRESH     = 1.0     # seconds of no movement before boost
+    STUCK_BOOST_STEP      = 5       # PWM % added per stuck interval
+    STUCK_BOOST_MAX       = 80      # PWM % absolute cap for boost
+    STUCK_MOVE_RESET      = 5       # cm: distance change above this = "moving again"
+
+    # ── Escalating Escape constants ────────────────
+    MAX_NORMAL_ESCAPES    = 2       # attempts before triggering U-turn
+    UTURN_SPEED           = 70      # PWM % for U-turn spin
+    UTURN_DURATION        = 0.8     # seconds (tuneable)
+    ESCAPE_CLEAR_CM       = 20      # cm: path considered clear → reset counter
 
     def __init__(self, car, get_sonar, get_ir, get_rear_sonar=None):
         self._car            = car
@@ -100,6 +129,14 @@ class AutoPilot:
         # Sensor noise filters
         self._sonar_history      = deque(maxlen=self.SONAR_HISTORY_LEN)
         self._rear_sonar_history = deque(maxlen=self.SONAR_HISTORY_LEN)
+
+        # Smart Power Management (anti-stuck boost)
+        self._stuck_boost        = 0       # accumulated PWM % on top of cruise speed
+        self._last_cruise_dist   = None    # last distance reading while cruising
+        self._stuck_timer        = 0.0     # time.time() when distance last changed
+
+        # Escalating Escape Maneuvers
+        self._failed_attempts    = 0       # consecutive blocked escape attempts
 
     # ── Properties ─────────────────────────────────────
 
@@ -123,12 +160,19 @@ class AutoPilot:
         self._state  = State.CRUISING
         self._sonar_history.clear()
         self._rear_sonar_history.clear()
+        # Reset power management & escalation state
+        self._stuck_boost      = 0
+        self._last_cruise_dist = None
+        self._stuck_timer      = 0.0
+        self._failed_attempts  = 0
 
     def stop(self):
         """Deactivate autopilot and stop motors immediately."""
         self._active = False
         self._state  = State.CRUISING
         self._car.stop()
+        self._stuck_boost     = 0
+        self._failed_attempts = 0
 
     # ── Sensor helpers ─────────────────────────────────
 
@@ -212,6 +256,7 @@ class AutoPilot:
             State.PIVOTING:    self._state_pivoting,
             State.RECOVERY:    self._state_recovery,
             State.STUCK:       self._state_stuck,
+            State.UTURN:       self._state_uturn,
         }[self._state]
 
         handler(distance, left_ir, right_ir)
@@ -240,12 +285,46 @@ class AutoPilot:
 
         # Proportional speed
         if distance >= self.FULL_SPEED_CM:
-            speed = self.MAX_SPEED
+            base_speed = self.MAX_SPEED
         else:
             # Linear map: DANGER_CM → MIN_SPEED,  FULL_SPEED_CM → MAX_SPEED
             ratio = (distance - self.DANGER_CM) / (self.FULL_SPEED_CM - self.DANGER_CM)
-            speed = self.MIN_SPEED + ratio * (self.MAX_SPEED - self.MIN_SPEED)
-            speed = max(self.MIN_SPEED, min(self.MAX_SPEED, speed))
+            base_speed = self.MIN_SPEED + ratio * (self.MAX_SPEED - self.MIN_SPEED)
+            base_speed = max(self.MIN_SPEED, min(self.MAX_SPEED, base_speed))
+
+        # ── Dynamic Power Boost (anti-stuck) ──────────
+        now = time.time()
+
+        if self._last_cruise_dist is None:
+            # First tick — initialise tracking
+            self._last_cruise_dist = distance
+            self._stuck_timer = now
+
+        delta = abs(distance - self._last_cruise_dist)
+
+        if delta > self.STUCK_MOVE_RESET:
+            # Car is clearly moving — reset boost
+            if self._stuck_boost > 0:
+                print(f"✅ [AutoPilot] Movement detected (Δ{delta:.1f}cm) → reset boost")
+            self._stuck_boost = 0
+            self._last_cruise_dist = distance
+            self._stuck_timer = now
+        elif delta > self.STUCK_DISTANCE_THRESH:
+            # Some movement — update reference but keep current boost
+            self._last_cruise_dist = distance
+            self._stuck_timer = now
+        else:
+            # Distance unchanged — check if stuck long enough to boost
+            if (now - self._stuck_timer) >= self.STUCK_TIME_THRESH:
+                new_boost = self._stuck_boost + self.STUCK_BOOST_STEP
+                cap = self.STUCK_BOOST_MAX - base_speed
+                self._stuck_boost = max(0, min(new_boost, cap))
+                self._stuck_timer = now  # restart interval
+                self._last_cruise_dist = distance
+                print(f"⚡ [AutoPilot] Stuck detected — boost now +{self._stuck_boost}% "
+                      f"(total {base_speed + self._stuck_boost}%)")
+
+        speed = min(base_speed + self._stuck_boost, self.STUCK_BOOST_MAX)
 
         self._car.set_speed(int(speed))
         self._car.set_steering(0)
@@ -268,11 +347,22 @@ class AutoPilot:
             print(f"🛑 [AutoPilot] STUCK — Front {distance:.1f}cm, Rear {rear_dist:.1f}cm < {self.REAR_BLOCKED_CM}cm. Cannot reverse.")
             return
 
+        # ── Escalation check ──────────────────────────
+        self._failed_attempts += 1
+
+        if self._failed_attempts > self.MAX_NORMAL_ESCAPES:
+            # Too many failed escapes → perform U-turn
+            self._state = State.UTURN
+            self._maneuver_start = time.time()
+            print(f"🔃 [AutoPilot] Escalation! {self._failed_attempts} attempts "
+                  f"→ U-TURN ({self.UTURN_SPEED}% for {self.UTURN_DURATION}s)")
+            return
+
         # Rear is clear → proceed to rear-aware reverse
         self._state = State.REVERSING
         self._maneuver_start = time.time()
         self._reverse_elapsed = 0.0
-        print(f"🔄 [AutoPilot] PANIC_BRAKE → REVERSING (rear clear at {rear_dist:.1f}cm)")
+        print(f"🔄 [AutoPilot] PANIC_BRAKE → REVERSING (rear clear at {rear_dist:.1f}cm, attempt {self._failed_attempts})")
 
     # ── State C1: REVERSING (rear-aware micro-steps) ───
 
@@ -314,7 +404,16 @@ class AutoPilot:
     def _state_recovery(self, distance, left_ir, right_ir):
         # Car is stopped; sensors stabilise.
         if time.time() - self._maneuver_start >= self.RECOVERY_DURATION:
+            # If path is clear, reset escalation counter
+            if distance >= self.ESCAPE_CLEAR_CM:
+                if self._failed_attempts > 0:
+                    print(f"✅ [AutoPilot] Path clear ({distance:.1f}cm ≥ {self.ESCAPE_CLEAR_CM}cm) "
+                          f"→ reset failed_attempts ({self._failed_attempts} → 0)")
+                self._failed_attempts = 0
             self._state = State.CRUISING
+            # Reset stuck-boost tracking for fresh cruise
+            self._last_cruise_dist = None
+            self._stuck_boost = 0
             print("✅ [AutoPilot] RECOVERY → CRUISING")
 
     # ── State D: STUCK ─────────────────────────────────
@@ -339,8 +438,25 @@ class AutoPilot:
                 print(f"🔓 [AutoPilot] STUCK cleared — rear now {rear_dist:.1f}cm → REVERSING")
             elif front_dist >= self.DANGER_CM:
                 # Front cleared — just go
+                self._failed_attempts = 0
+                self._stuck_boost = 0
                 self._state = State.CRUISING
                 print(f"🔓 [AutoPilot] STUCK cleared — front now {front_dist:.1f}cm → CRUISING")
             else:
                 self._maneuver_start = time.time()
                 print(f"🛑 [AutoPilot] Still STUCK — Front {front_dist:.1f}cm, Rear {rear_dist:.1f}cm")
+
+    # ── State E: U-TURN (escalated escape) ─────────────
+
+    def _state_uturn(self, distance, left_ir, right_ir):
+        """
+        180° spin escape: triggered after MAX_NORMAL_ESCAPES consecutive
+        failed reverse-and-pivot maneuvers.
+        """
+        self._car.pivot_turn(self._turn_direction, self.UTURN_SPEED)
+
+        if time.time() - self._maneuver_start >= self.UTURN_DURATION:
+            self._car.stop()
+            self._state = State.RECOVERY
+            self._maneuver_start = time.time()
+            print(f"🔃 [AutoPilot] U-TURN complete → RECOVERY")

@@ -10,6 +10,7 @@ import { ImmersiveHUD } from "../ImmersiveHUD";
 import * as socketClient from "../../lib/socketClient";
 import { useAutoAcceleration } from "../../hooks/useAutoAcceleration";
 import type { SensorStatus } from "./ServiceLight";
+import { DEFAULT_TUNING, type TuningConstants } from "./SettingsDialog";
 
 interface ControlState {
   steeringAngle: number;
@@ -82,6 +83,7 @@ export const CockpitController = () => {
     { name: 'Right IR', status: 'ok' },
   ]);
   const [requiresService, setRequiresService] = useState(false);
+  const [tuning, setTuning] = useState<TuningConstants>(DEFAULT_TUNING);
   const autoAccelIntervalRef = useRef<number | null>(null);
   const connectionTimeoutRef = useRef<number | null>(null);
   const autoConnectAttemptedRef = useRef(false);
@@ -414,6 +416,8 @@ export const CockpitController = () => {
         {/* Header */}
         <Header 
           isConnected={isConnected}
+          tuning={tuning}
+          onTuningChange={setTuning}
         />
         
         {/* Main Content - Fixed Layout (No Responsive Changes) */}

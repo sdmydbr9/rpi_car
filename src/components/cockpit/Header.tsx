@@ -1,13 +1,19 @@
+import { SettingsDialog, TuningConstants, DEFAULT_TUNING } from "./SettingsDialog";
+
 interface HeaderProps {
   driverName?: string;
   position?: string;
   isConnected: boolean;
+  tuning?: TuningConstants;
+  onTuningChange?: (tuning: TuningConstants) => void;
 }
 
 export const Header = ({ 
   driverName = "HAMILTON", 
   position = "P1",
-  isConnected
+  isConnected,
+  tuning = DEFAULT_TUNING,
+  onTuningChange = () => {}
 }: HeaderProps) => {
   return (
     <header className="flex items-center justify-between px-1.5 sm:px-4 py-0.5 sm:py-1.5 border-b border-primary/30 bg-card/30 backdrop-blur-sm h-[6dvh] min-h-[1.75rem] max-h-10 flex-shrink-0">
@@ -34,16 +40,14 @@ export const Header = ({
         <span className="hidden sm:inline">{isConnected ? 'CONNECTED' : 'OFFLINE'}</span>
       </div>
       
-      {/* Right: Driver Status + Connection */}
+      {/* Right: Driver Status + Settings */}
       <div className="flex items-center gap-1 sm:gap-3">
         <div className="flex items-center gap-0.5 sm:gap-2">
           <span className="text-primary font-bold text-xs sm:text-base racing-text">{position}</span>
           <span className="text-foreground font-bold racing-text text-[10px] sm:text-sm hidden sm:inline">{driverName}</span>
         </div>
-        {/* Driver Number Badge */}
-        <div className="w-4 h-4 sm:w-6 sm:h-6 bg-primary rounded flex items-center justify-center">
-          <span className="text-primary-foreground font-bold text-[8px] sm:text-xs">44</span>
-        </div>
+        {/* Settings Dialog Button */}
+        <SettingsDialog tuning={tuning} onTuningChange={onTuningChange} />
       </div>
     </header>
   );
