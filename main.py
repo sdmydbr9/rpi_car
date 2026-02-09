@@ -1302,6 +1302,27 @@ def on_autopilot_toggle(data):
     """Alias for autonomous_toggle — frontend emits this event name"""
     on_autonomous_toggle(data)
 
+@socketio.on('tuning_update')
+def on_tuning_update(data):
+    """Apply tuning constants from the UI to the running AutoPilot instance."""
+    tuning = data.get('tuning', {})
+    applied = []
+    for key, value in tuning.items():
+        attr = key.upper()
+        if hasattr(autopilot, attr):
+            try:
+                setattr(autopilot, attr, type(getattr(autopilot, attr))(value))
+                applied.append(attr)
+            except Exception as e:
+                print(f"⚠️ [Tuning] Failed to set {attr}={value}: {e}")
+    # If SONAR_HISTORY_LEN changed, resize the deques
+    if 'SONAR_HISTORY_LEN' in tuning:
+        new_len = int(tuning['SONAR_HISTORY_LEN'])
+        autopilot._sonar_history = deque(autopilot._sonar_history, maxlen=new_len)
+        autopilot._rear_sonar_history = deque(autopilot._rear_sonar_history, maxlen=new_len)
+    print(f"\n⚙️ [Tuning] Applied {len(applied)} constants from UI: {applied}")
+    emit('tuning_response', {'status': 'ok', 'applied': applied})
+
 @socketio.on('state_request')
 def on_state_request(data):
     """Send current car state to client"""

@@ -286,6 +286,19 @@ export function emitAutopilotDisable(): void {
   }
 }
 
+/**
+ * Emit tuning constants update to the backend autopilot
+ * @param tuning - Object containing all tuning constants
+ */
+export function emitTuningUpdate(tuning: Record<string, number>): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] ⚙️ TUNING UPDATE: Sending ${Object.keys(tuning).length} constants`);
+    socket.emit('tuning_update', { tuning });
+  } else {
+    console.warn(`[UI Control] ⚠️ Cannot emit tuning update - socket not connected`);
+  }
+}
+
 export default {
   connectToServer,
   disconnectFromServer,
@@ -304,4 +317,5 @@ export default {
   emitAutopilotToggle,
   emitAutopilotEnable,
   emitAutopilotDisable,
+  emitTuningUpdate,
 };
