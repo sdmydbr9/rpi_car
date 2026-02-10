@@ -142,9 +142,9 @@ export function isConnected(): boolean {
  */
 export function onHeartbeatStatus(callback: (active: boolean) => void): void {
   if (socket) {
-    socket.on('telemetry_update', (data: any) => {
+    socket.on('telemetry_update', (data: Record<string, unknown>) => {
       if (data.heartbeat_active !== undefined) {
-        callback(data.heartbeat_active);
+        callback(data.heartbeat_active as boolean);
       }
     });
   }

@@ -4,7 +4,7 @@ import { SteeringWheel } from "./SteeringWheel";
 import { CameraFeed } from "./CameraFeed";
 import { CarTelemetry } from "./CarTelemetry";
 import { GearShifter } from "./GearShifter";
-import { AutopilotTelemetry } from "./AutopilotTelemetry";
+import { AutopilotTelemetry, type AutopilotStatus } from "./AutopilotTelemetry";
 import { Pedals } from "./Pedals";
 import { ImmersiveHUD } from "../ImmersiveHUD";
 import * as socketClient from "../../lib/socketClient";
@@ -496,7 +496,7 @@ export const CockpitController = () => {
           <div className="flex-[0.25] border-l border-border/30 racing-panel m-0.5 overflow-hidden">
             {isAutopilotEnabled ? (
               <AutopilotTelemetry
-                status={autonomousState as any}
+                status={autonomousState as AutopilotStatus}
                 accelerationPercent={autonomousTargetSpeed}
                 distanceToObstacle={sonarDistance}
                 eBrakeActive={eBrakeActive}
