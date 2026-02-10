@@ -102,7 +102,7 @@ export const GearShifter = ({
         </button>
       </div>
 
-      {/* IR and SONAR and AUTOPILOT - Side by Side Round Buttons */}
+      {/* IR, SONAR, AUTOPILOT, and CAMERA - Single Row Round Buttons */}
       <div className="flex w-full gap-1 mb-1 justify-center">
         {/* IR Button - Round */}
         <button
@@ -196,29 +196,7 @@ export const GearShifter = ({
         </button>
       </div>
 
-      {/* CAMERA - Round Button */}
-      <div className="flex w-full gap-1 mb-1 justify-center">
-        <button
-          onClick={onCameraToggle}
-          disabled={!isEngineRunning}
-          className="w-12 h-12 rounded-full bg-transparent flex items-center justify-center transition-all duration-100 touch-feedback font-bold disabled:opacity-50 disabled:cursor-not-allowed"
-          style={{
-            outline: 'none',
-            border: '2px solid rgb(168, 85, 247)'
-          }}
-          title={isCameraEnabled ? 'CAMERA: ON' : 'CAMERA: OFF'}
-        >
-          <svg 
-            className="w-10 h-10" 
-            style={{ color: !isEngineRunning ? 'rgb(107, 114, 128)' : (isCameraEnabled ? 'rgb(34, 197, 94)' : 'rgb(239, 68, 68)') }}
-            xmlns="http://www.w3.org/2000/svg" 
-            version="1.1" 
-            viewBox="0 0 24 24"
-          >
-            <path d="M4,4H7L9,2H15L17,4H20A2,2 0 0,1 22,6V18A2,2 0 0,1 20,20H4A2,2 0 0,1 2,18V6A2,2 0 0,1 4,4M12,7A5,5 0 0,0 7,12A5,5 0 0,0 12,17A5,5 0 0,0 17,12A5,5 0 0,0 12,7M12,9A3,3 0 0,1 15,12A3,3 0 0,1 12,15A3,3 0 0,1 9,12A3,3 0 0,1 12,9Z" fill="currentColor"/>
-          </svg>
-        </button>
-      </div>
+      {/* CAMERA - Round Button (included in same row above) */}
 
       {/* Transmission Icon Gearbox */}
       <div className="relative w-full aspect-[110/135] mb-0.5 flex-shrink min-h-0" style={{ maxHeight: 'min(180px, 32vh)' }}>
