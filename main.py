@@ -914,7 +914,8 @@ def drive_autonomous():
         car_state["last_obstacle_side"] = autopilot.turn_direction or "none"
 
         # Activate vision when cruising forward (camera faces front)
-        if VISION_AVAILABLE and vision_system is not None:
+        # Only if camera is enabled — otherwise autopilot relies on sonar/IR only
+        if _is_vision_available():
             # Vision should be active whenever autopilot is driving forward
             is_forward = autopilot.state in (State.CRUISING, State.RECOVERY)
             vision_system.active = is_forward
@@ -927,6 +928,17 @@ def drive_autonomous():
             car_state["camera_closest_object"] = summary["closest_class"]
             car_state["camera_closest_confidence"] = summary["closest_confidence"]
             car_state["vision_fps"] = summary["vision_fps"]
+        else:
+            # Camera off or vision unavailable — deactivate vision and clear telemetry
+            if VISION_AVAILABLE and vision_system is not None:
+                vision_system.active = False
+            car_state["vision_active"] = False
+            car_state["camera_obstacle_distance"] = 999.0
+            car_state["camera_detections_count"] = 0
+            car_state["camera_in_path_count"] = 0
+            car_state["camera_closest_object"] = "none"
+            car_state["camera_closest_confidence"] = 0.0
+            car_state["vision_fps"] = 0.0
 
         time.sleep(0.05)  # 20 Hz
 
@@ -1131,8 +1143,8 @@ def enable_autonomous():
     car_state["ir_enabled"] = True
     car_state["sonar_enabled"] = True
     autopilot.start()
-    # Enable vision system for forward object detection
-    if VISION_AVAILABLE and vision_system is not None:
+    # Enable vision system for forward object detection (only if camera is enabled)
+    if _is_vision_available():
         vision_system.active = True
     print(f"🤖 SMART DRIVER: ENABLED - Autonomous driving active")
     print(f"📡 SAFETY: IR and Sonar sensors force-enabled in autonomous mode")

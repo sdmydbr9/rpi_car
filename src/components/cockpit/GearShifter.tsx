@@ -221,7 +221,7 @@ export const GearShifter = ({
       </div>
 
       {/* Transmission Icon Gearbox */}
-      <div className="relative w-full aspect-[110/135] mb-0.5 flex-shrink min-h-0" style={{ maxHeight: 'min(100px, 20vh)' }}>
+      <div className="relative w-full aspect-[110/135] mb-0.5 flex-shrink min-h-0" style={{ maxHeight: 'min(180px, 32vh)' }}>
         {/* Transmission Icon */}
         <svg 
           className="w-full h-full"
@@ -245,7 +245,7 @@ export const GearShifter = ({
           <circle
             cx="80.6"
             cy="85.4"
-            r="9.1"
+            r="12.5"
             fill="transparent"
             stroke="transparent"
             style={{ cursor: (isEnabled && !isAutopilotEnabled) ? 'pointer' : 'not-allowed', opacity: (isEnabled && !isAutopilotEnabled) ? 1 : 0.5 }}
@@ -257,7 +257,7 @@ export const GearShifter = ({
           <circle
             cx="19.4"
             cy="13.1"
-            r="9.1"
+            r="12.5"
             fill={currentGear === "S" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.02)"}
             stroke={currentGear === "S" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.1)"}
             strokeWidth={currentGear === "S" ? "1" : "0.5"}
@@ -269,7 +269,7 @@ export const GearShifter = ({
             y="13.1"
             textAnchor="middle"
             dominantBaseline="middle"
-            fontSize="8"
+            fontSize="12"
             fontWeight="bold"
             fill={currentGear === "S" ? "white" : "rgb(0, 0, 0)"}
             pointerEvents="none"
@@ -281,7 +281,7 @@ export const GearShifter = ({
           <circle
             cx="50"
             cy="13.1"
-            r="9.1"
+            r="12.5"
             fill={currentGear === "3" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.02)"}
             stroke={currentGear === "3" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.1)"}
             strokeWidth={currentGear === "3" ? "1" : "0.5"}
@@ -293,7 +293,7 @@ export const GearShifter = ({
             y="13.1"
             textAnchor="middle"
             dominantBaseline="middle"
-            fontSize="8"
+            fontSize="12"
             fontWeight="bold"
             fill={currentGear === "3" ? "white" : "rgb(0, 0, 0)"}
             pointerEvents="none"
@@ -305,7 +305,7 @@ export const GearShifter = ({
           <circle
             cx="80.6"
             cy="13.1"
-            r="9.1"
+            r="12.5"
             fill={currentGear === "2" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.02)"}
             stroke={currentGear === "2" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.1)"}
             strokeWidth={currentGear === "2" ? "1" : "0.5"}
@@ -317,7 +317,7 @@ export const GearShifter = ({
             y="13.1"
             textAnchor="middle"
             dominantBaseline="middle"
-            fontSize="8"
+            fontSize="12"
             fontWeight="bold"
             fill={currentGear === "2" ? "white" : "rgb(0, 0, 0)"}
             pointerEvents="none"
@@ -329,7 +329,7 @@ export const GearShifter = ({
           <circle
             cx="19.4"
             cy="85.4"
-            r="9.1"
+            r="12.5"
             fill={currentGear === "1" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.02)"}
             stroke={currentGear === "1" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.1)"}
             strokeWidth={currentGear === "1" ? "1" : "0.5"}
@@ -341,7 +341,7 @@ export const GearShifter = ({
             y="85.4"
             textAnchor="middle"
             dominantBaseline="middle"
-            fontSize="8"
+            fontSize="12"
             fontWeight="bold"
             fill={currentGear === "1" ? "white" : "rgb(0, 0, 0)"}
             pointerEvents="none"
@@ -353,7 +353,7 @@ export const GearShifter = ({
           <circle
             cx="50"
             cy="85.4"
-            r="9.1"
+            r="12.5"
             fill={currentGear === "N" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.02)"}
             stroke={currentGear === "N" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.1)"}
             strokeWidth={currentGear === "N" ? "1" : "0.5"}
@@ -365,7 +365,7 @@ export const GearShifter = ({
             y="85.4"
             textAnchor="middle"
             dominantBaseline="middle"
-            fontSize="8"
+            fontSize="12"
             fontWeight="bold"
             fill={currentGear === "N" ? "white" : "rgb(0, 0, 0)"}
             pointerEvents="none"
