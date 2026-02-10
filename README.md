@@ -29,7 +29,8 @@ A sophisticated autonomous and manual control system for a Raspberry Pi-powered 
 - **System Monitoring**: CPU temperature, clock speeds, RPM
 
 ### 🎮 User Interface
-- Modern F1-inspired cockpit design
+- **Web Interface**: Modern F1-inspired cockpit design
+- **Mobile App**: Native iOS and Android applications
 - Real-time telemetry dashboard
 - Speedometer, tachometer, and gauges
 - Camera feed with object detection overlay
@@ -44,14 +45,20 @@ A sophisticated autonomous and manual control system for a Raspberry Pi-powered 
 │  React Frontend │ ◄─────────────────────────────► │  Flask Backend   │
 │   (Vite + TS)   │                                 │   (Python 3)     │
 └─────────────────┘                                 └──────────────────┘
-                                                             │
-                                                             ▼
-                                                    ┌──────────────────┐
-                                                    │  Hardware Layer  │
-                                                    │  - GPIO Motors   │
-                                                    │  - Sensors       │
-                                                    │  - Camera        │
-                                                    └──────────────────┘
+        ▲                                                    │
+        │                  WebSocket/HTTP                    │
+        │             ┌──────────────────┐                   │
+        └─────────────│  Mobile App      │                   │
+                      │ (React Native)   │                   │
+                      │  iOS + Android   │                   │
+                      └──────────────────┘                   │
+                                                              ▼
+                                                     ┌──────────────────┐
+                                                     │  Hardware Layer  │
+                                                     │  - GPIO Motors   │
+                                                     │  - Sensors       │
+                                                     │  - Camera        │
+                                                     └──────────────────┘
 ```
 
 ## 📋 Prerequisites
@@ -100,7 +107,23 @@ npm install
 npm run build
 ```
 
-### 4. Hardware Configuration
+### 4. Mobile App Setup (Optional)
+```bash
+# Navigate to mobile app directory
+cd app
+
+# Install dependencies
+npm install
+
+# Run on device (see app/README.md for details)
+npm run android  # For Android
+npm run ios      # For iOS (macOS only)
+
+# Return to root directory
+cd ..
+```
+
+### 5. Hardware Configuration
 
 Edit `main.py` to configure GPIO pins for your wiring:
 
@@ -152,6 +175,8 @@ The server will start on `http://0.0.0.0:5000`
 Access the web interface at:
 - Local: `http://localhost:5000`
 - Network: `http://<raspberry-pi-ip>:5000`
+
+For mobile app usage, see [MOBILE_APP_GUIDE.md](MOBILE_APP_GUIDE.md)
 
 ## 🎮 Usage
 
@@ -219,21 +244,27 @@ python3 test_autopilot_bug.py  # Autopilot unit tests
 ### Project Structure
 ```
 rpi_car/
-├── src/                    # React frontend
-│   ├── components/         # UI components
-│   │   ├── cockpit/       # Cockpit control components
-│   │   └── ui/            # shadcn/ui components
-│   ├── hooks/             # Custom React hooks
-│   ├── lib/               # Utilities and Socket.IO client
-│   └── pages/             # Route pages
-├── main.py                # Flask server & main application
-├── autopilot.py           # Autonomous driving FSM
-├── motor.py               # Motor control system
-├── sensors.py             # Sensor interface
-├── vision.py              # Computer vision module
-├── requirements.txt       # Python dependencies
-├── package.json           # Node.js dependencies
-└── README.md             # This file
+├── app/                   # Mobile app (React Native)
+│   ├── android/           # Android native project
+│   ├── ios/               # iOS native project
+│   ├── src/               # Mobile app source code
+│   └── README.md          # Mobile app documentation
+├── src/                   # React frontend
+│   ├── components/        # UI components
+│   │   ├── cockpit/      # Cockpit control components
+│   │   └── ui/           # shadcn/ui components
+│   ├── hooks/            # Custom React hooks
+│   ├── lib/              # Utilities and Socket.IO client
+│   └── pages/            # Route pages
+├── main.py               # Flask server & main application
+├── autopilot.py          # Autonomous driving FSM
+├── motor.py              # Motor control system
+├── sensors.py            # Sensor interface
+├── vision.py             # Computer vision module
+├── requirements.txt      # Python dependencies
+├── package.json          # Node.js dependencies
+├── README.md             # This file
+└── MOBILE_APP_GUIDE.md   # Mobile app documentation
 ```
 
 ## 🔧 Configuration
