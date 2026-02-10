@@ -130,9 +130,12 @@ export const CockpitController = () => {
   const [cameraClosestObject, setCameraClosestObject] = useState("");
   const [cameraClosestConfidence, setCameraClosestConfidence] = useState(0);
   const [visionFps, setVisionFps] = useState(0);
+  const [userWantsVision, setUserWantsVision] = useState(false);
+  const [cameraActualFps, setCameraActualFps] = useState(0);
   const autoAccelIntervalRef = useRef<number | null>(null);
   const connectionTimeoutRef = useRef<number | null>(null);
   const autoConnectAttemptedRef = useRef(false);
+  const pendingGearRef = useRef<{ gear: string; ts: number } | null>(null);
 
   // Smart auto-connect: try localhost first, then fallback to server IP
   useEffect(() => {
@@ -255,18 +258,35 @@ export const CockpitController = () => {
     // Note: throttle, brake, and steeringAngle are NOT updated from telemetry - they're controlled only by user input
     // This ensures continuous hold behavior works correctly (the server won't overwrite the UI state)
     socketClient.onTelemetry((data) => {
-      setControlState(prev => ({
-        ...prev,
-        gear: data.gear || prev.gear,
-        speed: data.current_pwm || prev.speed,
-        // Only show system metrics when engine is running
-        temperature: isEngineRunning ? (data.temperature || prev.temperature) : 0,
-        cpuClock: isEngineRunning ? (data.cpu_clock || prev.cpuClock) : 0,
-        gpuClock: isEngineRunning ? (data.gpu_clock || prev.gpuClock) : 0,
-        rpm: isEngineRunning ? (data.rpm || prev.rpm) : 0,
-        // DO NOT update throttle and brake from telemetry - these are user-controlled inputs
-        // that must maintain their state while held
-      }));
+      setControlState(prev => {
+        // Gear bounce-back guard: ignore stale telemetry gear during pending window
+        let newGear = data.gear || prev.gear;
+        const pending = pendingGearRef.current;
+        if (pending) {
+          if (data.gear === pending.gear) {
+            // Backend confirmed the pending gear change
+            pendingGearRef.current = null;
+          } else if (Date.now() - pending.ts < 500) {
+            // Stale telemetry arrived before backend processed our gear change — keep optimistic value
+            newGear = pending.gear;
+          } else {
+            // Timeout expired, accept whatever server says
+            pendingGearRef.current = null;
+          }
+        }
+        return {
+          ...prev,
+          gear: newGear,
+          speed: data.current_pwm || prev.speed,
+          // Only show system metrics when engine is running
+          temperature: isEngineRunning ? (data.temperature || prev.temperature) : 0,
+          cpuClock: isEngineRunning ? (data.cpu_clock || prev.cpuClock) : 0,
+          gpuClock: isEngineRunning ? (data.gpu_clock || prev.gpuClock) : 0,
+          rpm: isEngineRunning ? (data.rpm || prev.rpm) : 0,
+          // DO NOT update throttle and brake from telemetry - these are user-controlled inputs
+          // that must maintain their state while held
+        };
+      });
       // Update IR enabled state from telemetry
       setIsIREnabled(data.ir_enabled ?? true);
       
@@ -297,6 +317,8 @@ export const CockpitController = () => {
       if (data.camera_closest_object !== undefined) setCameraClosestObject(data.camera_closest_object);
       if (data.camera_closest_confidence !== undefined) setCameraClosestConfidence(data.camera_closest_confidence);
       if (data.vision_fps !== undefined) setVisionFps(data.vision_fps);
+      if (data.user_wants_vision !== undefined) setUserWantsVision(data.user_wants_vision);
+      if (data.camera_actual_fps !== undefined) setCameraActualFps(data.camera_actual_fps);
       // Update live camera config from telemetry (for HUD badge only — does NOT touch tuning state)
       if (data.camera_resolution) setLiveCameraResolution(data.camera_resolution);
       if (data.camera_jpeg_quality !== undefined) setLiveCameraJpegQuality(data.camera_jpeg_quality);
@@ -347,6 +369,7 @@ export const CockpitController = () => {
       return;
     }
     setControlState(prev => ({ ...prev, gear }));
+    pendingGearRef.current = { gear, ts: Date.now() };
     socketClient.emitGearChange(gear);
   }, [isEngineRunning]);
 
@@ -555,9 +578,11 @@ export const CockpitController = () => {
         cameraResolution={liveCameraResolution}
         cameraJpegQuality={liveCameraJpegQuality}
         cameraFramerate={liveCameraFramerate}
+        cameraActualFps={cameraActualFps}
         visionActive={visionActive}
         visionFps={visionFps}
         isCameraEnabled={isCameraEnabled}
+        userWantsVision={userWantsVision}
       />
       
       <div className="h-[100dvh] w-full flex flex-col overflow-hidden">

@@ -318,9 +318,12 @@ def generate_camera_frames():
     when available, otherwise falls back to raw camera capture.
     Only streams frames when camera_enabled is True.
     Applies cv2.cvtColor for standard color conversion."""
+    _fps_frame_count = 0
+    _fps_last_time = time.time()
     while True:
         try:
             if not CAMERA_AVAILABLE or picam2 is None:
+                car_state["camera_actual_fps"] = 0.0
                 time.sleep(1)
                 continue
             
@@ -331,6 +334,9 @@ def generate_camera_frames():
             
             # Check if camera is enabled - if not, wait and continue
             if not car_state["camera_enabled"]:
+                car_state["camera_actual_fps"] = 0.0
+                _fps_frame_count = 0
+                _fps_last_time = time.time()
                 time.sleep(0.1)
                 continue
 
@@ -353,6 +359,16 @@ def generate_camera_frames():
             if not ret:
                 continue
             frame_bytes = buffer.tobytes()
+
+            # Measure actual streaming FPS
+            _fps_frame_count += 1
+            now = time.time()
+            elapsed = now - _fps_last_time
+            if elapsed >= 1.0:
+                car_state["camera_actual_fps"] = round(_fps_frame_count / elapsed, 1)
+                _fps_frame_count = 0
+                _fps_last_time = now
+
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
         except Exception as e:
@@ -442,10 +458,13 @@ def _get_ir_for_autopilot():
 def _get_camera_for_autopilot():
     """Read camera obstacle distance for autopilot fusion.
     
-    Returns 999.0 (no obstacle) when camera is disabled to ensure
-    autopilot relies solely on sonar and IR sensors in that mode.
+    Returns 999.0 (no obstacle) when camera is disabled or when the user
+    has disabled CV, to ensure autopilot relies solely on sonar and IR
+    sensors in those modes. Camera feed is visual-only when CV is off.
     """
     if not car_state["camera_enabled"]:
+        return 999.0
+    if not car_state["user_wants_vision"]:
         return 999.0
     if VISION_AVAILABLE and vision_system is not None:
         return vision_system.get_camera_obstacle_distance()
@@ -512,6 +531,7 @@ car_state = {
     "service_light_active": False,  # True if any sensor has error/warning
     # 📷 CAMERA / VISION / OBJECT DETECTION
     "camera_enabled": False,         # Camera master toggle (disabled by default)
+    "user_wants_vision": False,      # User's explicit CV toggle preference
     "vision_active": False,          # True if vision DNN is running
     "camera_obstacle_distance": 999.0,  # Virtual distance from camera (cm)
     "camera_detections_count": 0,     # Number of detected objects
@@ -519,6 +539,7 @@ car_state = {
     "camera_closest_object": "",      # Closest in-path object class
     "camera_closest_confidence": 0,   # Confidence % of closest detection
     "vision_fps": 0.0,               # DNN inference FPS
+    "camera_actual_fps": 0.0,        # Measured streaming FPS (actual frames/sec)
     # Camera configuration settings
     "camera_resolution": CAMERA_DEFAULT_RESOLUTION,  # Current resolution setting (WxH format, e.g. '640x480')
     "camera_jpeg_quality": CAMERA_JPEG_QUALITY,      # JPEG quality (1-100)
@@ -721,12 +742,12 @@ def physics_loop():
         last_right_obstacle = right_obstacle
         
         # --- VISION ACTIVATION FOR MANUAL MODE ---
-        # Activate vision DNN when driving forward in manual mode (only if camera is enabled)
+        # Activate vision DNN when driving forward in manual mode (only if camera + CV enabled)
         if _is_vision_available() and not car_state["autonomous_mode"]:
             gear_val = car_state["gear"]
             is_forward_gear = gear_val in ("1", "2", "3", "S")
             is_moving = car_state["gas_pressed"] and car_state["current_pwm"] > 0
-            vision_system.active = is_forward_gear and is_moving
+            vision_system.active = car_state["user_wants_vision"] and is_forward_gear and is_moving
             # Mirror vision data for manual mode telemetry
             if vision_system.active:
                 summary = vision_system.get_detections_summary()
@@ -1157,11 +1178,11 @@ def drive_autonomous():
         car_state["last_obstacle_side"] = autopilot.turn_direction or "none"
 
         # Activate vision when cruising forward (camera faces front)
-        # Only if camera is enabled — otherwise autopilot relies on sonar/IR only
+        # Only if camera + CV enabled — otherwise autopilot relies on sonar/IR only
         if _is_vision_available():
-            # Vision should be active whenever autopilot is driving forward
+            # Vision should be active whenever autopilot is driving forward AND user wants CV
             is_forward = autopilot.state in (State.CRUISING, State.RECOVERY)
-            vision_system.active = is_forward
+            vision_system.active = car_state["user_wants_vision"] and is_forward
             # Mirror vision telemetry
             summary = vision_system.get_detections_summary()
             car_state["vision_active"] = summary["vision_active"]
@@ -1749,8 +1770,9 @@ def on_camera_toggle(data):
     state = '✅ ON' if car_state["camera_enabled"] else '❌ OFF'
     print(f"\n⚙️ [UI Control] 📷 CAMERA: {state}")
     
-    # When camera is disabled, turn off vision system
+    # When camera is disabled, turn off vision system and reset user CV preference
     if not car_state["camera_enabled"]:
+        car_state["user_wants_vision"] = False
         if VISION_AVAILABLE and vision_system is not None:
             vision_system.active = False
             print(f"📷 VISION: Disabled (camera off)")
@@ -1759,17 +1781,22 @@ def on_camera_toggle(data):
 
 @socketio.on('vision_toggle')
 def on_vision_toggle(data):
-    """Toggle vision/object detection system on/off (only if camera is enabled)."""
+    """Toggle vision/object detection system on/off (only if camera is enabled).
+    Sets the user_wants_vision flag which is respected by physics_loop and
+    autonomous loop to decide whether to activate the DNN."""
     if not car_state["camera_enabled"]:
         emit('vision_response', {'status': 'error', 'message': 'Camera must be enabled first. Please enable the camera before activating vision detection.'})
         return
     if not VISION_AVAILABLE or vision_system is None:
         emit('vision_response', {'status': 'error', 'message': 'Vision system not available'})
         return
-    vision_system.active = not vision_system.active
-    state = '✅ ON' if vision_system.active else '❌ OFF'
+    car_state["user_wants_vision"] = not car_state["user_wants_vision"]
+    # If user is disabling CV, immediately deactivate vision system
+    if not car_state["user_wants_vision"]:
+        vision_system.active = False
+    state = '✅ ON' if car_state["user_wants_vision"] else '❌ OFF'
     print(f"\n⚙️ [UI Control] 📷 VISION: {state}")
-    emit('vision_response', {'status': 'ok', 'vision_active': vision_system.active})
+    emit('vision_response', {'status': 'ok', 'vision_active': car_state["user_wants_vision"]})
 
 @socketio.on('camera_config_update')
 def on_camera_config_update(data):
@@ -2038,6 +2065,7 @@ def telemetry_broadcast():
                 "service_light_active": car_state["service_light_active"],
                 # 📷 Camera status
                 "camera_enabled": car_state["camera_enabled"],
+                "user_wants_vision": car_state["user_wants_vision"],
                 # 📷 Vision / Object Detection telemetry
                 "vision_active": car_state["vision_active"],
                 "camera_obstacle_distance": car_state["camera_obstacle_distance"],
@@ -2050,6 +2078,7 @@ def telemetry_broadcast():
                 "camera_resolution": car_state["camera_resolution"],
                 "camera_jpeg_quality": car_state["camera_jpeg_quality"],
                 "camera_framerate": car_state["camera_framerate"],
+                "camera_actual_fps": car_state["camera_actual_fps"],
             }
             
             socketio.emit('telemetry_update', telemetry_data)

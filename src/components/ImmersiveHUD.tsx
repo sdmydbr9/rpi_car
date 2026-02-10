@@ -25,9 +25,11 @@ interface ImmersiveHUDProps {
   cameraResolution?: string;
   cameraJpegQuality?: number;
   cameraFramerate?: number;
+  cameraActualFps?: number;
   visionActive?: boolean;
   visionFps?: number;
   isCameraEnabled?: boolean;
+  userWantsVision?: boolean;
 }
 
 export const ImmersiveHUD = ({
@@ -52,9 +54,11 @@ export const ImmersiveHUD = ({
   cameraResolution,
   cameraJpegQuality,
   cameraFramerate,
+  cameraActualFps,
   visionActive,
   visionFps,
   isCameraEnabled,
+  userWantsVision,
 }: ImmersiveHUDProps) => {
   const { triggerHaptic, playSound } = useGameFeedback();
   const [steeringDirection, setSteeringDirection] = useState<'left' | 'right' | null>(null);
@@ -258,7 +262,7 @@ export const ImmersiveHUD = ({
               </span>
               <span className="text-[9px] text-muted-foreground/60">|</span>
               <span className="text-[9px] racing-text text-foreground/90">
-                {cameraFramerate || 30}fps
+                {cameraActualFps ? Math.round(cameraActualFps) : (cameraFramerate || 30)}fps
               </span>
               <span className="text-[9px] text-muted-foreground/60">|</span>
               <span className="text-[9px] racing-text text-foreground/90">
@@ -266,8 +270,8 @@ export const ImmersiveHUD = ({
               </span>
               <span className="text-[9px] text-muted-foreground/60">|</span>
               <div className="flex items-center gap-1">
-                <div className={`w-1.5 h-1.5 rounded-full ${visionActive ? 'bg-green-500 shadow-[0_0_4px_rgba(34,197,94,0.6)]' : 'bg-muted-foreground/40'}`} />
-                <span className={`text-[9px] racing-text ${visionActive ? 'text-green-400' : 'text-muted-foreground/60'}`}>
+                <div className={`w-1.5 h-1.5 rounded-full ${userWantsVision ? 'bg-green-500 shadow-[0_0_4px_rgba(34,197,94,0.6)]' : 'bg-muted-foreground/40'}`} />
+                <span className={`text-[9px] racing-text ${userWantsVision ? 'text-green-400' : 'text-muted-foreground/60'}`}>
                   CV{visionActive && visionFps ? ` ${Math.round(visionFps)}` : ''}
                 </span>
               </div>
