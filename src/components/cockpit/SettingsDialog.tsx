@@ -418,7 +418,7 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
       ...autopilotTuning
     } = t;
     
-    socketClient.emitTuningUpdate(autopilotTuning as AutopilotTuning);
+    socketClient.emitTuningUpdate(autopilotTuning);
     setSynced(true);
   }, [tuning]);
 
