@@ -210,7 +210,7 @@ export const GearShifter = ({
         >
           <svg 
             className="w-10 h-10" 
-            style={{ color: !isEngineRunning ? 'rgb(107, 114, 128)' : (isCameraEnabled ? 'rgb(168, 85, 247)' : 'rgb(107, 114, 128)') }}
+            style={{ color: !isEngineRunning ? 'rgb(107, 114, 128)' : (isCameraEnabled ? 'rgb(34, 197, 94)' : 'rgb(239, 68, 68)') }}
             xmlns="http://www.w3.org/2000/svg" 
             version="1.1" 
             viewBox="0 0 24 24"
