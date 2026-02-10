@@ -239,7 +239,13 @@ def _get_ir_for_autopilot():
     return left, right
 
 def _get_camera_for_autopilot():
-    """Read camera obstacle distance for autopilot fusion."""
+    """Read camera obstacle distance for autopilot fusion.
+    
+    Returns 999.0 (no obstacle) when camera is disabled to ensure
+    autopilot relies solely on sonar and IR sensors in that mode.
+    """
+    if not car_state["camera_enabled"]:
+        return 999.0
     if VISION_AVAILABLE and vision_system is not None:
         return vision_system.get_camera_obstacle_distance()
     return 999.0
