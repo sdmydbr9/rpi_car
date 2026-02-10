@@ -65,6 +65,11 @@ export const CockpitController = () => {
   const [isAutoMode, setIsAutoMode] = useState(false);
   const [isIREnabled, setIsIREnabled] = useState(true);
   const [isSonarEnabled, setIsSonarEnabled] = useState(true);
+  const [isCameraEnabled, setIsCameraEnabled] = useState(() => {
+    // Load camera state from localStorage, default to false (disabled)
+    const saved = localStorage.getItem('cameraEnabled');
+    return saved === 'true';
+  });
   const [isAutopilotEnabled, setIsAutopilotEnabled] = useState(false);
   const [isAutopilotRunning, setIsAutopilotRunning] = useState(false);
   const [isImmersiveView, setIsImmersiveView] = useState(false);
@@ -179,6 +184,13 @@ export const CockpitController = () => {
       }));
       // Update IR enabled state from telemetry
       setIsIREnabled(data.ir_enabled ?? true);
+      
+      // Update camera enabled state from telemetry
+      if (data.camera_enabled !== undefined) {
+        setIsCameraEnabled(data.camera_enabled);
+        localStorage.setItem('cameraEnabled', String(data.camera_enabled));
+      }
+      
       // Update autonomous telemetry
       if (data.autonomous_mode !== undefined) setIsAutopilotRunning(data.autonomous_mode);
       if (data.autonomous_state) setAutonomousState(data.autonomous_state);
@@ -359,6 +371,11 @@ export const CockpitController = () => {
     socketClient.emitSonarToggle();
   }, [isAutopilotRunning]);
 
+  const handleCameraToggle = useCallback(() => {
+    console.log('🎮 CAMERA toggle');
+    socketClient.emitCameraToggle();
+  }, []);
+
   // Toggle autopilot VIEW (does not start/stop the autopilot FSM)
   const handleAutopilotToggle = useCallback(() => {
     console.log('🎮 Autopilot view toggle');
@@ -526,6 +543,8 @@ export const CockpitController = () => {
                 onAutoMode={handleAutoMode}
                 onIRToggle={handleIRToggle}
                 onSonarToggle={handleSonarToggle}
+                onCameraToggle={handleCameraToggle}
+                isCameraEnabled={isCameraEnabled}
                 onAutopilotToggle={handleAutopilotToggle}
                 isEnabled={isEngineRunning}
                 isEngineRunning={isEngineRunning}

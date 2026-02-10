@@ -30,7 +30,8 @@ export interface TelemetryData {
   autonomous_target_speed?: number;
   sonar_distance?: number;
   sonar_enabled?: boolean;
-  // Vision / Object Detection telemetry
+  // Camera / Vision telemetry
+  camera_enabled?: boolean;
   vision_active?: boolean;
   camera_obstacle_distance?: number;
   camera_detections_count?: number;
@@ -287,6 +288,18 @@ export function emitSonarToggle(): void {
 }
 
 /**
+ * Toggle Camera (enables/disables camera and all vision-related functions)
+ */
+export function emitCameraToggle(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎮 CAMERA: TOGGLED`);
+    socket.emit('camera_toggle', {});
+  } else {
+    console.warn(`[UI Control] ⚠️ Cannot emit camera toggle - socket not connected`, { socket: !!socket, connected: socket?.connected });
+  }
+}
+
+/**
  * Toggle Vision/Object Detection
  */
 export function emitVisionToggle(): void {
@@ -362,6 +375,7 @@ export default {
   emitAutoAccelDisable,
   emitIRToggle,
   emitSonarToggle,
+  emitCameraToggle,
   emitVisionToggle,
   emitAutopilotToggle,
   emitAutopilotEnable,
