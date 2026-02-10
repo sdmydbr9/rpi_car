@@ -132,11 +132,17 @@ except Exception as e:
 def generate_camera_frames():
     """Generator that yields MJPEG frames from the Pi camera.
     Uses vision system's annotated frames (with detection overlays)
-    when available, otherwise falls back to raw camera capture."""
+    when available, otherwise falls back to raw camera capture.
+    Only streams frames when camera_enabled is True."""
     while True:
         try:
             if not CAMERA_AVAILABLE or picam2 is None:
                 time.sleep(1)
+                continue
+            
+            # Check if camera is enabled - if not, wait and continue
+            if not car_state["camera_enabled"]:
+                time.sleep(0.1)
                 continue
 
             # Get annotated frame from vision system if available
@@ -305,6 +311,7 @@ car_state = {
         "rear_sonar": "OK",
         "left_ir": "OK",
         "right_ir": "OK",
+        "camera": "OK",
     },
     "service_light_active": False,  # True if any sensor has error/warning
     # 📷 CAMERA / VISION / OBJECT DETECTION
@@ -365,6 +372,7 @@ def check_sensor_health():
         "rear_sonar": "OK",
         "left_ir": "OK",
         "right_ir": "OK",
+        "camera": "OK",
     }
     
     has_error = False
@@ -408,6 +416,18 @@ def check_sensor_health():
     except Exception as e:
         sensor_status["left_ir"] = "FAILED"
         sensor_status["right_ir"] = "FAILED"
+        has_error = True
+    
+    try:
+        # Check Camera
+        if not CAMERA_AVAILABLE or picam2 is None:
+            sensor_status["camera"] = "FAILED"
+            has_error = True
+        else:
+            # Camera hardware is available
+            sensor_status["camera"] = "OK"
+    except Exception as e:
+        sensor_status["camera"] = "FAILED"
         has_error = True
     
     # Update car_state with sensor status
@@ -1681,6 +1701,8 @@ def telemetry_broadcast():
                 # 🚨 Sensor health status
                 "sensor_status": car_state["sensor_status"],
                 "service_light_active": car_state["service_light_active"],
+                # 📷 Camera status
+                "camera_enabled": car_state["camera_enabled"],
                 # 📷 Vision / Object Detection telemetry
                 "vision_active": car_state["vision_active"],
                 "camera_obstacle_distance": car_state["camera_obstacle_distance"],
