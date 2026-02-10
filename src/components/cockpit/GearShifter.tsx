@@ -52,14 +52,14 @@ export const GearShifter = ({
   ];
 
   return (
-    <div className="flex flex-col items-center h-full pt-1 pb-1 px-1.5 overflow-hidden bg-gradient-to-b from-background to-background/80">
+    <div className="flex flex-col items-center h-full pt-0.5 pb-0.5 px-1 overflow-hidden bg-gradient-to-b from-background to-background/80">
       {/* LIVE TELEMETRY Header */}
-      <div className="text-[7px] sm:text-[8px] font-bold racing-text text-muted-foreground tracking-wider mb-1.5">
+      <div className="text-[7px] sm:text-[8px] font-bold racing-text text-muted-foreground tracking-wider mb-0.5">
         LIVE TELEMETRY
       </div>
 
       {/* E-STOP and AUTO OFF - Side by Side Round Buttons */}
-      <div className="flex w-full gap-1 mb-1.5">
+      <div className="flex w-full gap-1 mb-1">
         {/* E-STOP Button - Round */}
         <button
           onClick={onEmergencyStop}
@@ -103,7 +103,7 @@ export const GearShifter = ({
       </div>
 
       {/* IR and SONAR and AUTOPILOT - Side by Side Round Buttons */}
-      <div className="flex w-full gap-1 mb-1.5 justify-center">
+      <div className="flex w-full gap-1 mb-1 justify-center">
         {/* IR Button - Round */}
         <button
           onClick={onIRToggle}
@@ -197,7 +197,7 @@ export const GearShifter = ({
       </div>
 
       {/* CAMERA - Round Button */}
-      <div className="flex w-full gap-1 mb-1.5 justify-center">
+      <div className="flex w-full gap-1 mb-1 justify-center">
         <button
           onClick={onCameraToggle}
           disabled={!isEngineRunning}
@@ -221,7 +221,7 @@ export const GearShifter = ({
       </div>
 
       {/* Transmission Icon Gearbox */}
-      <div className="relative w-full aspect-[110/135] mb-1 max-h-[80px] sm:max-h-[110px] md:max-h-[140px] lg:max-h-none">
+      <div className="relative w-full aspect-[110/135] mb-0.5 flex-shrink min-h-0" style={{ maxHeight: 'min(100px, 20vh)' }}>
         {/* Transmission Icon */}
         <svg 
           className="w-full h-full"
@@ -378,11 +378,10 @@ export const GearShifter = ({
         </svg>
       </div>
 
-      {/* Spacer */}
-      <div className="flex-1" />
+      {/* Spacer - removed to keep buttons visible */}
 
-      {/* START and STOP Buttons */}
-      <div className="flex gap-1.5 w-full">
+      {/* START and STOP Buttons - Always visible, fixed at bottom */}
+      <div className="flex gap-1.5 w-full mt-auto pt-1">
         {/* START Button - Round */}
         <button
           onClick={onEngineStart}
