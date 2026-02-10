@@ -450,7 +450,15 @@ def sensor_monitor():
             time.sleep(5)
 
 def save_gear_before_ebrake():
-    """Save current gear before emergency brake sets it to Neutral"""
+    """Save current gear before emergency brake sets it to Neutral
+    
+    Only saves if:
+    1. Current gear is not already "N" (no need to save neutral)
+    2. No gear is already saved (prevents overwriting during same e-brake activation)
+    
+    This ensures we save the gear once when e-brake is first activated,
+    and preserve that gear throughout the e-brake duration.
+    """
     if car_state["gear"] != "N" and car_state["gear_before_ebrake"] is None:
         car_state["gear_before_ebrake"] = car_state["gear"]
 
@@ -1419,10 +1427,16 @@ def on_gear_change(data):
     gear = data.get('gear', 'N').upper()
     if gear in ["R", "N", "1", "2", "3", "S"]:
         car_state["gear"] = gear
-        # If emergency brake is active and user manually changes gear, update the saved gear
-        # so that when e-brake is released, it restores to the newly selected gear
-        if car_state["emergency_brake_active"] and gear != "N":
-            car_state["gear_before_ebrake"] = gear
+        # If emergency brake is active, update the saved gear state
+        if car_state["emergency_brake_active"]:
+            if gear != "N":
+                # User selected a non-neutral gear while e-brake is active
+                # Update saved gear so it restores to this new gear when e-brake is released
+                car_state["gear_before_ebrake"] = gear
+            else:
+                # User selected neutral while e-brake is active
+                # Clear saved gear since there's nothing to restore to
+                car_state["gear_before_ebrake"] = None
         gear_names = {'R': '🔙 REVERSE', 'N': '⏸️ NEUTRAL', '1': '1️⃣ 1st', '2': '2️⃣ 2nd', '3': '3️⃣ 3rd', 'S': '⚡ SPORT'}
         print(f"\n⚙️ [UI Control] 🔧 GEAR: {gear_names.get(gear, gear)}")
         emit('gear_response', {'status': 'ok', 'gear': gear})
