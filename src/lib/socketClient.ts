@@ -328,18 +328,6 @@ export function emitCameraConfigUpdate(config: {
 }
 
 /**
- * Toggle Vision/Object Detection
- */
-export function emitVisionToggle(): void {
-  if (socket && socket.connected) {
-    console.log(`[UI Control] 🎮 VISION: TOGGLED`);
-    socket.emit('vision_toggle', {});
-  } else {
-    console.warn(`[UI Control] ⚠️ Cannot emit vision toggle - socket not connected`, { socket: !!socket, connected: socket?.connected });
-  }
-}
-
-/**
  * Toggle Autopilot control
  */
 export function emitAutopilotToggle(): void {
