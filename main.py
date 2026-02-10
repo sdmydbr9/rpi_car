@@ -244,6 +244,10 @@ def _get_camera_for_autopilot():
         return vision_system.get_camera_obstacle_distance()
     return 999.0
 
+def _is_vision_available():
+    """Check if vision system can be activated (camera enabled and system available)."""
+    return car_state["camera_enabled"] and VISION_AVAILABLE and vision_system is not None
+
 autopilot = AutoPilot(
     car_system,
     _get_sonar_for_autopilot,
@@ -473,7 +477,7 @@ def physics_loop():
         
         # --- VISION ACTIVATION FOR MANUAL MODE ---
         # Activate vision DNN when driving forward in manual mode (only if camera is enabled)
-        if car_state["camera_enabled"] and VISION_AVAILABLE and vision_system is not None and not car_state["autonomous_mode"]:
+        if _is_vision_available() and not car_state["autonomous_mode"]:
             gear_val = car_state["gear"]
             is_forward_gear = gear_val in ("1", "2", "3", "S")
             is_moving = car_state["gas_pressed"] and car_state["current_pwm"] > 0
@@ -1448,7 +1452,7 @@ def on_camera_toggle(data):
 def on_vision_toggle(data):
     """Toggle vision/object detection system on/off (only if camera is enabled)."""
     if not car_state["camera_enabled"]:
-        emit('vision_response', {'status': 'error', 'message': 'Camera must be enabled first'})
+        emit('vision_response', {'status': 'error', 'message': 'Camera must be enabled first. Please enable the camera before activating vision detection.'})
         return
     if not VISION_AVAILABLE or vision_system is None:
         emit('vision_response', {'status': 'error', 'message': 'Vision system not available'})
@@ -1469,7 +1473,7 @@ def on_autonomous_enable(data):
     car_state["sonar_enabled"] = True
     autopilot.start()
     # Enable vision system for forward object detection (only if camera is enabled)
-    if car_state["camera_enabled"] and VISION_AVAILABLE and vision_system is not None:
+    if _is_vision_available():
         vision_system.active = True
     print(f"\n⚙️ [UI Control] 🤖 SMART DRIVER: ENABLED - Autonomous driving active")
     print(f"📡 SAFETY: IR and Sonar sensors force-enabled in autonomous mode")
