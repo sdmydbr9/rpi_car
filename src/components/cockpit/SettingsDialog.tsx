@@ -67,8 +67,8 @@ export const DEFAULT_TUNING: TuningConstants = {
   UTURN_SPEED: 70,
   UTURN_DURATION: 0.8,
   ESCAPE_CLEAR_CM: 20,
-  // Camera & Vision defaults
-  CAMERA_RESOLUTION: "low",
+  // Camera & Vision defaults (resolution in WxH format)
+  CAMERA_RESOLUTION: "640x480",
   CAMERA_JPEG_QUALITY: 70,
   CAMERA_FRAMERATE: 30,
   VISION_ENABLED: false,
@@ -92,11 +92,11 @@ const TUNING_GROUPS: { title: string; params: ParamConfig[] }[] = [
     params: [
       { key: "CAMERA_RESOLUTION", label: "Resolution", unit: "", type: "select",
         options: [
-          { value: "low", label: "Low (640×480)" },
-          { value: "medium", label: "Medium (1280×720)" },
-          { value: "high", label: "High (1920×1080)" },
+          { value: "640x480", label: "640×480 (Low)" },
+          { value: "1280x720", label: "1280×720 (Medium)" },
+          { value: "1920x1080", label: "1920×1080 (High)" },
         ],
-        info: "Camera resolution. Higher resolution = better quality but slower streaming. Changes take effect on next camera restart. ↑ Increase: better detail, slower FPS. ↓ Decrease: faster streaming, lower quality." },
+        info: "Camera resolution. Higher resolution = better quality but slower streaming. Changes take effect immediately. ↑ Increase: better detail, slower FPS. ↓ Decrease: faster streaming, lower quality." },
       { key: "CAMERA_JPEG_QUALITY", label: "JPEG Quality", min: 10, max: 100, step: 5, unit: "%",
         info: "JPEG compression quality for streaming. Higher = better quality but more bandwidth. ↑ Increase: sharper image, more data. ↓ Decrease: more compression, faster streaming." },
       { key: "CAMERA_FRAMERATE", label: "Framerate", min: 5, max: 60, step: 5, unit: "FPS",
@@ -440,8 +440,18 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
       framerate: t.CAMERA_FRAMERATE,
     };
     
+    console.log(`📷 [Settings] Sending camera config to backend:`, cameraConfig);
+    
     // Send camera configuration separately
     socketClient.emitCameraConfigUpdate(cameraConfig);
+    
+    // Persist camera settings to localStorage
+    localStorage.setItem('cameraConfig', JSON.stringify({
+      resolution: t.CAMERA_RESOLUTION,
+      jpeg_quality: t.CAMERA_JPEG_QUALITY,
+      framerate: t.CAMERA_FRAMERATE,
+      vision_enabled: t.VISION_ENABLED,
+    }));
     
     // Handle vision toggle separately
     if (t.VISION_ENABLED !== tuning.VISION_ENABLED) {

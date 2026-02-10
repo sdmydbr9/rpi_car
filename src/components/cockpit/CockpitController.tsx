@@ -91,7 +91,21 @@ export const CockpitController = () => {
     { name: 'Camera', status: 'ok' },
   ]);
   const [requiresService, setRequiresService] = useState(false);
-  const [tuning, setTuning] = useState<TuningConstants>(DEFAULT_TUNING);
+  const [tuning, setTuning] = useState<TuningConstants>(() => {
+    // Load persisted camera config from localStorage and merge into defaults
+    const base = { ...DEFAULT_TUNING };
+    try {
+      const saved = localStorage.getItem('cameraConfig');
+      if (saved) {
+        const config = JSON.parse(saved);
+        if (config.resolution) base.CAMERA_RESOLUTION = config.resolution;
+        if (config.jpeg_quality) base.CAMERA_JPEG_QUALITY = config.jpeg_quality;
+        if (config.framerate) base.CAMERA_FRAMERATE = config.framerate;
+        if (config.vision_enabled !== undefined) base.VISION_ENABLED = config.vision_enabled;
+      }
+    } catch { /* ignore corrupt localStorage */ }
+    return base;
+  });
   const [backendDefaults, setBackendDefaults] = useState<TuningConstants>(DEFAULT_TUNING);
   const [cameraSpecs, setCameraSpecs] = useState<CameraSpecs>({
     model: "ov5647",
@@ -100,6 +114,16 @@ export const CockpitController = () => {
   });
   // Vision / Object Detection state
   const [visionActive, setVisionActive] = useState(false);
+  // Live camera config from backend (for HUD badge — separate from tuning to avoid overwriting user edits)
+  const [liveCameraResolution, setLiveCameraResolution] = useState<string>(() => {
+    try { const s = localStorage.getItem('cameraConfig'); if (s) return JSON.parse(s).resolution || 'low'; } catch {} return 'low';
+  });
+  const [liveCameraJpegQuality, setLiveCameraJpegQuality] = useState<number>(() => {
+    try { const s = localStorage.getItem('cameraConfig'); if (s) return JSON.parse(s).jpeg_quality || 70; } catch {} return 70;
+  });
+  const [liveCameraFramerate, setLiveCameraFramerate] = useState<number>(() => {
+    try { const s = localStorage.getItem('cameraConfig'); if (s) return JSON.parse(s).framerate || 30; } catch {} return 30;
+  });
   const [cameraObstacleDistance, setCameraObstacleDistance] = useState(999);
   const [cameraDetectionsCount, setCameraDetectionsCount] = useState(0);
   const [cameraInPathCount, setCameraInPathCount] = useState(0);
@@ -165,7 +189,17 @@ export const CockpitController = () => {
     socketClient.onTuningSync((data) => {
       console.log('⚙️ Tuning sync from backend:', data);
       if (data.tuning) {
-        setTuning(data.tuning as unknown as TuningConstants);
+        // Merge backend autopilot tuning into state, but PRESERVE camera settings
+        // because _active_tuning from the backend only contains autopilot constants
+        setTuning(prev => ({
+          ...prev,
+          ...(data.tuning as unknown as Partial<TuningConstants>),
+          // Keep camera settings from current state (they come from localStorage / camera_config_response)
+          CAMERA_RESOLUTION: prev.CAMERA_RESOLUTION,
+          CAMERA_JPEG_QUALITY: prev.CAMERA_JPEG_QUALITY,
+          CAMERA_FRAMERATE: prev.CAMERA_FRAMERATE,
+          VISION_ENABLED: prev.VISION_ENABLED,
+        }));
       }
       if (data.defaults) {
         setBackendDefaults(data.defaults as unknown as TuningConstants);
@@ -177,6 +211,42 @@ export const CockpitController = () => {
       console.log('📷 Camera specs sync from backend:', data);
       setCameraSpecs(data);
     });
+
+    // Subscribe to camera config response (confirms applied settings)
+    socketClient.onCameraConfigResponse((data) => {
+      console.log('📷 Camera config response:', data);
+      if (data.current_config) {
+        setTuning(prev => ({
+          ...prev,
+          CAMERA_RESOLUTION: data.current_config.resolution,
+          CAMERA_JPEG_QUALITY: data.current_config.jpeg_quality,
+          CAMERA_FRAMERATE: data.current_config.framerate,
+        }));
+        // Also update live state so HUD badge reflects confirmed values
+        setLiveCameraResolution(data.current_config.resolution);
+        setLiveCameraJpegQuality(data.current_config.jpeg_quality);
+        setLiveCameraFramerate(data.current_config.framerate);
+      }
+    });
+
+    // Re-apply persisted camera config to backend on connect
+    try {
+      const saved = localStorage.getItem('cameraConfig');
+      if (saved) {
+        const config = JSON.parse(saved);
+        console.log('📷 Re-applying persisted camera config:', config);
+        socketClient.emitCameraConfigUpdate({
+          resolution: config.resolution,
+          jpeg_quality: config.jpeg_quality,
+          framerate: config.framerate,
+        });
+        // Also toggle vision if it was enabled
+        if (config.vision_enabled) {
+          // Vision toggle is a toggle, so we only send if we want it enabled
+          // The backend will report the actual state via telemetry
+        }
+      }
+    } catch { /* ignore */ }
 
     // Also explicitly request in case the connect event was missed
     socketClient.requestTuning();
@@ -227,6 +297,10 @@ export const CockpitController = () => {
       if (data.camera_closest_object !== undefined) setCameraClosestObject(data.camera_closest_object);
       if (data.camera_closest_confidence !== undefined) setCameraClosestConfidence(data.camera_closest_confidence);
       if (data.vision_fps !== undefined) setVisionFps(data.vision_fps);
+      // Update live camera config from telemetry (for HUD badge only — does NOT touch tuning state)
+      if (data.camera_resolution) setLiveCameraResolution(data.camera_resolution);
+      if (data.camera_jpeg_quality !== undefined) setLiveCameraJpegQuality(data.camera_jpeg_quality);
+      if (data.camera_framerate !== undefined) setLiveCameraFramerate(data.camera_framerate);
     });
 
     return () => {
@@ -478,6 +552,12 @@ export const CockpitController = () => {
         onAutoModeToggle={handleAutoMode}
         onSteeringChange={handleAngleChange}
         onGearChange={handleGearChange}
+        cameraResolution={liveCameraResolution}
+        cameraJpegQuality={liveCameraJpegQuality}
+        cameraFramerate={liveCameraFramerate}
+        visionActive={visionActive}
+        visionFps={visionFps}
+        isCameraEnabled={isCameraEnabled}
       />
       
       <div className="h-[100dvh] w-full flex flex-col overflow-hidden">

@@ -1,5 +1,5 @@
-import { useState, useCallback } from "react";
-import { X, Wifi, Zap, Power, VideoOff } from "lucide-react";
+import { useState, useCallback, useMemo } from "react";
+import { X, Wifi, Zap, Power, VideoOff, Camera } from "lucide-react";
 import { useGameFeedback } from "@/hooks/useGameFeedback";
 
 interface ImmersiveHUDProps {
@@ -21,6 +21,13 @@ interface ImmersiveHUDProps {
   onAutoModeToggle: () => void;
   onSteeringChange?: (angle: number) => void;
   onGearChange?: (gear: string) => void;
+  // Camera config for HUD badge
+  cameraResolution?: string;
+  cameraJpegQuality?: number;
+  cameraFramerate?: number;
+  visionActive?: boolean;
+  visionFps?: number;
+  isCameraEnabled?: boolean;
 }
 
 export const ImmersiveHUD = ({
@@ -42,9 +49,21 @@ export const ImmersiveHUD = ({
   onAutoModeToggle,
   onSteeringChange,
   onGearChange,
+  cameraResolution,
+  cameraJpegQuality,
+  cameraFramerate,
+  visionActive,
+  visionFps,
+  isCameraEnabled,
 }: ImmersiveHUDProps) => {
   const { triggerHaptic, playSound } = useGameFeedback();
   const [steeringDirection, setSteeringDirection] = useState<'left' | 'right' | null>(null);
+  
+  // Resolution label map
+  const resolutionLabel = useMemo(() => {
+    const map: Record<string, string> = { low: '640×480', medium: '1280×720', high: '1920×1080' };
+    return map[cameraResolution || 'low'] || cameraResolution || '640×480';
+  }, [cameraResolution]);
   
   // RPM simulation based on speed and throttle
   const rpm = Math.min(100, (speed / 100) * 80 + (throttle ? 20 : 0));
@@ -230,6 +249,30 @@ export const ImmersiveHUD = ({
         
         {/* Top Left - RPM Gauge */}
          <div className="absolute top-4 left-4 z-20 pointer-events-none">
+          {/* Camera Info Badge */}
+          {isCameraEnabled && (
+            <div className="mb-2 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-background/40 backdrop-blur-md border border-border/50 pointer-events-none">
+              <Camera className="w-3 h-3 text-primary flex-shrink-0" />
+              <span className="text-[9px] racing-text text-foreground/90 whitespace-nowrap">
+                {resolutionLabel}
+              </span>
+              <span className="text-[9px] text-muted-foreground/60">|</span>
+              <span className="text-[9px] racing-text text-foreground/90">
+                {cameraFramerate || 30}fps
+              </span>
+              <span className="text-[9px] text-muted-foreground/60">|</span>
+              <span className="text-[9px] racing-text text-foreground/90">
+                Q{cameraJpegQuality || 70}
+              </span>
+              <span className="text-[9px] text-muted-foreground/60">|</span>
+              <div className="flex items-center gap-1">
+                <div className={`w-1.5 h-1.5 rounded-full ${visionActive ? 'bg-green-500 shadow-[0_0_4px_rgba(34,197,94,0.6)]' : 'bg-muted-foreground/40'}`} />
+                <span className={`text-[9px] racing-text ${visionActive ? 'text-green-400' : 'text-muted-foreground/60'}`}>
+                  CV{visionActive && visionFps ? ` ${Math.round(visionFps)}` : ''}
+                </span>
+              </div>
+            </div>
+          )}
           <div className="flex items-center gap-2">
             <div className="w-24 h-24 rounded-full bg-background/40 backdrop-blur-md border border-border/50 flex flex-col items-center justify-center">
               <svg viewBox="0 0 100 100" className={`w-20 h-20 ${isRedline ? 'animate-[shake_0.1s_infinite]' : ''}`}>

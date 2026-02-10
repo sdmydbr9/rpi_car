@@ -17,6 +17,7 @@ import threading
 import socket
 import re
 import cv2
+import json
 from enum import Enum
 from collections import deque
 from sensors import SensorSystem
@@ -72,15 +73,79 @@ REVERSE_POWER = 40            # Power level (%) for obstacle avoidance reverse (
 MIN_REVERSE_POWER = 15         # Minimum power needed to move motors (adjust if motors don't start)
 
 # --- CAMERA SETTINGS ---
-# Available resolutions based on typical Pi Camera specs
-CAMERA_RESOLUTIONS = {
-    "low": (640, 480),      # Low resolution - best for performance
-    "medium": (1280, 720),  # Medium resolution - balanced
-    "high": (1920, 1080),   # High resolution - best quality
+# Legacy resolution names mapped to WxH for backward compatibility
+_LEGACY_RESOLUTION_MAP = {
+    "low": (640, 480),
+    "medium": (1280, 720),
+    "high": (1920, 1080),
 }
-CAMERA_DEFAULT_RESOLUTION = "low"  # Default to low for best streaming performance
+
+def _parse_resolution(value: str):
+    """Parse a resolution string into (width, height) tuple.
+    Accepts WxH format (e.g. '1920x1080') or legacy keys ('low', 'medium', 'high').
+    Returns None if the value is invalid."""
+    if not value or not isinstance(value, str):
+        return None
+    # Check legacy keys first
+    if value in _LEGACY_RESOLUTION_MAP:
+        return _LEGACY_RESOLUTION_MAP[value]
+    # Try WxH format
+    match = re.match(r'^(\d+)x(\d+)$', value.strip())
+    if match:
+        return (int(match.group(1)), int(match.group(2)))
+    return None
+
+def _normalize_resolution(value: str) -> str:
+    """Normalize a resolution string to WxH format.
+    Converts legacy keys ('low') to WxH ('640x480'). Returns as-is if already WxH.
+    Returns '640x480' as fallback for invalid values."""
+    parsed = _parse_resolution(value)
+    if parsed is None:
+        print(f"⚠️  [Camera Config] Invalid resolution '{value}', falling back to 640x480")
+        return "640x480"
+    return f"{parsed[0]}x{parsed[1]}"
+
+CAMERA_DEFAULT_RESOLUTION = "640x480"  # Default to 640x480 for best streaming performance
 CAMERA_JPEG_QUALITY = 70           # JPEG compression quality (1-100, higher = better quality)
 CAMERA_FRAMERATE = 30              # Camera framerate (FPS)
+
+# --- CAMERA CONFIG PERSISTENCE ---
+CAMERA_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.camera_config.json')
+
+def _load_camera_config():
+    """Load persisted camera configuration from JSON file."""
+    try:
+        if os.path.exists(CAMERA_CONFIG_FILE):
+            with open(CAMERA_CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+            print(f"✅ [Camera Config] Loaded persisted config: {config}")
+            return config
+    except Exception as e:
+        print(f"⚠️  [Camera Config] Failed to load persisted config: {e}")
+    return None
+
+def _save_camera_config(config):
+    """Save camera configuration to JSON file for persistence."""
+    try:
+        with open(CAMERA_CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=2)
+        print(f"💾 [Camera Config] Saved config to {CAMERA_CONFIG_FILE}")
+    except Exception as e:
+        print(f"⚠️  [Camera Config] Failed to save config: {e}")
+
+# Load persisted camera config (overrides defaults)
+_persisted_camera_config = _load_camera_config()
+if _persisted_camera_config:
+    if 'resolution' in _persisted_camera_config and _parse_resolution(_persisted_camera_config['resolution']) is not None:
+        CAMERA_DEFAULT_RESOLUTION = _normalize_resolution(_persisted_camera_config['resolution'])
+        print(f"📷 [Camera Config] Loaded persisted resolution: '{_persisted_camera_config['resolution']}' → {CAMERA_DEFAULT_RESOLUTION}")
+    else:
+        print(f"⚠️  [Camera Config] Persisted resolution '{_persisted_camera_config.get('resolution', 'N/A')}' is invalid, using default {CAMERA_DEFAULT_RESOLUTION}")
+    if 'jpeg_quality' in _persisted_camera_config:
+        CAMERA_JPEG_QUALITY = int(_persisted_camera_config['jpeg_quality'])
+    if 'framerate' in _persisted_camera_config:
+        CAMERA_FRAMERATE = int(_persisted_camera_config['framerate'])
+    print(f"📷 [Camera Config] Active config: res={CAMERA_DEFAULT_RESOLUTION}, quality={CAMERA_JPEG_QUALITY}, fps={CAMERA_FRAMERATE}")
 
 # ==========================================
 # 🛠️ AUTO-BUILDER
@@ -172,16 +237,22 @@ camera_specs = detect_camera_specs()
 # ==========================================
 # 📷 CAMERA SETUP
 # ==========================================
+# Lock for camera reconfiguration
+_camera_lock = threading.Lock()
+_camera_restarting = False
+
 try:
     from picamera2 import Picamera2
     picam2 = Picamera2()
+    _init_resolution = _parse_resolution(CAMERA_DEFAULT_RESOLUTION) or (640, 480)
+    print(f"📷 [Camera Init] Starting with resolution {CAMERA_DEFAULT_RESOLUTION} → {_init_resolution[0]}x{_init_resolution[1]}")
     cam_config = picam2.create_video_configuration(
-        main={"size": (640, 480), "format": "BGR888"}
+        main={"size": _init_resolution, "format": "BGR888"}
     )
     picam2.configure(cam_config)
     picam2.start()
     CAMERA_AVAILABLE = True
-    print("✅ Camera initialized successfully!")
+    print(f"✅ Camera initialized successfully at {_init_resolution[0]}x{_init_resolution[1]}!")
 except Exception as e:
     CAMERA_AVAILABLE = False
     picam2 = None
@@ -206,6 +277,41 @@ except Exception as e:
     VISION_AVAILABLE = False
     print(f"⚠️  Vision system initialization failed: {e}")
 
+def _reconfigure_camera(resolution_str, framerate):
+    """Reconfigure picam2 with new resolution and framerate. Must hold _camera_lock.
+    resolution_str: WxH format string (e.g. '1920x1080') or legacy key ('low', 'medium', 'high')."""
+    global _camera_restarting, CAMERA_AVAILABLE
+    if picam2 is None:
+        print(f"❌ [Camera] Cannot reconfigure - picam2 is None")
+        return False
+    _camera_restarting = True
+    try:
+        new_size = _parse_resolution(resolution_str)
+        if new_size is None:
+            print(f"❌ [Camera] Invalid resolution '{resolution_str}', cannot reconfigure")
+            return False
+        print(f"📷 [Camera] Reconfiguring: '{resolution_str}' → {new_size[0]}x{new_size[1]} @ {framerate}fps...")
+        picam2.stop()
+        cam_cfg = picam2.create_video_configuration(
+            main={"size": new_size, "format": "BGR888"}
+        )
+        picam2.configure(cam_cfg)
+        picam2.start()
+        CAMERA_AVAILABLE = True
+        print(f"✅ [Camera] Reconfigured successfully to {new_size[0]}x{new_size[1]} @ {framerate}fps")
+        return True
+    except Exception as e:
+        print(f"❌ [Camera] Reconfiguration failed: {e}")
+        # Try to recover with previous settings
+        try:
+            picam2.start()
+            CAMERA_AVAILABLE = True
+        except:
+            CAMERA_AVAILABLE = False
+        return False
+    finally:
+        _camera_restarting = False
+
 def generate_camera_frames():
     """Generator that yields MJPEG frames from the Pi camera.
     Uses vision system's annotated frames (with detection overlays)
@@ -216,6 +322,11 @@ def generate_camera_frames():
         try:
             if not CAMERA_AVAILABLE or picam2 is None:
                 time.sleep(1)
+                continue
+            
+            # Wait during camera reconfiguration
+            if _camera_restarting:
+                time.sleep(0.05)
                 continue
             
             # Check if camera is enabled - if not, wait and continue
@@ -409,7 +520,7 @@ car_state = {
     "camera_closest_confidence": 0,   # Confidence % of closest detection
     "vision_fps": 0.0,               # DNN inference FPS
     # Camera configuration settings
-    "camera_resolution": CAMERA_DEFAULT_RESOLUTION,  # Current resolution setting (low/medium/high)
+    "camera_resolution": CAMERA_DEFAULT_RESOLUTION,  # Current resolution setting (WxH format, e.g. '640x480')
     "camera_jpeg_quality": CAMERA_JPEG_QUALITY,      # JPEG quality (1-100)
     "camera_framerate": CAMERA_FRAMERATE,            # Camera framerate (FPS)
 }
@@ -1662,38 +1773,82 @@ def on_vision_toggle(data):
 
 @socketio.on('camera_config_update')
 def on_camera_config_update(data):
-    """Update camera configuration (resolution, quality, framerate)."""
+    """Update camera configuration (resolution, quality, framerate).
+    Accepts resolution in WxH format (e.g. '1920x1080') or legacy keys ('low', 'medium', 'high').
+    JPEG quality changes are applied immediately.
+    Resolution/framerate changes trigger a live camera reconfiguration."""
+    print(f"\n📷 [Camera Config] Received update request: {data}")
     updated = []
+    needs_restart = False
+    old_resolution = car_state["camera_resolution"]
+    old_framerate = car_state["camera_framerate"]
     
-    # Update JPEG quality
+    # Update JPEG quality (applied immediately - no restart needed)
     if 'jpeg_quality' in data:
         quality = int(data['jpeg_quality'])
         if 1 <= quality <= 100:
             car_state["camera_jpeg_quality"] = quality
             updated.append(f"jpeg_quality={quality}")
+            print(f"   ✅ JPEG quality set to {quality}")
     
-    # Update resolution (requires camera restart)
+    # Update resolution (accepts WxH format or legacy low/medium/high)
     if 'resolution' in data:
         resolution = data['resolution']
-        if resolution in CAMERA_RESOLUTIONS:
-            car_state["camera_resolution"] = resolution
-            updated.append(f"resolution={resolution}")
-            # Note: Changing resolution requires restarting the camera
-            # This would need to be implemented with picam2.stop() / reconfigure / start()
-            # For now, we just store the preference for next camera start
-            print(f"⚠️ Resolution change to {resolution} will take effect on next camera restart")
+        # Normalize to WxH format (handles legacy 'low'/'medium'/'high' keys)
+        normalized = _normalize_resolution(resolution)
+        parsed = _parse_resolution(normalized)
+        if parsed is not None:
+            if normalized != old_resolution:
+                needs_restart = True
+                print(f"   📷 Resolution change: '{old_resolution}' → '{normalized}' (input: '{resolution}', parsed: {parsed[0]}x{parsed[1]})")
+            else:
+                print(f"   📷 Resolution unchanged: '{normalized}'")
+            car_state["camera_resolution"] = normalized
+            updated.append(f"resolution={normalized}")
+        else:
+            print(f"   ❌ Invalid resolution rejected: '{resolution}' (supported modes: {camera_specs.get('supported_modes', [])})")
     
     # Update framerate
     if 'framerate' in data:
         framerate = int(data['framerate'])
         if 1 <= framerate <= 120:
+            if framerate != old_framerate:
+                needs_restart = True
             car_state["camera_framerate"] = framerate
             updated.append(f"framerate={framerate}")
-            print(f"⚠️ Framerate change to {framerate} will take effect on next camera restart")
+            print(f"   ✅ Framerate set to {framerate}")
     
-    print(f"\n⚙️ [Camera Config] Updated: {', '.join(updated) if updated else 'none'}")
+    # Live reconfigure camera if resolution or framerate changed
+    restart_ok = True
+    if needs_restart and CAMERA_AVAILABLE and picam2 is not None:
+        print(f"   🔄 Reconfiguring camera (resolution={car_state['camera_resolution']}, fps={car_state['camera_framerate']})...")
+        with _camera_lock:
+            restart_ok = _reconfigure_camera(
+                car_state["camera_resolution"],
+                car_state["camera_framerate"]
+            )
+            if not restart_ok:
+                # Revert to previous settings on failure
+                car_state["camera_resolution"] = old_resolution
+                car_state["camera_framerate"] = old_framerate
+                updated.append("restart_failed (reverted)")
+                print(f"   ❌ Camera reconfiguration FAILED, reverted to {old_resolution}")
+            else:
+                print(f"   ✅ Camera reconfiguration SUCCESS")
+    elif needs_restart:
+        print(f"   ⚠️ Camera restart needed but camera not available (CAMERA_AVAILABLE={CAMERA_AVAILABLE})")
+    
+    # Persist camera config to disk
+    _save_camera_config({
+        'resolution': car_state["camera_resolution"],
+        'jpeg_quality': car_state["camera_jpeg_quality"],
+        'framerate': car_state["camera_framerate"],
+    })
+    
+    result_status = 'ok' if restart_ok else 'partial'
+    print(f"   📷 [Camera Config] Result: status={result_status}, applied={', '.join(updated) if updated else 'none'}, current_resolution={car_state['camera_resolution']}")
     emit('camera_config_response', {
-        'status': 'ok', 
+        'status': result_status, 
         'updated': updated,
         'current_config': {
             'resolution': car_state["camera_resolution"],
@@ -1891,6 +2046,10 @@ def telemetry_broadcast():
                 "camera_closest_object": car_state["camera_closest_object"],
                 "camera_closest_confidence": car_state["camera_closest_confidence"],
                 "vision_fps": car_state["vision_fps"],
+                # 📷 Camera configuration (for HUD badge)
+                "camera_resolution": car_state["camera_resolution"],
+                "camera_jpeg_quality": car_state["camera_jpeg_quality"],
+                "camera_framerate": car_state["camera_framerate"],
             }
             
             socketio.emit('telemetry_update', telemetry_data)

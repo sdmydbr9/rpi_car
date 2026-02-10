@@ -39,6 +39,10 @@ export interface TelemetryData {
   camera_closest_object?: string;
   camera_closest_confidence?: number;
   vision_fps?: number;
+  // Camera configuration (from telemetry for HUD badge)
+  camera_resolution?: string;
+  camera_jpeg_quality?: number;
+  camera_framerate?: number;
 }
 
 /**
@@ -130,6 +134,24 @@ export function onCameraSpecsSync(callback: (data: CameraSpecs) => void): void {
     socket.on('camera_specs_sync', (data: CameraSpecs) => {
       console.log(`[Socket] 📷 Camera specs received from backend:`, data);
       if (cameraSpecsSyncCallback) cameraSpecsSyncCallback(data);
+    });
+  }
+}
+
+// Camera config response callback
+let cameraConfigResponseCallback: ((data: { status: string; current_config: { resolution: string; jpeg_quality: number; framerate: number } }) => void) | null = null;
+
+/**
+ * Subscribe to camera config response events from the backend.
+ * Called after camera_config_update is processed.
+ */
+export function onCameraConfigResponse(callback: (data: { status: string; current_config: { resolution: string; jpeg_quality: number; framerate: number } }) => void): void {
+  cameraConfigResponseCallback = callback;
+  if (socket) {
+    socket.off('camera_config_response');  // avoid duplicate listeners
+    socket.on('camera_config_response', (data) => {
+      console.log(`[Socket] 📷 Camera config response:`, data);
+      if (cameraConfigResponseCallback) cameraConfigResponseCallback(data);
     });
   }
 }
@@ -424,5 +446,6 @@ export default {
   emitTuningUpdate,
   onTuningSync,
   onCameraSpecsSync,
+  onCameraConfigResponse,
   requestTuning,
 };
