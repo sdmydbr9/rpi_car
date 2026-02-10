@@ -2,6 +2,7 @@ import { useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { Settings, X, Minus, Plus, ChevronDown, ChevronRight, HelpCircle } from "lucide-react";
 import * as socketClient from "../../lib/socketClient";
+import type { CameraSpecs } from "../../lib/socketClient";
 
 export interface TuningConstants {
   // Tuning constants
@@ -188,6 +189,7 @@ interface SettingsDialogProps {
   tuning: TuningConstants;
   onTuningChange: (tuning: TuningConstants) => void;
   backendDefaults?: TuningConstants;
+  cameraSpecs?: CameraSpecs;
 }
 
 const ParamRow = ({
@@ -282,6 +284,7 @@ const ParamRow = ({
   }
 
   // Number type (original implementation)
+  const numValue = typeof value === 'number' ? value : (typeof backendDefault === 'number' ? backendDefault : 0);
   const clamp = (v: number) => Math.min(config.max!, Math.max(config.min!, v));
   const decimals = (config.step ?? 1) < 1 ? 1 : 0;
   const defaultVal = backendDefault as number;
@@ -311,15 +314,15 @@ const ParamRow = ({
         </div>
         <div className="flex items-center gap-0.5">
           <button
-            onClick={() => onChange(clamp(+((value as number) - (config.step ?? 1)).toFixed(2)))}
-            disabled={(value as number) <= (config.min ?? 0)}
+            onClick={() => onChange(clamp(+((numValue) - (config.step ?? 1)).toFixed(2)))}
+            disabled={numValue <= (config.min ?? 0)}
             className="w-5 h-5 sm:w-6 sm:h-6 rounded border border-border bg-muted flex items-center justify-center text-foreground hover:border-primary/50 hover:bg-primary/10 transition-colors touch-feedback disabled:opacity-30 disabled:pointer-events-none"
           >
             <Minus className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
           </button>
           <input
             type="number"
-            value={Number((value as number).toFixed(decimals))}
+            value={Number(numValue.toFixed(decimals))}
             onChange={handleManualChange}
             min={config.min}
             max={config.max}
@@ -327,8 +330,8 @@ const ParamRow = ({
             className="w-12 sm:w-14 h-5 sm:h-6 bg-card border border-border rounded px-1 text-center text-[10px] sm:text-xs text-foreground racing-number focus:border-primary focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
           />
           <button
-            onClick={() => onChange(clamp(+((value as number) + (config.step ?? 1)).toFixed(2)))}
-            disabled={(value as number) >= (config.max ?? 100)}
+            onClick={() => onChange(clamp(+((numValue) + (config.step ?? 1)).toFixed(2)))}
+            disabled={numValue >= (config.max ?? 100)}
             className="w-5 h-5 sm:w-6 sm:h-6 rounded border border-border bg-muted flex items-center justify-center text-foreground hover:border-primary/50 hover:bg-primary/10 transition-colors touch-feedback disabled:opacity-30 disabled:pointer-events-none"
           >
             <Plus className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
@@ -381,9 +384,45 @@ const CollapsibleGroup = ({
   );
 };
 
-export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAULT_TUNING }: SettingsDialogProps) => {
+export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAULT_TUNING, cameraSpecs }: SettingsDialogProps) => {
   const [isOpen, setIsOpen] = useState(false);
   const [synced, setSynced] = useState(false);
+
+  // Build dynamic tuning groups with resolution options from camera specs
+  const getDynamicTuningGroups = (): typeof TUNING_GROUPS => {
+    if (!cameraSpecs) {
+      return TUNING_GROUPS;
+    }
+    
+    // Build resolution options from supported_modes
+    const resolutionOptions = cameraSpecs.supported_modes.map((mode) => ({
+      value: mode.toLowerCase().replace("x", "x"),
+      label: mode,
+    }));
+    
+    // Create a copy of TUNING_GROUPS and update the Camera & Vision section
+    const dynamicGroups = TUNING_GROUPS.map((group) => {
+      if (group.title === "CAMERA & VISION") {
+        return {
+          ...group,
+          params: group.params.map((param) => {
+            if (param.key === "CAMERA_RESOLUTION") {
+              return {
+                ...param,
+                options: resolutionOptions,
+              };
+            }
+            return param;
+          }),
+        };
+      }
+      return group;
+    });
+    
+    return dynamicGroups;
+  };
+
+  const dynamicTuningGroups = getDynamicTuningGroups();
 
   const handleParamChange = useCallback(
     (key: keyof TuningConstants, value: number | string | boolean) => {
@@ -463,7 +502,7 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
 
             {/* Scrollable Content */}
             <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 min-h-0">
-              {TUNING_GROUPS.map((group, i) => (
+              {dynamicTuningGroups.map((group, i) => (
                 <CollapsibleGroup key={group.title} title={group.title} defaultOpen={i === 0}>
                   {group.params.map((param) => (
                     <ParamRow

@@ -11,6 +11,7 @@ import * as socketClient from "../../lib/socketClient";
 import { useAutoAcceleration } from "../../hooks/useAutoAcceleration";
 import type { SensorStatus } from "./ServiceLight";
 import { DEFAULT_TUNING, type TuningConstants } from "./SettingsDialog";
+import type { CameraSpecs } from "../../lib/socketClient";
 
 interface ControlState {
   steeringAngle: number;
@@ -92,6 +93,11 @@ export const CockpitController = () => {
   const [requiresService, setRequiresService] = useState(false);
   const [tuning, setTuning] = useState<TuningConstants>(DEFAULT_TUNING);
   const [backendDefaults, setBackendDefaults] = useState<TuningConstants>(DEFAULT_TUNING);
+  const [cameraSpecs, setCameraSpecs] = useState<CameraSpecs>({
+    model: "ov5647",
+    max_resolution: [2592, 1944],
+    supported_modes: ["640x480", "1296x972", "1920x1080", "2592x1944"],
+  });
   // Vision / Object Detection state
   const [visionActive, setVisionActive] = useState(false);
   const [cameraObstacleDistance, setCameraObstacleDistance] = useState(999);
@@ -165,6 +171,13 @@ export const CockpitController = () => {
         setBackendDefaults(data.defaults as unknown as TuningConstants);
       }
     });
+
+    // Subscribe to camera specs sync from backend (fires on connect)
+    socketClient.onCameraSpecsSync((data: CameraSpecs) => {
+      console.log('📷 Camera specs sync from backend:', data);
+      setCameraSpecs(data);
+    });
+
     // Also explicitly request in case the connect event was missed
     socketClient.requestTuning();
 
@@ -474,6 +487,7 @@ export const CockpitController = () => {
           tuning={tuning}
           onTuningChange={setTuning}
           backendDefaults={backendDefaults}
+          cameraSpecs={cameraSpecs}
         />
         
         {/* Main Content - Fixed Layout (No Responsive Changes) */}

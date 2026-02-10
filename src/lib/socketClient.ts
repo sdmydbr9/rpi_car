@@ -110,6 +110,30 @@ export function onTuningSync(callback: (data: { tuning: Record<string, number>; 
   }
 }
 
+// Camera specs callback
+export interface CameraSpecs {
+  model: string;
+  max_resolution: [number, number];
+  supported_modes: string[];
+}
+
+let cameraSpecsSyncCallback: ((data: CameraSpecs) => void) | null = null;
+
+/**
+ * Subscribe to camera specs sync events from the backend.
+ * Camera specs contain model, max resolution, and supported resolutions.
+ */
+export function onCameraSpecsSync(callback: (data: CameraSpecs) => void): void {
+  cameraSpecsSyncCallback = callback;
+  if (socket) {
+    socket.off('camera_specs_sync');  // avoid duplicate listeners
+    socket.on('camera_specs_sync', (data: CameraSpecs) => {
+      console.log(`[Socket] 📷 Camera specs received from backend:`, data);
+      if (cameraSpecsSyncCallback) cameraSpecsSyncCallback(data);
+    });
+  }
+}
+
 /**
  * Explicitly request current tuning from the backend
  */
@@ -399,5 +423,6 @@ export default {
   emitAutopilotDisable,
   emitTuningUpdate,
   onTuningSync,
+  onCameraSpecsSync,
   requestTuning,
 };

@@ -104,6 +104,72 @@ def check_and_build():
 check_and_build()
 
 # ==========================================
+# 📷 CAMERA DETECTION
+# ==========================================
+def detect_camera_specs():
+    """Detect installed camera model and supported resolutions using rpicam-hello.
+    Falls back to OV5647 defaults if detection fails.
+    Returns dict with model, max_resolution, and supported_modes."""
+    try:
+        result = subprocess.run(
+            ["rpicam-hello", "--list-cameras"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        output = result.stdout
+        
+        # Parse camera model from output (e.g., "0 : ov5647 [2592x1944 ...")
+        model_match = re.search(r':\s+(\w+)\s+\[', output)
+        model = model_match.group(1).lower() if model_match else "ov5647"
+        
+        # Parse supported modes from "Modes:" section
+        # Extract resolution pairs from mode lines (e.g., "640x480 [30.00 fps")
+        modes_match = re.search(r"Modes:\s*([^\n]*(?:\n\s+[^\n]+)*)", output)
+        supported_modes = []
+        if modes_match:
+            modes_text = modes_match.group(1)
+            # Find all "WIDTHxHEIGHT" patterns
+            for match in re.finditer(r'(\d+)x(\d+)', modes_text):
+                res_str = f"{match.group(1)}x{match.group(2)}"
+                if res_str not in supported_modes:
+                    supported_modes.append(res_str)
+        
+        # Determine max resolution based on model
+        max_res_map = {
+            "ov5647": (2592, 1944),
+            "imx219": (3280, 2464),
+            "imx477": (4056, 3040),
+            "ov64a40": (9152, 6944),
+        }
+        max_resolution = max_res_map.get(model, (2592, 1944))
+        
+        # If no modes detected, use defaults for the model
+        if not supported_modes:
+            supported_modes = {
+                "ov5647": ["640x480", "1296x972", "1920x1080", "2592x1944"],
+                "imx219": ["640x480", "1296x972", "1920x1080", "3280x2464"],
+            }.get(model, ["640x480", "1296x972", "1920x1080", "2592x1944"])
+        
+        camera_info = {
+            "model": model,
+            "max_resolution": max_resolution,
+            "supported_modes": supported_modes,
+        }
+        print(f"✅ [Camera] Detected {model.upper()} with max resolution {max_resolution[0]}x{max_resolution[1]}")
+        print(f"   Available modes: {', '.join(supported_modes)}")
+        return camera_info
+    except Exception as e:
+        print(f"⚠️  [Camera] Detection failed ({e}), using OV5647 defaults")
+        return {
+            "model": "ov5647",
+            "max_resolution": (2592, 1944),
+            "supported_modes": ["640x480", "1296x972", "1920x1080", "2592x1944"],
+        }
+
+camera_specs = detect_camera_specs()
+
+# ==========================================
 # 📷 CAMERA SETUP
 # ==========================================
 try:
@@ -1367,6 +1433,8 @@ def on_connect():
         'tuning': _active_tuning,
         'defaults': _AUTOPILOT_DEFAULT_TUNING,
     })
+    # Send camera specs for dynamic resolution dropdown
+    emit('camera_specs_sync', camera_specs)
 
 @socketio.on('disconnect')
 def on_disconnect():
