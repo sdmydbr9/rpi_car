@@ -449,6 +449,17 @@ def sensor_monitor():
             print(f"❌ Sensor monitor error: {e}")
             time.sleep(5)
 
+def save_gear_before_ebrake():
+    """Save current gear before emergency brake sets it to Neutral"""
+    if car_state["gear"] != "N" and car_state["gear_before_ebrake"] is None:
+        car_state["gear_before_ebrake"] = car_state["gear"]
+
+def restore_gear_after_ebrake():
+    """Restore gear after emergency brake is released"""
+    if car_state["gear_before_ebrake"] is not None:
+        car_state["gear"] = car_state["gear_before_ebrake"]
+        car_state["gear_before_ebrake"] = None
+
 def physics_loop():
     # Note: obstacle_state is now in car_state, not a local variable
     stop_timer = 0           # Timer for 1-second stop (50 cycles = 1 second at 20ms)
@@ -693,9 +704,8 @@ def physics_loop():
                 if car_state["emergency_brake_active"]:
                     car_state["current_pwm"] = 0
                     car_state["is_braking"] = True
-                    # Save current gear before setting to Neutral (if not already saved)
-                    if car_state["gear"] != "N" and car_state["gear_before_ebrake"] is None:
-                        car_state["gear_before_ebrake"] = car_state["gear"]
+                    # Save current gear before setting to Neutral
+                    save_gear_before_ebrake()
                     car_state["gear"] = "N"
                     car_system.stop()  # Immediately cut motors
                 else:
@@ -713,9 +723,8 @@ def physics_loop():
                     current = 0
                     car_state["current_pwm"] = 0
                     car_state["is_braking"] = True  # Apply brake signals
-                    # Save current gear before setting to Neutral (if not already saved)
-                    if car_state["gear"] != "N" and car_state["gear_before_ebrake"] is None:
-                        car_state["gear_before_ebrake"] = car_state["gear"]
+                    # Save current gear before setting to Neutral
+                    save_gear_before_ebrake()
                     car_state["gear"] = "N"  # Set gear to Neutral
                 # BRAKE PEDAL PRESSED - Real car braking behavior
                 elif brake:
@@ -1437,10 +1446,8 @@ def on_emergency_stop(data):
             car_state["gear_before_ebrake"] = car_state["gear"]
             car_state["gear"] = "N"
     else:
-        # Deactivating emergency brake - restore previous gear if available
-        if car_state["gear_before_ebrake"] is not None:
-            car_state["gear"] = car_state["gear_before_ebrake"]
-            car_state["gear_before_ebrake"] = None
+        # Deactivating emergency brake - restore previous gear
+        restore_gear_after_ebrake()
     
     # If in autopilot mode and e-brake activated, stop motors immediately
     if car_state["emergency_brake_active"] and car_state["autonomous_mode"]:
@@ -1465,10 +1472,8 @@ def on_emergency_stop_release(data):
     """Handle emergency brake release - explicitly set brake to OFF"""
     car_state["emergency_brake_active"] = False
     
-    # Restore previous gear if available
-    if car_state["gear_before_ebrake"] is not None:
-        car_state["gear"] = car_state["gear_before_ebrake"]
-        car_state["gear_before_ebrake"] = None
+    # Restore previous gear
+    restore_gear_after_ebrake()
     
     # Reset obstacle avoidance state
     car_state["obstacle_state"] = "IDLE"
