@@ -407,7 +407,7 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
     }
     
     // Send autopilot tuning (exclude camera settings)
-    const { CAMERA_RESOLUTION, CAMERA_JPEG_QUALITY, CAMERA_FRAMERATE, VISION_ENABLED, ...autopilotTuning } = t;
+    const { CAMERA_RESOLUTION: _CAMERA_RESOLUTION, CAMERA_JPEG_QUALITY: _CAMERA_JPEG_QUALITY, CAMERA_FRAMERATE: _CAMERA_FRAMERATE, VISION_ENABLED: _VISION_ENABLED, ...autopilotTuning } = t;
     
     socketClient.emitTuningUpdate(autopilotTuning as Record<string, number>);
     setSynced(true);
