@@ -38,6 +38,9 @@ export interface TuningConstants {
   VISION_ENABLED: boolean;
 }
 
+// Autopilot tuning constants (excludes camera settings)
+type AutopilotTuning = Omit<TuningConstants, 'CAMERA_RESOLUTION' | 'CAMERA_JPEG_QUALITY' | 'CAMERA_FRAMERATE' | 'VISION_ENABLED'>;
+
 export const DEFAULT_TUNING: TuningConstants = {
   FRONT_CRITICAL_CM: 5,
   REAR_BLOCKED_CM: 3,
@@ -407,13 +410,15 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
     }
     
     // Send autopilot tuning (exclude camera settings)
-    const autopilotTuning = { ...t };
-    delete (autopilotTuning as any).CAMERA_RESOLUTION;
-    delete (autopilotTuning as any).CAMERA_JPEG_QUALITY;
-    delete (autopilotTuning as any).CAMERA_FRAMERATE;
-    delete (autopilotTuning as any).VISION_ENABLED;
+    const {
+      CAMERA_RESOLUTION: _CAMERA_RESOLUTION,
+      CAMERA_JPEG_QUALITY: _CAMERA_JPEG_QUALITY,
+      CAMERA_FRAMERATE: _CAMERA_FRAMERATE,
+      VISION_ENABLED: _VISION_ENABLED,
+      ...autopilotTuning
+    } = t;
     
-    socketClient.emitTuningUpdate(autopilotTuning as unknown as Record<string, number>);
+    socketClient.emitTuningUpdate(autopilotTuning);
     setSynced(true);
   }, [tuning]);
 
