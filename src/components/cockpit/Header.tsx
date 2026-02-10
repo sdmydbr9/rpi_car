@@ -1,4 +1,5 @@
 import { SettingsDialog, TuningConstants, DEFAULT_TUNING } from "./SettingsDialog";
+import type { CameraSpecs } from "../../lib/socketClient";
 
 interface HeaderProps {
   driverName?: string;
@@ -7,6 +8,7 @@ interface HeaderProps {
   tuning?: TuningConstants;
   onTuningChange?: (tuning: TuningConstants) => void;
   backendDefaults?: TuningConstants;
+  cameraSpecs?: CameraSpecs;
 }
 
 export const Header = ({ 
@@ -16,6 +18,7 @@ export const Header = ({
   tuning = DEFAULT_TUNING,
   onTuningChange = () => {},
   backendDefaults = DEFAULT_TUNING,
+  cameraSpecs,
 }: HeaderProps) => {
   return (
     <header className="flex items-center justify-between px-1.5 sm:px-4 py-0.5 sm:py-1.5 border-b border-primary/30 bg-card/30 backdrop-blur-sm h-[6dvh] min-h-[1.75rem] max-h-10 flex-shrink-0">
@@ -49,7 +52,7 @@ export const Header = ({
           <span className="text-foreground font-bold racing-text text-[10px] sm:text-sm hidden sm:inline">{driverName}</span>
         </div>
         {/* Settings Dialog Button */}
-        <SettingsDialog tuning={tuning} onTuningChange={onTuningChange} backendDefaults={backendDefaults} />
+        <SettingsDialog tuning={tuning} onTuningChange={onTuningChange} backendDefaults={backendDefaults} cameraSpecs={cameraSpecs} />
       </div>
     </header>
   );
