@@ -530,16 +530,27 @@ def physics_loop():
         # HOWEVER: Emergency Safety Override - even in autonomous mode, if sensors detect
         # imminent collision, immediately cut power and brake to prevent damage.
         emergency_stop_distance = 8   # Emergency stop if sonar < 8cm (immediate danger)
-        emergency_ir_override = car_state["ir_enabled"] and (left_obstacle or right_obstacle)
-        emergency_sonar_override = car_state["sonar_enabled"] and sonar_distance < emergency_stop_distance
+        # IR and sonar sensors face FORWARD.  When the car is in Reverse
+        # gear it is driving AWAY from whatever the sensors see, so the
+        # emergency override must not fire — otherwise the car can never
+        # back away from a front obstacle.
+        is_forward_gear = car_state["gear"] != "R"
+        emergency_ir_override = car_state["ir_enabled"] and (left_obstacle or right_obstacle) and is_forward_gear
+        emergency_sonar_override = car_state["sonar_enabled"] and sonar_distance < emergency_stop_distance and is_forward_gear
         
         if emergency_ir_override or emergency_sonar_override:
             # EMERGENCY OVERRIDE: Immediate stop regardless of mode
             print(f"🚨 EMERGENCY OVERRIDE! IR: {emergency_ir_override}, Sonar: {sonar_distance:.1f}cm - CUTTING POWER")
             car_state["current_pwm"] = 0
             car_state["is_braking"] = True
-            car_state["gas_pressed"] = False
-            car_state["brake_pressed"] = True
+            # NOTE: Do NOT overwrite gas_pressed / brake_pressed here.
+            # Those flags represent the user's physical input on the UI.
+            # Overwriting them causes a latching bug: when the obstacle
+            # clears, brake_pressed stays True and the car remains
+            # braked until the user manually releases and re-presses
+            # the throttle — the UI thinks throttle is held but the
+            # server ignores it.  is_braking alone is enough; the
+            # motor-output section already checks it to apply brakes.
             # In autonomous mode, AutoPilot owns its own FSM —
             # the emergency brake GPIO is applied below by the motor-output
             # section; AutoPilot will detect the obstacle on its next tick.
@@ -767,6 +778,12 @@ def physics_loop():
             
             car_state["current_pwm"] = current
 
+        # Re-read gear — obstacle avoidance (REVERSING) may have
+        # changed car_state["gear"] to "R" after we read it at the
+        # top of this iteration.  Using the stale value would apply
+        # the wrong direction for one full 20 ms frame.
+        gear = car_state["gear"]
+
         # --- 3. STEERING MIXER (The Magic) ---
         # In autonomous mode, CarSystem handles GPIO directly — skip mixer.
         if car_state["autonomous_mode"]:
@@ -816,11 +833,14 @@ def physics_loop():
                 pwm_a.ChangeDutyCycle(100)
                 pwm_b.ChangeDutyCycle(100)
             else:
-                # Normal operation: apply calculated motor speeds
-                pwm_a.ChangeDutyCycle(int(left_motor_speed))
-                pwm_b.ChangeDutyCycle(int(right_motor_speed))
-                
-                # Direction Logic
+                # Direction Logic — set BEFORE PWM.
+                # Previously PWM was applied first while direction pins
+                # still reflected the prior state (e.g. brake = both
+                # HIGH).  The L298N would briefly see driving-level PWM
+                # in brake configuration; the right motor (updated last)
+                # spent more time in this conflicting state and could
+                # lock up.  Setting direction first ensures the H-bridge
+                # is configured correctly before power is applied.
                 l_a, l_b = False, True # Default Forward
                 r_a, r_b = False, True # Default Forward
 
@@ -831,11 +851,13 @@ def physics_loop():
                     if obstacle_state == "REVERSING":
                         print(f"🔧 REVERSE MOTORS: L={int(left_motor_speed)}% R={int(right_motor_speed)}% IN1={l_a} IN2={l_b} IN3={r_a} IN4={r_b}")
 
-                # NOTE: We removed the "Spin" override. 
-                # Now we only steer by changing speed, not direction.
-                
+                # Set direction pins FIRST
                 GPIO.output(IN1, l_a); GPIO.output(IN2, l_b)
                 GPIO.output(IN3, r_a); GPIO.output(IN4, r_b)
+
+                # THEN apply PWM — motors now have correct direction
+                pwm_a.ChangeDutyCycle(int(left_motor_speed))
+                pwm_b.ChangeDutyCycle(int(right_motor_speed))
         except Exception as e:
             pass  # GPIO not available, skip
 
