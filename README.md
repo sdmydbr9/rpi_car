@@ -163,6 +163,29 @@ Access the web interface at:
    - **Throttle Pedal**: Accelerate
    - **Brake Pedal**: Slow down/stop
 
+### Camera & Vision Settings
+Access the Settings dialog (⚙️ icon) to configure camera and computer vision:
+
+#### Camera Configuration
+- **Resolution**: Choose between Low (640×480), Medium (1280×720), or High (1920×1080)
+  - Higher resolution = better quality but slower streaming
+  - Changes require camera restart
+- **JPEG Quality**: Adjust streaming compression (10-100%)
+  - Higher quality = sharper image but more bandwidth
+  - Recommended: 70% for balanced quality/performance
+- **Framerate**: Set camera capture rate (5-60 FPS)
+  - Higher FPS = smoother video but more CPU usage
+  - Changes require camera restart
+
+#### Computer Vision Toggle
+- **CV Toggle**: Enable/disable real-time object detection
+  - Uses MobileNetSSD for object recognition
+  - Detects 20+ object classes (person, car, bicycle, etc.)
+  - Requires camera to be enabled
+  - Provides virtual distance estimation for obstacle avoidance
+
+**Note**: The camera uses cv2.cvtColor for BGR to RGB color conversion, ensuring standard color representation in the video stream.
+
 ### Autonomous Mode
 1. Enable sensors (IR and Sonar)
 2. Toggle **Autopilot** switch

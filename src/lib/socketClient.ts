@@ -312,6 +312,22 @@ export function emitVisionToggle(): void {
 }
 
 /**
+ * Update camera configuration (resolution, quality, framerate)
+ */
+export function emitCameraConfigUpdate(config: {
+  resolution?: string;
+  jpeg_quality?: number;
+  framerate?: number;
+}): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎮 CAMERA CONFIG UPDATE:`, config);
+    socket.emit('camera_config_update', config);
+  } else {
+    console.warn(`[UI Control] ⚠️ Cannot emit camera config update - socket not connected`, { socket: !!socket, connected: socket?.connected });
+  }
+}
+
+/**
  * Toggle Autopilot control
  */
 export function emitAutopilotToggle(): void {
@@ -377,6 +393,7 @@ export default {
   emitSonarToggle,
   emitCameraToggle,
   emitVisionToggle,
+  emitCameraConfigUpdate,
   emitAutopilotToggle,
   emitAutopilotEnable,
   emitAutopilotDisable,

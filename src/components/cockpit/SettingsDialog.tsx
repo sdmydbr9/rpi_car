@@ -31,6 +31,11 @@ export interface TuningConstants {
   UTURN_SPEED: number;
   UTURN_DURATION: number;
   ESCAPE_CLEAR_CM: number;
+  // Camera & Vision Settings
+  CAMERA_RESOLUTION: string;
+  CAMERA_JPEG_QUALITY: number;
+  CAMERA_FRAMERATE: number;
+  VISION_ENABLED: boolean;
 }
 
 export const DEFAULT_TUNING: TuningConstants = {
@@ -58,19 +63,44 @@ export const DEFAULT_TUNING: TuningConstants = {
   UTURN_SPEED: 70,
   UTURN_DURATION: 0.8,
   ESCAPE_CLEAR_CM: 20,
+  // Camera & Vision defaults
+  CAMERA_RESOLUTION: "low",
+  CAMERA_JPEG_QUALITY: 70,
+  CAMERA_FRAMERATE: 30,
+  VISION_ENABLED: false,
 };
 
 interface ParamConfig {
   key: keyof TuningConstants;
   label: string;
-  min: number;
-  max: number;
-  step: number;
-  unit: string;
+  min?: number;
+  max?: number;
+  step?: number;
+  unit?: string;
   info: string;
+  type?: 'number' | 'boolean' | 'select';
+  options?: Array<{ value: string | number | boolean; label: string }>;
 }
 
 const TUNING_GROUPS: { title: string; params: ParamConfig[] }[] = [
+  {
+    title: "CAMERA & VISION",
+    params: [
+      { key: "CAMERA_RESOLUTION", label: "Resolution", unit: "", type: "select",
+        options: [
+          { value: "low", label: "Low (640×480)" },
+          { value: "medium", label: "Medium (1280×720)" },
+          { value: "high", label: "High (1920×1080)" },
+        ],
+        info: "Camera resolution. Higher resolution = better quality but slower streaming. Changes take effect on next camera restart. ↑ Increase: better detail, slower FPS. ↓ Decrease: faster streaming, lower quality." },
+      { key: "CAMERA_JPEG_QUALITY", label: "JPEG Quality", min: 10, max: 100, step: 5, unit: "%",
+        info: "JPEG compression quality for streaming. Higher = better quality but more bandwidth. ↑ Increase: sharper image, more data. ↓ Decrease: more compression, faster streaming." },
+      { key: "CAMERA_FRAMERATE", label: "Framerate", min: 5, max: 60, step: 5, unit: "FPS",
+        info: "Camera capture framerate. Higher FPS = smoother video but more CPU usage. Changes take effect on next camera restart. ↑ Increase: smoother motion. ↓ Decrease: less CPU load." },
+      { key: "VISION_ENABLED", label: "CV Toggle", unit: "", type: "boolean",
+        info: "Enable/disable computer vision object detection. When ON, uses MobileNetSSD for real-time object recognition. Requires camera to be enabled." },
+    ],
+  },
   {
     title: "DISTANCE THRESHOLDS",
     params: [
@@ -164,14 +194,94 @@ const ParamRow = ({
   backendDefault,
 }: {
   config: ParamConfig;
-  value: number;
-  onChange: (val: number) => void;
-  backendDefault: number;
+  value: number | string | boolean;
+  onChange: (val: number | string | boolean) => void;
+  backendDefault: number | string | boolean;
 }) => {
   const [showInfo, setShowInfo] = useState(false);
-  const clamp = (v: number) => Math.min(config.max, Math.max(config.min, v));
-  const decimals = config.step < 1 ? 1 : 0;
-  const defaultVal = backendDefault;
+
+  // Handle different input types
+  if (config.type === 'boolean') {
+    return (
+      <div className="py-0.5">
+        <div className="flex items-center justify-between gap-1">
+          <div className="flex items-center gap-0.5 flex-1 min-w-0">
+            <button
+              onClick={() => setShowInfo(!showInfo)}
+              className={`flex-shrink-0 p-0 transition-colors ${showInfo ? 'text-primary' : 'text-muted-foreground/50 hover:text-primary/70'}`}
+            >
+              <HelpCircle className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
+            </button>
+            <span className="text-[9px] sm:text-[11px] text-muted-foreground racing-text min-w-0 truncate">
+              {config.label}
+            </span>
+          </div>
+          <button
+            onClick={() => onChange(!value)}
+            className={`px-3 py-1 rounded border text-[10px] sm:text-xs racing-text transition-colors ${
+              value 
+                ? 'border-primary bg-primary/20 text-primary hover:bg-primary/30' 
+                : 'border-border bg-muted/30 text-muted-foreground hover:bg-muted/50'
+            }`}
+          >
+            {value ? 'ON' : 'OFF'}
+          </button>
+        </div>
+        {showInfo && (
+          <div className="mt-0.5 ml-3 p-1.5 rounded bg-primary/5 border border-primary/20 text-[7px] sm:text-[9px] text-muted-foreground leading-relaxed">
+            {config.info}
+            <div className="mt-0.5 text-primary/70 font-semibold">
+              DEFAULT: {backendDefault ? 'ON' : 'OFF'}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (config.type === 'select' && config.options) {
+    return (
+      <div className="py-0.5">
+        <div className="flex items-center justify-between gap-1">
+          <div className="flex items-center gap-0.5 flex-1 min-w-0">
+            <button
+              onClick={() => setShowInfo(!showInfo)}
+              className={`flex-shrink-0 p-0 transition-colors ${showInfo ? 'text-primary' : 'text-muted-foreground/50 hover:text-primary/70'}`}
+            >
+              <HelpCircle className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
+            </button>
+            <span className="text-[9px] sm:text-[11px] text-muted-foreground racing-text min-w-0 truncate">
+              {config.label}
+            </span>
+          </div>
+          <select
+            value={String(value)}
+            onChange={(e) => onChange(e.target.value)}
+            className="px-2 py-1 rounded border border-border bg-card text-[10px] sm:text-xs text-foreground racing-text focus:border-primary focus:outline-none"
+          >
+            {config.options.map((opt) => (
+              <option key={String(opt.value)} value={String(opt.value)}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        {showInfo && (
+          <div className="mt-0.5 ml-3 p-1.5 rounded bg-primary/5 border border-primary/20 text-[7px] sm:text-[9px] text-muted-foreground leading-relaxed">
+            {config.info}
+            <div className="mt-0.5 text-primary/70 font-semibold">
+              DEFAULT: {String(backendDefault)}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Number type (original implementation)
+  const clamp = (v: number) => Math.min(config.max!, Math.max(config.min!, v));
+  const decimals = (config.step ?? 1) < 1 ? 1 : 0;
+  const defaultVal = backendDefault as number;
 
   const handleManualChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const raw = e.target.value;
@@ -198,15 +308,15 @@ const ParamRow = ({
         </div>
         <div className="flex items-center gap-0.5">
           <button
-            onClick={() => onChange(clamp(+(value - config.step).toFixed(2)))}
-            disabled={value <= config.min}
+            onClick={() => onChange(clamp(+((value as number) - (config.step ?? 1)).toFixed(2)))}
+            disabled={(value as number) <= (config.min ?? 0)}
             className="w-5 h-5 sm:w-6 sm:h-6 rounded border border-border bg-muted flex items-center justify-center text-foreground hover:border-primary/50 hover:bg-primary/10 transition-colors touch-feedback disabled:opacity-30 disabled:pointer-events-none"
           >
             <Minus className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
           </button>
           <input
             type="number"
-            value={Number(value.toFixed(decimals))}
+            value={Number((value as number).toFixed(decimals))}
             onChange={handleManualChange}
             min={config.min}
             max={config.max}
@@ -214,8 +324,8 @@ const ParamRow = ({
             className="w-12 sm:w-14 h-5 sm:h-6 bg-card border border-border rounded px-1 text-center text-[10px] sm:text-xs text-foreground racing-number focus:border-primary focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
           />
           <button
-            onClick={() => onChange(clamp(+(value + config.step).toFixed(2)))}
-            disabled={value >= config.max}
+            onClick={() => onChange(clamp(+((value as number) + (config.step ?? 1)).toFixed(2)))}
+            disabled={(value as number) >= (config.max ?? 100)}
             className="w-5 h-5 sm:w-6 sm:h-6 rounded border border-border bg-muted flex items-center justify-center text-foreground hover:border-primary/50 hover:bg-primary/10 transition-colors touch-feedback disabled:opacity-30 disabled:pointer-events-none"
           >
             <Plus className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
@@ -273,7 +383,7 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
   const [synced, setSynced] = useState(false);
 
   const handleParamChange = useCallback(
-    (key: keyof TuningConstants, value: number) => {
+    (key: keyof TuningConstants, value: number | string | boolean) => {
       onTuningChange({ ...tuning, [key]: value });
       setSynced(false);
     },
@@ -281,9 +391,31 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
   );
 
   const sendTuningToBackend = useCallback((t: TuningConstants) => {
-    socketClient.emitTuningUpdate(t as unknown as Record<string, number>);
+    // Separate camera config from autopilot tuning
+    const cameraConfig = {
+      resolution: t.CAMERA_RESOLUTION,
+      jpeg_quality: t.CAMERA_JPEG_QUALITY,
+      framerate: t.CAMERA_FRAMERATE,
+    };
+    
+    // Send camera configuration separately
+    socketClient.emitCameraConfigUpdate(cameraConfig);
+    
+    // Handle vision toggle separately
+    if (t.VISION_ENABLED !== tuning.VISION_ENABLED) {
+      socketClient.emitVisionToggle();
+    }
+    
+    // Send autopilot tuning (exclude camera settings)
+    const autopilotTuning = { ...t };
+    delete (autopilotTuning as any).CAMERA_RESOLUTION;
+    delete (autopilotTuning as any).CAMERA_JPEG_QUALITY;
+    delete (autopilotTuning as any).CAMERA_FRAMERATE;
+    delete (autopilotTuning as any).VISION_ENABLED;
+    
+    socketClient.emitTuningUpdate(autopilotTuning as unknown as Record<string, number>);
     setSynced(true);
-  }, []);
+  }, [tuning]);
 
   const handleApplyAndClose = useCallback(() => {
     sendTuningToBackend(tuning);

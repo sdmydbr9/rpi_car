@@ -71,6 +71,17 @@ SONAR_MAX_DISTANCE = 400        # Maximum reliable distance
 REVERSE_POWER = 40            # Power level (%) for obstacle avoidance reverse (20-60 recommended)
 MIN_REVERSE_POWER = 15         # Minimum power needed to move motors (adjust if motors don't start)
 
+# --- CAMERA SETTINGS ---
+# Available resolutions based on typical Pi Camera specs
+CAMERA_RESOLUTIONS = {
+    "low": (640, 480),      # Low resolution - best for performance
+    "medium": (1280, 720),  # Medium resolution - balanced
+    "high": (1920, 1080),   # High resolution - best quality
+}
+CAMERA_DEFAULT_RESOLUTION = "low"  # Default to low for best streaming performance
+CAMERA_JPEG_QUALITY = 70           # JPEG compression quality (1-100, higher = better quality)
+CAMERA_FRAMERATE = 30              # Camera framerate (FPS)
+
 # ==========================================
 # 🛠️ AUTO-BUILDER
 # ==========================================
@@ -133,7 +144,8 @@ def generate_camera_frames():
     """Generator that yields MJPEG frames from the Pi camera.
     Uses vision system's annotated frames (with detection overlays)
     when available, otherwise falls back to raw camera capture.
-    Only streams frames when camera_enabled is True."""
+    Only streams frames when camera_enabled is True.
+    Applies cv2.cvtColor for standard color conversion."""
     while True:
         try:
             if not CAMERA_AVAILABLE or picam2 is None:
@@ -153,8 +165,14 @@ def generate_camera_frames():
             # Fallback to raw capture if vision not ready
             if frame is None:
                 frame = picam2.capture_array()
+            
+            # Convert BGR to RGB for standard color representation
+            # Picamera2 captures in BGR888 format, convert to RGB for proper color display
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            # Get current JPEG quality from car_state
+            jpeg_quality = car_state.get("camera_jpeg_quality", CAMERA_JPEG_QUALITY)
+            ret, buffer = cv2.imencode('.jpg', frame_rgb, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
             if not ret:
                 continue
             frame_bytes = buffer.tobytes()
@@ -324,6 +342,10 @@ car_state = {
     "camera_closest_object": "",      # Closest in-path object class
     "camera_closest_confidence": 0,   # Confidence % of closest detection
     "vision_fps": 0.0,               # DNN inference FPS
+    # Camera configuration settings
+    "camera_resolution": CAMERA_DEFAULT_RESOLUTION,  # Current resolution setting (low/medium/high)
+    "camera_jpeg_quality": CAMERA_JPEG_QUALITY,      # JPEG quality (1-100)
+    "camera_framerate": CAMERA_FRAMERATE,            # Camera framerate (FPS)
 }
 
 # ==========================================
@@ -1569,6 +1591,48 @@ def on_vision_toggle(data):
     state = '✅ ON' if vision_system.active else '❌ OFF'
     print(f"\n⚙️ [UI Control] 📷 VISION: {state}")
     emit('vision_response', {'status': 'ok', 'vision_active': vision_system.active})
+
+@socketio.on('camera_config_update')
+def on_camera_config_update(data):
+    """Update camera configuration (resolution, quality, framerate)."""
+    updated = []
+    
+    # Update JPEG quality
+    if 'jpeg_quality' in data:
+        quality = int(data['jpeg_quality'])
+        if 1 <= quality <= 100:
+            car_state["camera_jpeg_quality"] = quality
+            updated.append(f"jpeg_quality={quality}")
+    
+    # Update resolution (requires camera restart)
+    if 'resolution' in data:
+        resolution = data['resolution']
+        if resolution in CAMERA_RESOLUTIONS:
+            car_state["camera_resolution"] = resolution
+            updated.append(f"resolution={resolution}")
+            # Note: Changing resolution requires restarting the camera
+            # This would need to be implemented with picam2.stop() / reconfigure / start()
+            # For now, we just store the preference for next camera start
+            print(f"⚠️ Resolution change to {resolution} will take effect on next camera restart")
+    
+    # Update framerate
+    if 'framerate' in data:
+        framerate = int(data['framerate'])
+        if 1 <= framerate <= 120:
+            car_state["camera_framerate"] = framerate
+            updated.append(f"framerate={framerate}")
+            print(f"⚠️ Framerate change to {framerate} will take effect on next camera restart")
+    
+    print(f"\n⚙️ [Camera Config] Updated: {', '.join(updated) if updated else 'none'}")
+    emit('camera_config_response', {
+        'status': 'ok', 
+        'updated': updated,
+        'current_config': {
+            'resolution': car_state["camera_resolution"],
+            'jpeg_quality': car_state["camera_jpeg_quality"],
+            'framerate': car_state["camera_framerate"],
+        }
+    })
 
 @socketio.on('autonomous_enable')
 def on_autonomous_enable(data):
