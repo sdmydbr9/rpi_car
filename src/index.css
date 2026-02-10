@@ -138,8 +138,8 @@
     text-size-adjust: 100%;
     -webkit-text-zoom: 100%;
     text-zoom: 100%;
-    /* Disable pinch zoom */
-    touch-action: manipulation;
+    /* Gaming: Disable ALL browser touch gestures (scroll, zoom, pan) */
+    touch-action: none;
     /* Gaming UI Polish - Prevent text selection */
     user-select: none;
     -webkit-user-select: none;
@@ -147,6 +147,8 @@
     -ms-user-select: none;
     /* Disable iOS selection UI */
     -webkit-touch-callout: none;
+    /* Prevent pull-to-refresh & overscroll bounce on Android/iOS */
+    overscroll-behavior: none;
   }
 
   body {

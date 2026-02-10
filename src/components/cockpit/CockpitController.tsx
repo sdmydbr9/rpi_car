@@ -182,6 +182,11 @@ export const CockpitController = () => {
     }
   }, []);
 
+  // Sync userWantsVision with tuning.VISION_ENABLED
+  useEffect(() => {
+    setUserWantsVision(tuning.VISION_ENABLED);
+  }, [tuning.VISION_ENABLED]);
+
   // Setup telemetry subscription when connected
   useEffect(() => {
     if (!isConnected) {
@@ -317,7 +322,6 @@ export const CockpitController = () => {
       if (data.camera_closest_object !== undefined) setCameraClosestObject(data.camera_closest_object);
       if (data.camera_closest_confidence !== undefined) setCameraClosestConfidence(data.camera_closest_confidence);
       if (data.vision_fps !== undefined) setVisionFps(data.vision_fps);
-      if (data.user_wants_vision !== undefined) setUserWantsVision(data.user_wants_vision);
       if (data.camera_actual_fps !== undefined) setCameraActualFps(data.camera_actual_fps);
       // Update live camera config from telemetry (for HUD badge only — does NOT touch tuning state)
       if (data.camera_resolution) setLiveCameraResolution(data.camera_resolution);
@@ -583,6 +587,7 @@ export const CockpitController = () => {
         visionFps={visionFps}
         isCameraEnabled={isCameraEnabled}
         userWantsVision={userWantsVision}
+        onToggleCamera={handleCameraToggle}
       />
       
       <div className="h-[100dvh] w-full flex flex-col overflow-hidden">
@@ -602,7 +607,7 @@ export const CockpitController = () => {
             {/* Camera Feed */}
             <div className="h-[30%] min-h-0 p-0.5 border-none border-b border-border/30">
               <div onClick={handleImmersiveViewToggle} className="cursor-pointer h-full w-full">
-                <CameraFeed isConnected={isConnected} streamUrl={streamUrl} />
+                <CameraFeed isConnected={isConnected} streamUrl={streamUrl} isCameraEnabled={isCameraEnabled} onToggleCamera={handleCameraToggle} />
               </div>
             </div>
             

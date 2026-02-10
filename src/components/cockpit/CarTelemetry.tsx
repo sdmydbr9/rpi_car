@@ -53,7 +53,7 @@ export const CarTelemetry = ({
   };
 
   return (
-    <div className="flex flex-col items-center justify-center h-full p-0.5 overflow-auto gap-1">
+    <div className="flex flex-col items-center justify-center h-full p-0.5 overflow-auto gap-1" data-scrollable="true" style={{ touchAction: 'pan-y' }}>
       {/* First Row: Temperature, CPU, GPU Gauges - Smaller */}
       <div className="flex gap-1 justify-center flex-wrap items-end">
         <Gauge 

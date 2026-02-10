@@ -1,4 +1,5 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
+import { useTouchTracking } from "@/hooks/useTouchTracking";
 
 interface PedalsProps {
   onThrottleChange: (active: boolean) => void;
@@ -10,24 +11,55 @@ export const Pedals = ({ onThrottleChange, onBrakeChange, isEnabled = true }: Pe
   const [throttlePressed, setThrottlePressed] = useState(false);
   const [brakePressed, setBrakePressed] = useState(false);
 
-  const handleThrottleStart = useCallback((e: React.TouchEvent | React.MouseEvent) => {
+  const throttleRef = useRef<HTMLButtonElement>(null);
+  const brakeRef = useRef<HTMLButtonElement>(null);
+
+  // --- Multitouch-safe: each pedal tracks its own finger independently ---
+  // This allows holding throttle with one finger while tapping brake with another.
+
+  useTouchTracking(throttleRef, {
+    onTouchStart: () => {
+      setThrottlePressed(true);
+      onThrottleChange(true);
+      navigator.vibrate?.(15);
+    },
+    onTouchEnd: () => {
+      setThrottlePressed(false);
+      onThrottleChange(false);
+    },
+  }, isEnabled);
+
+  useTouchTracking(brakeRef, {
+    onTouchStart: () => {
+      setBrakePressed(true);
+      onBrakeChange(true);
+      navigator.vibrate?.(15);
+    },
+    onTouchEnd: () => {
+      setBrakePressed(false);
+      onBrakeChange(false);
+    },
+  }, isEnabled);
+
+  // Mouse handlers for desktop (no multitouch issue with mouse)
+  const handleThrottleMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     setThrottlePressed(true);
     onThrottleChange(true);
   }, [onThrottleChange]);
 
-  const handleThrottleEnd = useCallback(() => {
+  const handleThrottleMouseUp = useCallback(() => {
     setThrottlePressed(false);
     onThrottleChange(false);
   }, [onThrottleChange]);
 
-  const handleBrakeStart = useCallback((e: React.TouchEvent | React.MouseEvent) => {
+  const handleBrakeMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     setBrakePressed(true);
     onBrakeChange(true);
   }, [onBrakeChange]);
 
-  const handleBrakeEnd = useCallback(() => {
+  const handleBrakeMouseUp = useCallback(() => {
     setBrakePressed(false);
     onBrakeChange(false);
   }, [onBrakeChange]);
@@ -36,6 +68,7 @@ export const Pedals = ({ onThrottleChange, onBrakeChange, isEnabled = true }: Pe
     <div className="flex h-full gap-0.5 p-0.5">
       {/* Brake Pedal - 30% width */}
       <button
+        ref={brakeRef}
         disabled={!isEnabled}
         className={`
           flex-[0.3] h-full rounded-lg border-2 flex flex-col items-center justify-center
@@ -47,12 +80,9 @@ export const Pedals = ({ onThrottleChange, onBrakeChange, isEnabled = true }: Pe
             : 'bg-gradient-to-t from-destructive/40 to-destructive/20 border-destructive/50 hover:border-destructive/70'
           }
         `}
-        onTouchStart={!isEnabled ? undefined : handleBrakeStart}
-        onTouchEnd={!isEnabled ? undefined : handleBrakeEnd}
-        onTouchCancel={!isEnabled ? undefined : handleBrakeEnd}
-        onMouseDown={!isEnabled ? undefined : handleBrakeStart}
-        onMouseUp={!isEnabled ? undefined : handleBrakeEnd}
-        onMouseLeave={!isEnabled ? undefined : handleBrakeEnd}
+        onMouseDown={!isEnabled ? undefined : handleBrakeMouseDown}
+        onMouseUp={!isEnabled ? undefined : handleBrakeMouseUp}
+        onMouseLeave={!isEnabled ? undefined : handleBrakeMouseUp}
       >
         <div className={`racing-text text-xs sm:text-lg font-bold transition-all ${!isEnabled ? 'text-muted-foreground' : brakePressed ? 'text-white text-glow-red' : 'text-destructive-foreground/70'}`}>
           BRAKE
@@ -69,6 +99,7 @@ export const Pedals = ({ onThrottleChange, onBrakeChange, isEnabled = true }: Pe
 
       {/* Throttle Pedal - 70% width */}
       <button
+        ref={throttleRef}
         disabled={!isEnabled}
         className={`
           flex-[0.7] h-full rounded-lg border-2 flex flex-col items-center justify-center
@@ -80,12 +111,9 @@ export const Pedals = ({ onThrottleChange, onBrakeChange, isEnabled = true }: Pe
             : 'bg-gradient-to-t from-primary/40 to-primary/20 border-primary/50 hover:border-primary/70'
           }
         `}
-        onTouchStart={!isEnabled ? undefined : handleThrottleStart}
-        onTouchEnd={!isEnabled ? undefined : handleThrottleEnd}
-        onTouchCancel={!isEnabled ? undefined : handleThrottleEnd}
-        onMouseDown={!isEnabled ? undefined : handleThrottleStart}
-        onMouseUp={!isEnabled ? undefined : handleThrottleEnd}
-        onMouseLeave={!isEnabled ? undefined : handleThrottleEnd}
+        onMouseDown={!isEnabled ? undefined : handleThrottleMouseDown}
+        onMouseUp={!isEnabled ? undefined : handleThrottleMouseUp}
+        onMouseLeave={!isEnabled ? undefined : handleThrottleMouseUp}
       >
         <div className={`racing-text text-sm sm:text-xl font-bold transition-all ${!isEnabled ? 'text-muted-foreground' : throttlePressed ? 'text-white text-glow-teal' : 'text-primary-foreground/70'}`}>
           THROTTLE

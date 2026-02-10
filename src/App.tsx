@@ -37,14 +37,56 @@ const disableGameDisruptiveActions = () => {
   document.addEventListener("drop", (e) => e.preventDefault());
   document.addEventListener("dragover", (e) => e.preventDefault());
 
-  // Prevent default touch behaviors
+  // Prevent default touch behaviors (scroll, pull-to-refresh, overscroll bounce)
+  // This is the critical handler for gaming — blocks ALL browser touch interpretation
+  // unless the element is explicitly marked as scrollable.
   document.addEventListener("touchmove", (e) => {
-    // Allow scrolling on scrollable elements
     const target = e.target as HTMLElement;
     if (!target.closest('[data-scrollable="true"]')) {
-      // Only prevent if not explicitly marked as scrollable
+      e.preventDefault();
     }
   }, { passive: false });
+
+  // Prevent Safari gesturestart/gesturechange (pinch-zoom on iOS)
+  document.addEventListener("gesturestart", (e) => e.preventDefault());
+  document.addEventListener("gesturechange", (e) => e.preventDefault());
+
+  // Prevent double-tap zoom on all touch devices
+  let lastTouchEnd = 0;
+  document.addEventListener("touchend", (e) => {
+    const now = Date.now();
+    if (now - lastTouchEnd <= 300) {
+      e.preventDefault();
+    }
+    lastTouchEnd = now;
+  }, { passive: false });
+
+  // Request Wake Lock to prevent screen dimming during gameplay
+  const requestWakeLock = async () => {
+    try {
+      if ("wakeLock" in navigator) {
+        await (navigator as any).wakeLock.request("screen");
+      }
+    } catch {
+      // Wake Lock not supported or denied — non-critical
+    }
+  };
+
+  // Request wake lock on first interaction
+  const onFirstInteraction = () => {
+    requestWakeLock();
+    document.removeEventListener("touchstart", onFirstInteraction);
+    document.removeEventListener("click", onFirstInteraction);
+  };
+  document.addEventListener("touchstart", onFirstInteraction, { once: true });
+  document.addEventListener("click", onFirstInteraction, { once: true });
+
+  // Re-acquire wake lock when page becomes visible again (e.g. tab switch back)
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      requestWakeLock();
+    }
+  });
 };
 
 const App = () => {

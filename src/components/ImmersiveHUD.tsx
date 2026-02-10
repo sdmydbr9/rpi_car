@@ -1,6 +1,7 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useRef } from "react";
 import { X, Wifi, Zap, Power, VideoOff, Camera } from "lucide-react";
 import { useGameFeedback } from "@/hooks/useGameFeedback";
+import { useTouchTracking } from "@/hooks/useTouchTracking";
 
 interface ImmersiveHUDProps {
   isOpen: boolean;
@@ -30,6 +31,7 @@ interface ImmersiveHUDProps {
   visionFps?: number;
   isCameraEnabled?: boolean;
   userWantsVision?: boolean;
+  onToggleCamera?: () => void;
 }
 
 export const ImmersiveHUD = ({
@@ -59,9 +61,16 @@ export const ImmersiveHUD = ({
   visionFps,
   isCameraEnabled,
   userWantsVision,
+  onToggleCamera,
 }: ImmersiveHUDProps) => {
   const { triggerHaptic, playSound } = useGameFeedback();
   const [steeringDirection, setSteeringDirection] = useState<'left' | 'right' | null>(null);
+  
+  // Refs for multitouch-tracked interactive zones
+  const steerLeftRef = useRef<HTMLButtonElement>(null);
+  const steerRightRef = useRef<HTMLButtonElement>(null);
+  const hudBrakeRef = useRef<HTMLButtonElement>(null);
+  const hudThrottleRef = useRef<HTMLButtonElement>(null);
   
   // Resolution label map
   const resolutionLabel = useMemo(() => {
@@ -119,6 +128,54 @@ export const ImmersiveHUD = ({
     onGearChange?.(newGear);
   }, [triggerHaptic, onGearChange]);
 
+  // --- Multitouch-safe touch tracking for all HUD interactive zones ---
+  // Each zone tracks its own finger independently, allowing simultaneous
+  // steer + throttle, brake + steer, etc.
+
+  useTouchTracking(steerLeftRef, {
+    onTouchStart: () => {
+      setSteeringDirection('left');
+      triggerHaptic('light');
+      onSteeringChange?.(-45);
+    },
+    onTouchEnd: () => {
+      setSteeringDirection(null);
+      onSteeringChange?.(0);
+    },
+  });
+
+  useTouchTracking(steerRightRef, {
+    onTouchStart: () => {
+      setSteeringDirection('right');
+      triggerHaptic('light');
+      onSteeringChange?.(45);
+    },
+    onTouchEnd: () => {
+      setSteeringDirection(null);
+      onSteeringChange?.(0);
+    },
+  });
+
+  useTouchTracking(hudBrakeRef, {
+    onTouchStart: () => {
+      triggerHaptic('heavy');
+      onBrakeChange(true);
+    },
+    onTouchEnd: () => {
+      onBrakeChange(false);
+    },
+  });
+
+  useTouchTracking(hudThrottleRef, {
+    onTouchStart: () => {
+      triggerHaptic('medium');
+      onThrottleChange(true);
+    },
+    onTouchEnd: () => {
+      onThrottleChange(false);
+    },
+  });
+
   if (!isOpen) return null;
 
   return (
@@ -130,7 +187,23 @@ export const ImmersiveHUD = ({
       
       {/* Background Layer - Camera Feed */}
       <div className="absolute inset-0 z-0 bg-background">
-        {streamUrl ? (
+        {/* Camera Disabled - Show Off State */}
+        {!isCameraEnabled ? (
+          <div className="w-full h-full flex items-center justify-center bg-gradient-to-b from-secondary to-background">
+            <div className="text-center flex flex-col items-center gap-4">
+              <VideoOff className="w-20 h-20 text-muted-foreground/50" />
+              <div>
+                <div className="text-3xl racing-text text-muted-foreground mb-3">CAMERA DISABLED</div>
+                <button
+                  onClick={onToggleCamera}
+                  className="px-6 py-3 text-base bg-primary/80 hover:bg-primary text-primary-foreground rounded border border-primary/50 transition-colors racing-text font-medium"
+                >
+                  TURN ON CAMERA
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : streamUrl ? (
           <>
             <img
               src={streamUrl}
@@ -167,12 +240,11 @@ export const ImmersiveHUD = ({
          <div className="absolute inset-0 flex pointer-events-auto">
            {/* Left Steering Zone */}
            <button
-             onTouchStart={handleSteerLeft}
-             onTouchEnd={handleSteerEnd}
+             ref={steerLeftRef}
              onMouseDown={handleSteerLeft}
              onMouseUp={handleSteerEnd}
              onMouseLeave={handleSteerEnd}
-             className={`flex-1 h-full flex items-center justify-start pl-8 transition-all ${
+             className={`flex-1 h-full flex items-center justify-start pl-8 transition-all touch-none select-none ${
                steeringDirection === 'left' ? 'bg-primary/10' : ''
              }`}
            >
@@ -192,12 +264,11 @@ export const ImmersiveHUD = ({
            
            {/* Right Steering Zone */}
            <button
-             onTouchStart={handleSteerRight}
-             onTouchEnd={handleSteerEnd}
+             ref={steerRightRef}
              onMouseDown={handleSteerRight}
              onMouseUp={handleSteerEnd}
              onMouseLeave={handleSteerEnd}
-             className={`flex-1 h-full flex items-center justify-end pr-8 transition-all ${
+             className={`flex-1 h-full flex items-center justify-end pr-8 transition-all touch-none select-none ${
                steeringDirection === 'right' ? 'bg-primary/10' : ''
              }`}
            >
@@ -416,12 +487,11 @@ export const ImmersiveHUD = ({
          <div className="absolute bottom-4 left-4 pointer-events-auto z-20">
           {/* Brake Pedal */}
           <button
-            onTouchStart={handleBrakeStart}
-            onTouchEnd={handleBrakeEnd}
+            ref={hudBrakeRef}
             onMouseDown={handleBrakeStart}
             onMouseUp={handleBrakeEnd}
             onMouseLeave={handleBrakeEnd}
-            className={`w-32 h-32 rounded-2xl flex flex-col items-center justify-center transition-all ${
+            className={`w-32 h-32 rounded-2xl flex flex-col items-center justify-center transition-all touch-none select-none ${
               brake
                 ? 'bg-destructive/80 backdrop-blur-md border-2 border-destructive glow-red scale-95'
                 : 'bg-destructive/30 backdrop-blur-md border border-destructive/50 hover:bg-destructive/40'
@@ -438,12 +508,11 @@ export const ImmersiveHUD = ({
         {/* Bottom Right - Throttle Zone */}
          <div className="absolute bottom-4 right-4 pointer-events-auto z-20">
           <button
-            onTouchStart={handleThrottleStart}
-            onTouchEnd={handleThrottleEnd}
+            ref={hudThrottleRef}
             onMouseDown={handleThrottleStart}
             onMouseUp={handleThrottleEnd}
             onMouseLeave={handleThrottleEnd}
-            className={`w-32 h-32 rounded-2xl flex flex-col items-center justify-center transition-all ${
+            className={`w-32 h-32 rounded-2xl flex flex-col items-center justify-center transition-all touch-none select-none ${
               throttle
                 ? 'bg-primary/80 backdrop-blur-md border-2 border-primary glow-teal scale-95'
                 : 'bg-primary/30 backdrop-blur-md border border-primary/50 hover:bg-primary/40'

@@ -511,7 +511,7 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
             </div>
 
             {/* Scrollable Content */}
-            <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 min-h-0">
+            <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 min-h-0" data-scrollable="true" style={{ touchAction: 'pan-y' }}>
               {dynamicTuningGroups.map((group, i) => (
                 <CollapsibleGroup key={group.title} title={group.title} defaultOpen={i === 0}>
                   {group.params.map((param) => (

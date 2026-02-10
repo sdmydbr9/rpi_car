@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback } from "react";
+import { useTouchTracking } from "@/hooks/useTouchTracking";
 
 interface SteeringWheelProps {
   onAngleChange: (angle: number) => void;
@@ -12,6 +13,23 @@ export const SteeringWheel = ({ onAngleChange, angle, isEnabled = true }: Steeri
   const startAngleRef = useRef(0);
   const startTouchAngleRef = useRef(0);
 
+  // RAF-throttled angle emission: only emit once per animation frame
+  const pendingAngleRef = useRef<number | null>(null);
+  const rafIdRef = useRef<number | null>(null);
+
+  const emitAngle = useCallback((newAngle: number) => {
+    pendingAngleRef.current = newAngle;
+    if (rafIdRef.current === null) {
+      rafIdRef.current = requestAnimationFrame(() => {
+        if (pendingAngleRef.current !== null) {
+          onAngleChange(pendingAngleRef.current);
+          pendingAngleRef.current = null;
+        }
+        rafIdRef.current = null;
+      });
+    }
+  }, [onAngleChange]);
+
   const calculateAngle = useCallback((clientX: number, clientY: number) => {
     if (!wheelRef.current) return 0;
     const rect = wheelRef.current.getBoundingClientRect();
@@ -20,46 +38,47 @@ export const SteeringWheel = ({ onAngleChange, angle, isEnabled = true }: Steeri
     return Math.atan2(clientY - centerY, clientX - centerX) * (180 / Math.PI);
   }, []);
 
-  const handleTouchStart = useCallback((e: React.TouchEvent) => {
-    if (!isEnabled) return;
-    e.preventDefault();
-    setIsDragging(true);
-    const touch = e.touches[0];
-    startTouchAngleRef.current = calculateAngle(touch.clientX, touch.clientY);
-    startAngleRef.current = angle;
-  }, [angle, calculateAngle, isEnabled]);
+  // --- Multitouch-safe touch handling via useTouchTracking ---
+  // Tracks the specific finger (by touch.identifier) on the wheel element,
+  // so holding throttle/brake with another finger won't interfere.
+  useTouchTracking(wheelRef, {
+    onTouchStart: (touch) => {
+      setIsDragging(true);
+      startTouchAngleRef.current = calculateAngle(touch.clientX, touch.clientY);
+      startAngleRef.current = angle;
+      // Haptic feedback on grab
+      navigator.vibrate?.(10);
+    },
+    onTouchMove: (touch) => {
+      const currentTouchAngle = calculateAngle(touch.clientX, touch.clientY);
+      let deltaAngle = currentTouchAngle - startTouchAngleRef.current;
 
-  const handleTouchMove = useCallback((e: React.TouchEvent) => {
-    if (!isDragging) return;
-    e.preventDefault();
-    const touch = e.touches[0];
-    const currentTouchAngle = calculateAngle(touch.clientX, touch.clientY);
-    let deltaAngle = currentTouchAngle - startTouchAngleRef.current;
-    
-    // Normalize delta
-    if (deltaAngle > 180) deltaAngle -= 360;
-    if (deltaAngle < -180) deltaAngle += 360;
-    
-    let newAngle = startAngleRef.current + deltaAngle;
-    // Clamp between -90 and 90
-    newAngle = Math.max(-90, Math.min(90, newAngle));
-    onAngleChange(newAngle);
-  }, [isDragging, calculateAngle, onAngleChange]);
+      // Normalize delta
+      if (deltaAngle > 180) deltaAngle -= 360;
+      if (deltaAngle < -180) deltaAngle += 360;
 
-  const handleTouchEnd = useCallback(() => {
-    setIsDragging(false);
-    // Return to center
-    onAngleChange(0);
-  }, [onAngleChange]);
+      let newAngle = startAngleRef.current + deltaAngle;
+      // Clamp between -90 and 90
+      newAngle = Math.max(-90, Math.min(90, newAngle));
+      emitAngle(newAngle);
+    },
+    onTouchEnd: () => {
+      setIsDragging(false);
+      // Cancel any pending RAF emission and snap to center
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+        pendingAngleRef.current = null;
+      }
+      onAngleChange(0);
+    },
+  }, isEnabled);
 
   return (
     <div className="flex flex-col items-center justify-center h-full w-full overflow-hidden p-0.5">
       <div
         ref={wheelRef}
         className={`relative cursor-grab active:cursor-grabbing touch-none select-none w-[min(95%,95vh)] h-[min(95%,95vh)] aspect-square max-w-full max-h-full ${!isEnabled ? 'opacity-50 cursor-not-allowed' : ''}`}
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
         onMouseDown={(e) => {
           if (!isEnabled) return;
           setIsDragging(true);
