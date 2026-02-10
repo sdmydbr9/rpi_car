@@ -1337,6 +1337,7 @@ def on_connect():
     car_state["heartbeat_active"] = True
     # Ensure emergency brakes are OFF when client connects (client is now responsible for safety)
     car_state["emergency_brake_active"] = False
+    restore_gear_after_ebrake()  # Restore saved gear if e-brake was previously active
     print(f"   Emergency brakes reset to OFF")
     emit('connection_response', {'data': 'Connected to RC Car'})
     # Send current tuning state so UI stays in sync after refresh
@@ -1434,8 +1435,9 @@ def on_gear_change(data):
                 # Update saved gear so it restores to this new gear when e-brake is released
                 car_state["gear_before_ebrake"] = gear
             else:
-                # User selected neutral while e-brake is active
-                # Clear saved gear since there's nothing to restore to
+                # User explicitly selected neutral while e-brake is active
+                # Clear saved gear to respect the user's explicit choice
+                # When e-brake is released, gear will remain in neutral
                 car_state["gear_before_ebrake"] = None
         gear_names = {'R': '🔙 REVERSE', 'N': '⏸️ NEUTRAL', '1': '1️⃣ 1st', '2': '2️⃣ 2nd', '3': '3️⃣ 3rd', 'S': '⚡ SPORT'}
         print(f"\n⚙️ [UI Control] 🔧 GEAR: {gear_names.get(gear, gear)}")
