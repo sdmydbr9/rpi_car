@@ -1442,9 +1442,8 @@ def on_emergency_stop(data):
     # Handle gear state when emergency brake is toggled
     if car_state["emergency_brake_active"]:
         # Activating emergency brake - save current gear and set to Neutral
-        if car_state["gear"] != "N":
-            car_state["gear_before_ebrake"] = car_state["gear"]
-            car_state["gear"] = "N"
+        save_gear_before_ebrake()
+        car_state["gear"] = "N"
     else:
         # Deactivating emergency brake - restore previous gear
         restore_gear_after_ebrake()
