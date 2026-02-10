@@ -85,6 +85,14 @@ export const CockpitController = () => {
   const [requiresService, setRequiresService] = useState(false);
   const [tuning, setTuning] = useState<TuningConstants>(DEFAULT_TUNING);
   const [backendDefaults, setBackendDefaults] = useState<TuningConstants>(DEFAULT_TUNING);
+  // Vision / Object Detection state
+  const [visionActive, setVisionActive] = useState(false);
+  const [cameraObstacleDistance, setCameraObstacleDistance] = useState(999);
+  const [cameraDetectionsCount, setCameraDetectionsCount] = useState(0);
+  const [cameraInPathCount, setCameraInPathCount] = useState(0);
+  const [cameraClosestObject, setCameraClosestObject] = useState("");
+  const [cameraClosestConfidence, setCameraClosestConfidence] = useState(0);
+  const [visionFps, setVisionFps] = useState(0);
   const autoAccelIntervalRef = useRef<number | null>(null);
   const connectionTimeoutRef = useRef<number | null>(null);
   const autoConnectAttemptedRef = useRef(false);
@@ -184,6 +192,14 @@ export const CockpitController = () => {
         const hasError = convertedSensors.some(s => s.status !== 'ok');
         setRequiresService(hasError);
       }
+      // Update vision / object detection telemetry
+      if (data.vision_active !== undefined) setVisionActive(data.vision_active);
+      if (data.camera_obstacle_distance !== undefined) setCameraObstacleDistance(data.camera_obstacle_distance);
+      if (data.camera_detections_count !== undefined) setCameraDetectionsCount(data.camera_detections_count);
+      if (data.camera_in_path_count !== undefined) setCameraInPathCount(data.camera_in_path_count);
+      if (data.camera_closest_object !== undefined) setCameraClosestObject(data.camera_closest_object);
+      if (data.camera_closest_confidence !== undefined) setCameraClosestConfidence(data.camera_closest_confidence);
+      if (data.vision_fps !== undefined) setVisionFps(data.vision_fps);
     });
 
     return () => {
@@ -485,6 +501,13 @@ export const CockpitController = () => {
                 distanceToObstacle={sonarDistance}
                 eBrakeActive={eBrakeActive}
                 isRunning={isAutopilotRunning}
+                visionActive={visionActive}
+                cameraObstacleDistance={cameraObstacleDistance}
+                cameraDetectionsCount={cameraDetectionsCount}
+                cameraInPathCount={cameraInPathCount}
+                cameraClosestObject={cameraClosestObject}
+                cameraClosestConfidence={cameraClosestConfidence}
+                visionFps={visionFps}
                 onEmergencyStop={handleAutopilotEBrake}
                 onAutopilotToggle={handleAutopilotToggle}
                 onStartStop={handleAutopilotStartStop}

@@ -1,4 +1,4 @@
-import { Navigation, AlertTriangle, RotateCcw, OctagonX, Compass, Activity, Gauge, Ruler, Play, Square, RefreshCw } from "lucide-react";
+import { Navigation, AlertTriangle, RotateCcw, OctagonX, Compass, Activity, Gauge, Ruler, Play, Square, RefreshCw, Eye, EyeOff } from "lucide-react";
 
 export type AutopilotStatus = 
   | "CRUISING" 
@@ -15,6 +15,14 @@ interface AutopilotTelemetryProps {
   distanceToObstacle: number; // in cm
   eBrakeActive?: boolean;
   isRunning?: boolean;
+  // Vision / Object Detection
+  visionActive?: boolean;
+  cameraObstacleDistance?: number;
+  cameraDetectionsCount?: number;
+  cameraInPathCount?: number;
+  cameraClosestObject?: string;
+  cameraClosestConfidence?: number;
+  visionFps?: number;
   onEmergencyStop?: () => void;
   onAutopilotToggle?: () => void;
   onStartStop?: () => void;
@@ -102,6 +110,13 @@ export const AutopilotTelemetry = ({
   distanceToObstacle,
   eBrakeActive = false,
   isRunning = false,
+  visionActive = false,
+  cameraObstacleDistance = 999,
+  cameraDetectionsCount = 0,
+  cameraInPathCount = 0,
+  cameraClosestObject = "",
+  cameraClosestConfidence = 0,
+  visionFps = 0,
   onEmergencyStop,
   onAutopilotToggle,
   onStartStop,
@@ -115,6 +130,13 @@ export const AutopilotTelemetry = ({
     : distanceToObstacle < 50 
       ? "text-warning" 
       : "text-primary";
+
+  // Camera distance warning level
+  const cameraDistanceWarning = cameraObstacleDistance < 30
+    ? "text-destructive"
+    : cameraObstacleDistance < 80
+      ? "text-warning"
+      : "text-violet-400";
 
   return (
     <div className="flex flex-col items-center h-full py-1 px-1 overflow-hidden gap-1">
@@ -194,6 +216,62 @@ export const AutopilotTelemetry = ({
           <span className="text-[5px] sm:text-[6px] text-destructive">NEAR</span>
           <span className="text-[5px] sm:text-[6px] text-success">FAR</span>
         </div>
+      </div>
+      
+      {/* Vision / Object Detection */}
+      <div className="w-full bg-card/50 rounded border border-border p-1">
+        <div className="flex items-center justify-between mb-0.5">
+          <div className="flex items-center gap-0.5">
+            {visionActive ? (
+              <Eye className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-violet-400" />
+            ) : (
+              <EyeOff className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-muted-foreground" />
+            )}
+            <span className="racing-text text-[6px] sm:text-[8px] text-muted-foreground">VISION</span>
+          </div>
+          <span className={`racing-text text-[7px] sm:text-[9px] font-bold ${visionActive ? 'text-violet-400' : 'text-muted-foreground'}`}>
+            {visionActive ? `${visionFps}FPS` : 'OFF'}
+          </span>
+        </div>
+        
+        {visionActive && cameraDetectionsCount > 0 ? (
+          <>
+            {/* Detected objects count */}
+            <div className="flex items-center justify-between mb-0.5">
+              <span className="text-[6px] sm:text-[7px] text-muted-foreground">
+                {cameraDetectionsCount} detected{cameraInPathCount > 0 ? ` · ${cameraInPathCount} in path` : ''}
+              </span>
+              {cameraClosestObject && (
+                <span className={`racing-text text-[7px] sm:text-[9px] font-bold ${cameraDistanceWarning}`}>
+                  {cameraClosestObject} {cameraClosestConfidence}%
+                </span>
+              )}
+            </div>
+            {/* Camera distance bar */}
+            <div className="w-full h-1 sm:h-1.5 bg-muted rounded-full overflow-hidden">
+              <div
+                className={`h-full transition-all duration-200 rounded-full ${
+                  cameraObstacleDistance < 30
+                    ? "bg-gradient-to-r from-destructive/60 to-destructive"
+                    : cameraObstacleDistance < 80
+                      ? "bg-gradient-to-r from-warning/60 to-warning"
+                      : "bg-gradient-to-r from-violet-500/60 to-violet-500"
+                }`}
+                style={{ width: `${Math.min(100, (cameraObstacleDistance / 200) * 100)}%` }}
+              />
+            </div>
+            <div className="flex justify-between mt-0.5">
+              <span className={`text-[5px] sm:text-[6px] ${cameraDistanceWarning}`}>
+                {cameraObstacleDistance < 999 ? `${cameraObstacleDistance}cm` : '---'}
+              </span>
+              <span className="text-[5px] sm:text-[6px] text-muted-foreground">CAM DIST</span>
+            </div>
+          </>
+        ) : (
+          <div className="text-[6px] sm:text-[7px] text-muted-foreground text-center py-0.5">
+            {visionActive ? 'No objects detected' : 'Activates when driving forward'}
+          </div>
+        )}
       </div>
       
       {/* Telemetry Wave - Active indicator */}

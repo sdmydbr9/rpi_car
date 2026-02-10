@@ -113,6 +113,11 @@ class AutoPilot:
     UTURN_DURATION        = 0.8     # seconds (tuneable)
     ESCAPE_CLEAR_CM       = 20      # cm: path considered clear → reset counter
 
+    # ── Camera/Vision fusion constants ─────────────
+    CAMERA_DANGER_CM      = 60      # camera-only early-warning threshold (cm)
+    CAMERA_CRITICAL_CM    = 20      # camera-only hard-stop threshold (cm)
+    CAMERA_TRUST_MIN_CM   = 10      # ignore camera distances below this (noise)
+
     # All tunable keys (used for serialisation)
     TUNING_KEYS = [
         'FRONT_CRITICAL_CM', 'REAR_BLOCKED_CM', 'REAR_CRITICAL_CM',
@@ -122,6 +127,7 @@ class AutoPilot:
         'SONAR_HISTORY_LEN', 'STUCK_DISTANCE_THRESH', 'STUCK_TIME_THRESH',
         'STUCK_BOOST_STEP', 'STUCK_BOOST_MAX', 'STUCK_MOVE_RESET',
         'MAX_NORMAL_ESCAPES', 'UTURN_SPEED', 'UTURN_DURATION', 'ESCAPE_CLEAR_CM',
+        'CAMERA_DANGER_CM', 'CAMERA_CRITICAL_CM', 'CAMERA_TRUST_MIN_CM',
     ]
 
     def get_tuning(self):
@@ -134,11 +140,12 @@ class AutoPilot:
         # Read from the class itself (not an instance) to get compile-time defaults
         return {k: getattr(AutoPilot, k) for k in cls.TUNING_KEYS}
 
-    def __init__(self, car, get_sonar, get_ir, get_rear_sonar=None):
-        self._car            = car
-        self._get_sonar      = get_sonar
-        self._get_ir         = get_ir
-        self._get_rear_sonar = get_rear_sonar
+    def __init__(self, car, get_sonar, get_ir, get_rear_sonar=None, get_camera_distance=None):
+        self._car               = car
+        self._get_sonar         = get_sonar
+        self._get_ir            = get_ir
+        self._get_rear_sonar    = get_rear_sonar
+        self._get_camera_distance = get_camera_distance
 
         # FSM
         self._state           = State.CRUISING
@@ -243,6 +250,32 @@ class AutoPilot:
         raw = self._get_sonar()
         return self._filtered_sonar(raw)
 
+    def _get_camera_distance_safe(self):
+        """
+        Read camera virtual distance; returns 999.0 if unavailable.
+        Rejects values below CAMERA_TRUST_MIN_CM as noise.
+        """
+        if self._get_camera_distance is None:
+            return 999.0
+        try:
+            d = self._get_camera_distance()
+            if d is None or d < self.CAMERA_TRUST_MIN_CM:
+                return 999.0
+            return float(d)
+        except Exception:
+            return 999.0
+
+    def _get_fused_front_distance(self):
+        """
+        Fused forward distance: minimum of sonar and camera.
+        Conservative — reacts to whichever sensor sees an obstacle first.
+        Camera provides earlier detection at medium range; sonar gives
+        accurate close-range data.
+        """
+        sonar_dist = self._get_front_distance()
+        camera_dist = self._get_camera_distance_safe()
+        return min(sonar_dist, camera_dist)
+
     # ── Turn direction decision ────────────────────────
 
     def _decide_turn_direction(self, left_ir, right_ir):
@@ -260,13 +293,19 @@ class AutoPilot:
         """
         Single tick of the FSM.  Should be called in a loop at ~20 Hz.
         Reads sensors, dispatches to the current state handler.
+        Uses fused distance (sonar + camera) for forward-facing states
+        (CRUISING, threat detection).  Reverse/stuck states use sonar only
+        since the camera faces forward.
         """
         if not self._active:
             return
 
-        # Read sensors
+        # Read sensors — fused distance for forward states
         raw_sonar         = self._get_sonar()
-        distance          = self._filtered_sonar(raw_sonar)
+        sonar_distance    = self._filtered_sonar(raw_sonar)
+        camera_distance   = self._get_camera_distance_safe()
+        # Use minimum of both sensors (conservative)
+        distance          = min(sonar_distance, camera_distance)
         left_ir, right_ir = self._get_ir()
 
         # Dispatch
@@ -285,26 +324,43 @@ class AutoPilot:
     # ── State A: CRUISING ──────────────────────────────
 
     def _state_cruising(self, distance, left_ir, right_ir):
-        # CRITICAL CHECK: Front Sonar < 5 cm → escape
+        # CRITICAL CHECK: Fused distance < 5 cm → escape
         if distance < self.FRONT_CRITICAL_CM:
             self._decide_turn_direction(left_ir, right_ir)
             self._state = State.PANIC_BRAKE
             self._car.brake()
             self._maneuver_start = time.time()
-            print(f"🚨 [AutoPilot] CRITICAL: Front sonar {distance:.1f}cm < {self.FRONT_CRITICAL_CM}cm → PANIC_BRAKE, plan turn {self._turn_direction}")
+            print(f"🚨 [AutoPilot] CRITICAL: Fused distance {distance:.1f}cm < {self.FRONT_CRITICAL_CM}cm → PANIC_BRAKE, plan turn {self._turn_direction}")
             return
 
-        # Wider threat check (IR or moderate sonar proximity)
+        # Camera-only critical check (object very close in camera)
+        camera_dist = self._get_camera_distance_safe()
+        if camera_dist < self.CAMERA_CRITICAL_CM:
+            self._decide_turn_direction(left_ir, right_ir)
+            self._state = State.PANIC_BRAKE
+            self._car.brake()
+            self._maneuver_start = time.time()
+            print(f"📷 [AutoPilot] CAMERA CRITICAL: Object at {camera_dist:.1f}cm → PANIC_BRAKE, plan turn {self._turn_direction}")
+            return
+
+        # Wider threat check (IR or moderate sonar/camera proximity)
         if distance < self.DANGER_CM or left_ir or right_ir:
             self._decide_turn_direction(left_ir, right_ir)
             self._state = State.PANIC_BRAKE
             self._car.brake()
             self._maneuver_start = time.time()
-            side = "LEFT_IR" if left_ir else ("RIGHT_IR" if right_ir else f"SONAR {distance:.0f}cm")
+            if left_ir:
+                side = "LEFT_IR"
+            elif right_ir:
+                side = "RIGHT_IR"
+            elif camera_dist < self.DANGER_CM:
+                side = f"CAMERA {camera_dist:.0f}cm"
+            else:
+                side = f"SONAR {distance:.0f}cm"
             print(f"🚨 [AutoPilot] Threat detected ({side}) → PANIC_BRAKE, plan turn {self._turn_direction}")
             return
 
-        # Proportional speed
+        # Proportional speed (based on fused distance)
         if distance >= self.FULL_SPEED_CM:
             base_speed = self.MAX_SPEED
         else:
@@ -312,6 +368,14 @@ class AutoPilot:
             ratio = (distance - self.DANGER_CM) / (self.FULL_SPEED_CM - self.DANGER_CM)
             base_speed = self.MIN_SPEED + ratio * (self.MAX_SPEED - self.MIN_SPEED)
             base_speed = max(self.MIN_SPEED, min(self.MAX_SPEED, base_speed))
+
+        # ── Camera early-warning speed reduction ──────
+        # If camera sees something sonar doesn't, proactively slow down
+        if camera_dist < self.CAMERA_DANGER_CM and camera_dist < distance:
+            cam_ratio = camera_dist / self.CAMERA_DANGER_CM  # 0.0 at 0cm, 1.0 at threshold
+            cam_speed = self.MIN_SPEED + cam_ratio * (base_speed - self.MIN_SPEED)
+            if cam_speed < base_speed:
+                base_speed = cam_speed
 
         # ── Dynamic Power Boost (anti-stuck) ──────────
         now = time.time()

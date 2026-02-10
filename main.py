@@ -15,6 +15,7 @@ from collections import deque
 from sensors import SensorSystem
 from motor import CarSystem
 from autopilot import AutoPilot, State
+from vision import VisionSystem
 
 # ==========================================
 # ⚙️ CONFIGURATION
@@ -103,14 +104,43 @@ except Exception as e:
     print(f"⚠️  Camera not available: {e}")
     print("   Video feed will be disabled.")
 
+# ==========================================
+# 🧠 VISION / OBJECT DETECTION SETUP
+# ==========================================
+try:
+    if CAMERA_AVAILABLE and picam2 is not None:
+        vision_system = VisionSystem(picam2)
+        vision_system.start()
+        VISION_AVAILABLE = True
+        print("✅ Vision system initialized (MobileNetSSD object detection)")
+    else:
+        vision_system = None
+        VISION_AVAILABLE = False
+        print("⚠️  Vision system disabled (camera not available)")
+except Exception as e:
+    vision_system = None
+    VISION_AVAILABLE = False
+    print(f"⚠️  Vision system initialization failed: {e}")
+
 def generate_camera_frames():
-    """Generator that yields MJPEG frames from the Pi camera."""
+    """Generator that yields MJPEG frames from the Pi camera.
+    Uses vision system's annotated frames (with detection overlays)
+    when available, otherwise falls back to raw camera capture."""
     while True:
         try:
             if not CAMERA_AVAILABLE or picam2 is None:
                 time.sleep(1)
                 continue
-            frame = picam2.capture_array()
+
+            # Get annotated frame from vision system if available
+            frame = None
+            if VISION_AVAILABLE and vision_system is not None:
+                frame = vision_system.get_frame()
+
+            # Fallback to raw capture if vision not ready
+            if frame is None:
+                frame = picam2.capture_array()
+
             ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
             if not ret:
                 continue
@@ -201,7 +231,19 @@ def _get_ir_for_autopilot():
         right = False
     return left, right
 
-autopilot = AutoPilot(car_system, _get_sonar_for_autopilot, _get_ir_for_autopilot, _get_rear_sonar_for_autopilot)
+def _get_camera_for_autopilot():
+    """Read camera obstacle distance for autopilot fusion."""
+    if VISION_AVAILABLE and vision_system is not None:
+        return vision_system.get_camera_obstacle_distance()
+    return 999.0
+
+autopilot = AutoPilot(
+    car_system,
+    _get_sonar_for_autopilot,
+    _get_ir_for_autopilot,
+    _get_rear_sonar_for_autopilot,
+    _get_camera_for_autopilot,
+)
 
 # Store a copy of the original class-level defaults (immutable reference for reset)
 _AUTOPILOT_DEFAULT_TUNING = AutoPilot.get_default_tuning()
@@ -248,6 +290,14 @@ car_state = {
         "right_ir": "OK",
     },
     "service_light_active": False,  # True if any sensor has error/warning
+    # 📷 VISION / OBJECT DETECTION
+    "vision_active": False,          # True if vision DNN is running
+    "camera_obstacle_distance": 999.0,  # Virtual distance from camera (cm)
+    "camera_detections_count": 0,     # Number of detected objects
+    "camera_in_path_count": 0,        # Objects in driving path
+    "camera_closest_object": "",      # Closest in-path object class
+    "camera_closest_confidence": 0,   # Confidence % of closest detection
+    "vision_fps": 0.0,               # DNN inference FPS
 }
 
 # ==========================================
@@ -413,6 +463,32 @@ def physics_loop():
         last_left_obstacle = left_obstacle
         last_right_obstacle = right_obstacle
         
+        # --- VISION ACTIVATION FOR MANUAL MODE ---
+        # Activate vision DNN when driving forward in manual mode
+        if VISION_AVAILABLE and vision_system is not None and not car_state["autonomous_mode"]:
+            gear_val = car_state["gear"]
+            is_forward_gear = gear_val in ("1", "2", "3", "S")
+            is_moving = car_state["gas_pressed"] and car_state["current_pwm"] > 0
+            vision_system.active = is_forward_gear and is_moving
+            # Mirror vision data for manual mode telemetry
+            if vision_system.active:
+                summary = vision_system.get_detections_summary()
+                car_state["vision_active"] = summary["vision_active"]
+                car_state["camera_obstacle_distance"] = summary["camera_obstacle_distance"]
+                car_state["camera_detections_count"] = summary["count"]
+                car_state["camera_in_path_count"] = summary["in_path_count"]
+                car_state["camera_closest_object"] = summary["closest_class"]
+                car_state["camera_closest_confidence"] = summary["closest_confidence"]
+                car_state["vision_fps"] = summary["vision_fps"]
+            else:
+                car_state["vision_active"] = False
+                car_state["camera_obstacle_distance"] = 999.0
+                car_state["camera_detections_count"] = 0
+                car_state["camera_in_path_count"] = 0
+                car_state["camera_closest_object"] = ""
+                car_state["camera_closest_confidence"] = 0
+                car_state["vision_fps"] = 0.0
+
         gear = car_state["gear"]
         gas = car_state["gas_pressed"]
         brake = car_state["brake_pressed"]
@@ -788,6 +864,21 @@ def drive_autonomous():
         car_state["autonomous_state"] = autopilot.state.value
         car_state["last_obstacle_side"] = autopilot.turn_direction or "none"
 
+        # Activate vision when cruising forward (camera faces front)
+        if VISION_AVAILABLE and vision_system is not None:
+            # Vision should be active whenever autopilot is driving forward
+            is_forward = autopilot.state in (State.CRUISING, State.RECOVERY)
+            vision_system.active = is_forward
+            # Mirror vision telemetry
+            summary = vision_system.get_detections_summary()
+            car_state["vision_active"] = summary["vision_active"]
+            car_state["camera_obstacle_distance"] = summary["camera_obstacle_distance"]
+            car_state["camera_detections_count"] = summary["count"]
+            car_state["camera_in_path_count"] = summary["in_path_count"]
+            car_state["camera_closest_object"] = summary["closest_class"]
+            car_state["camera_closest_confidence"] = summary["closest_confidence"]
+            car_state["vision_fps"] = summary["vision_fps"]
+
         time.sleep(0.05)  # 20 Hz
 
 # Start the Engine (Thread)
@@ -991,6 +1082,9 @@ def enable_autonomous():
     car_state["ir_enabled"] = True
     car_state["sonar_enabled"] = True
     autopilot.start()
+    # Enable vision system for forward object detection
+    if VISION_AVAILABLE and vision_system is not None:
+        vision_system.active = True
     print(f"🤖 SMART DRIVER: ENABLED - Autonomous driving active")
     print(f"📡 SAFETY: IR and Sonar sensors force-enabled in autonomous mode")
     return "AUTONOMOUS_ENABLED"
@@ -1009,6 +1103,9 @@ def disable_autonomous():
     car_state["gear"] = "N"
     car_state["steer_angle"] = 0
     car_state["user_steer_angle"] = 0
+    # Deactivate vision on autonomous disable
+    if VISION_AVAILABLE and vision_system is not None:
+        vision_system.active = False
     print(f"🤖 SMART DRIVER: DISABLED - Returned to manual control")
     return "AUTONOMOUS_DISABLED"
 
@@ -1315,6 +1412,17 @@ def on_sonar_toggle(data):
     print(f"\n⚙️ [UI Control] 📡 SONAR SENSOR: {state}")
     emit('sonar_response', {'status': 'ok', 'sonar_enabled': car_state["sonar_enabled"]})
 
+@socketio.on('vision_toggle')
+def on_vision_toggle(data):
+    """Toggle vision/object detection system on/off."""
+    if not VISION_AVAILABLE or vision_system is None:
+        emit('vision_response', {'status': 'error', 'message': 'Vision system not available'})
+        return
+    vision_system.active = not vision_system.active
+    state = '✅ ON' if vision_system.active else '❌ OFF'
+    print(f"\n⚙️ [UI Control] 📷 VISION: {state}")
+    emit('vision_response', {'status': 'ok', 'vision_active': vision_system.active})
+
 @socketio.on('autonomous_enable')
 def on_autonomous_enable(data):
     """Handle Smart Driver autonomous mode enable"""
@@ -1325,8 +1433,13 @@ def on_autonomous_enable(data):
     car_state["ir_enabled"] = True
     car_state["sonar_enabled"] = True
     autopilot.start()
+    # Enable vision system for forward object detection
+    if VISION_AVAILABLE and vision_system is not None:
+        vision_system.active = True
     print(f"\n⚙️ [UI Control] 🤖 SMART DRIVER: ENABLED - Autonomous driving active")
     print(f"📡 SAFETY: IR and Sonar sensors force-enabled in autonomous mode")
+    if VISION_AVAILABLE:
+        print(f"📷 VISION: Object detection active for forward driving")
     emit('autonomous_response', {'status': 'ok', 'autonomous_enabled': True})
 
 @socketio.on('autonomous_disable')
@@ -1346,6 +1459,9 @@ def on_autonomous_disable(data):
     car_state["gear"] = "N"
     car_state["steer_angle"] = 0
     car_state["user_steer_angle"] = 0
+    # Deactivate vision on autonomous disable
+    if VISION_AVAILABLE and vision_system is not None:
+        vision_system.active = False
     print(f"\n⚙️ [UI Control] 🤖 SMART DRIVER: DISABLED - Returned to manual control")
     emit('autonomous_response', {'status': 'ok', 'autonomous_enabled': False})
 
@@ -1483,7 +1599,15 @@ def telemetry_broadcast():
                 "sonar_enabled": car_state["sonar_enabled"],
                 # 🚨 Sensor health status
                 "sensor_status": car_state["sensor_status"],
-                "service_light_active": car_state["service_light_active"]
+                "service_light_active": car_state["service_light_active"],
+                # 📷 Vision / Object Detection telemetry
+                "vision_active": car_state["vision_active"],
+                "camera_obstacle_distance": car_state["camera_obstacle_distance"],
+                "camera_detections_count": car_state["camera_detections_count"],
+                "camera_in_path_count": car_state["camera_in_path_count"],
+                "camera_closest_object": car_state["camera_closest_object"],
+                "camera_closest_confidence": car_state["camera_closest_confidence"],
+                "vision_fps": car_state["vision_fps"],
             }
             
             socketio.emit('telemetry_update', telemetry_data)
