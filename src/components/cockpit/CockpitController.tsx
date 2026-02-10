@@ -373,6 +373,12 @@ export const CockpitController = () => {
 
   const handleCameraToggle = useCallback(() => {
     console.log('🎮 CAMERA toggle');
+    // Toggle local state immediately for instant feedback
+    setIsCameraEnabled(prev => {
+      const newState = !prev;
+      localStorage.setItem('cameraEnabled', String(newState));
+      return newState;
+    });
     socketClient.emitCameraToggle();
   }, []);
 
