@@ -1,11 +1,11 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
 @import "@fontsource/rajdhani/400.css";
 @import "@fontsource/rajdhani/500.css";
 @import "@fontsource/rajdhani/600.css";
 @import "@fontsource/rajdhani/700.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
 /* F1 Cockpit Design System - Mercedes AMG W15 Theme */
 
