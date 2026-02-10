@@ -296,6 +296,7 @@ car_state = {
     "speed_limit_enabled": False,  # Whether to use speed limit instead of gear
     "auto_accel_enabled": False,  # Auto-acceleration mode (client-side for throttle)
     "emergency_brake_active": False,  # Emergency brake: when ON, car cannot move
+    "gear_before_ebrake": None,  # Store gear before emergency brake was activated
     "obstacle_state": "IDLE",  # Obstacle avoidance state: IDLE, STOPPED, STEERING
     "is_braking": False,  # Flag to indicate normal brake is applied for motor control
     "heartbeat_active": True,  # Heartbeat status: True = client responding, False = lost connection
@@ -692,6 +693,9 @@ def physics_loop():
                 if car_state["emergency_brake_active"]:
                     car_state["current_pwm"] = 0
                     car_state["is_braking"] = True
+                    # Save current gear before setting to Neutral (if not already saved)
+                    if car_state["gear"] != "N" and car_state["gear_before_ebrake"] is None:
+                        car_state["gear_before_ebrake"] = car_state["gear"]
                     car_state["gear"] = "N"
                     car_system.stop()  # Immediately cut motors
                 else:
@@ -709,6 +713,9 @@ def physics_loop():
                     current = 0
                     car_state["current_pwm"] = 0
                     car_state["is_braking"] = True  # Apply brake signals
+                    # Save current gear before setting to Neutral (if not already saved)
+                    if car_state["gear"] != "N" and car_state["gear_before_ebrake"] is None:
+                        car_state["gear_before_ebrake"] = car_state["gear"]
                     car_state["gear"] = "N"  # Set gear to Neutral
                 # BRAKE PEDAL PRESSED - Real car braking behavior
                 elif brake:
@@ -1419,6 +1426,18 @@ def on_emergency_stop(data):
     # Always cut power immediately
     car_state["current_pwm"] = 0
     
+    # Handle gear state when emergency brake is toggled
+    if car_state["emergency_brake_active"]:
+        # Activating emergency brake - save current gear and set to Neutral
+        if car_state["gear"] != "N":
+            car_state["gear_before_ebrake"] = car_state["gear"]
+            car_state["gear"] = "N"
+    else:
+        # Deactivating emergency brake - restore previous gear if available
+        if car_state["gear_before_ebrake"] is not None:
+            car_state["gear"] = car_state["gear_before_ebrake"]
+            car_state["gear_before_ebrake"] = None
+    
     # If in autopilot mode and e-brake activated, stop motors immediately
     if car_state["emergency_brake_active"] and car_state["autonomous_mode"]:
         car_system.stop()
@@ -1441,6 +1460,11 @@ def on_emergency_stop(data):
 def on_emergency_stop_release(data):
     """Handle emergency brake release - explicitly set brake to OFF"""
     car_state["emergency_brake_active"] = False
+    
+    # Restore previous gear if available
+    if car_state["gear_before_ebrake"] is not None:
+        car_state["gear"] = car_state["gear_before_ebrake"]
+        car_state["gear_before_ebrake"] = None
     
     # Reset obstacle avoidance state
     car_state["obstacle_state"] = "IDLE"
