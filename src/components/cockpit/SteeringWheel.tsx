@@ -56,7 +56,7 @@ export const SteeringWheel = ({ onAngleChange, angle, isEnabled = true }: Steeri
     <div className="flex flex-col items-center justify-center h-full p-1 overflow-hidden">
       <div
         ref={wheelRef}
-        className={`relative cursor-grab active:cursor-grabbing touch-none select-none w-[min(46vw,18rem)] aspect-square ${!isEnabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+        className={`relative cursor-grab active:cursor-grabbing touch-none select-none w-[min(30vw,12rem)] sm:w-[min(40vw,16rem)] md:w-[min(46vw,18rem)] aspect-square ${!isEnabled ? 'opacity-50 cursor-not-allowed' : ''}`}
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
