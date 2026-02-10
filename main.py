@@ -1,4 +1,11 @@
-import RPi.GPIO as GPIO
+try:
+    import RPi.GPIO as GPIO
+except (ImportError, RuntimeError):
+    # Use mock GPIO when not on Raspberry Pi
+    from motor import MockGPIO
+    GPIO = MockGPIO()
+    print("⚠️  RPi.GPIO not available - using mock GPIO for testing")
+    
 from flask import Flask, render_template, send_from_directory, jsonify, request, Response
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room, leave_room

@@ -1,4 +1,10 @@
-import RPi.GPIO as GPIO
+try:
+    import RPi.GPIO as GPIO
+except (ImportError, RuntimeError):
+    # Use mock GPIO when not on Raspberry Pi
+    from motor import MockGPIO
+    GPIO = MockGPIO()
+    
 import time
 
 # --- PIN CONFIGURATION ---

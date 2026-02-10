@@ -27,8 +27,14 @@ class MockGPIO:
 
     def __init__(self):
         self.pin_states = {}
+        self._mode = None
 
-    def setmode(self, mode): pass
+    def setmode(self, mode): 
+        self._mode = mode
+        
+    def getmode(self):
+        return self._mode
+        
     def setwarnings(self, val): pass
     def setup(self, pins, mode): pass
 
@@ -38,14 +44,17 @@ class MockGPIO:
     def output(self, pins, state): pass
     def cleanup(self): pass
 
-    class PWM:
-        def __init__(self, pin, freq): pass
+    class _MockPWM:
+        def __init__(self, pin, freq): 
+            self.pin = pin
+            self.freq = freq
+            
         def start(self, val): pass
         def stop(self): pass
         def ChangeDutyCycle(self, val): pass
 
     def PWM(self, pin, freq):
-        return self.PWM(pin, freq)
+        return self._MockPWM(pin, freq)
 
     def set_pin(self, pin, value):
         self.pin_states[pin] = value
@@ -57,6 +66,7 @@ class GPIOWrapper:
     def __init__(self, real_gpio=None):
         self.real_gpio = real_gpio
         self.pin_states = {}
+        self._mode = None
         if real_gpio:
             self.BCM = real_gpio.BCM
             self.IN = real_gpio.IN
@@ -67,8 +77,14 @@ class GPIOWrapper:
             self.OUT = "OUT"
 
     def setmode(self, mode):
+        self._mode = mode
         if self.real_gpio:
             self.real_gpio.setmode(mode)
+            
+    def getmode(self):
+        if self.real_gpio:
+            return self.real_gpio.getmode()
+        return self._mode
 
     def setwarnings(self, val):
         if self.real_gpio:
@@ -96,7 +112,7 @@ class GPIOWrapper:
     def PWM(self, pin, freq):
         if self.real_gpio:
             return self.real_gpio.PWM(pin, freq)
-        return MockGPIO.PWM(pin, freq)
+        return MockGPIO._MockPWM(pin, freq)
 
     def set_pin(self, pin, value):
         self.pin_states[pin] = value
