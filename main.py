@@ -420,10 +420,7 @@ def check_sensor_health():
     
     try:
         # Check Camera
-        if not CAMERA_AVAILABLE:
-            sensor_status["camera"] = "FAILED"
-            has_error = True
-        elif picam2 is None:
+        if not CAMERA_AVAILABLE or picam2 is None:
             sensor_status["camera"] = "FAILED"
             has_error = True
         else:
