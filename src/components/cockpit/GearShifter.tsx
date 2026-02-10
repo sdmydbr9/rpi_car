@@ -102,7 +102,7 @@ export const GearShifter = ({
         </button>
       </div>
 
-      {/* IR and SONAR and AUTOPILOT - Side by Side Round Buttons */}
+      {/* IR and SONAR - Side by Side Round Buttons */}
       <div className="flex w-full gap-1 mb-1.5 justify-center">
         {/* IR Button - Round */}
         <button
@@ -170,11 +170,15 @@ export const GearShifter = ({
           </svg>
         </button>
 
+      </div>
+
+      {/* AUTOPILOT and CAMERA - Side by Side Round Buttons (Smaller) */}
+      <div className="flex w-full gap-1 mb-1.5 justify-center">
         {/* AUTOPILOT - Round Button */}
         <button
           onClick={onAutopilotToggle}
           disabled={!isEngineRunning || isEmergencyStop || eBrakeActive}
-          className="w-12 h-12 rounded-full bg-transparent flex items-center justify-center transition-all duration-100 touch-feedback font-bold disabled:opacity-50 disabled:cursor-not-allowed"
+          className="w-10 h-10 rounded-full bg-transparent flex items-center justify-center transition-all duration-100 touch-feedback font-bold disabled:opacity-50 disabled:cursor-not-allowed"
           style={{
             outline: 'none',
             border: isAutopilotEnabled ? '2px solid transparent' : '2px solid rgb(234, 179, 8)'
@@ -182,7 +186,7 @@ export const GearShifter = ({
           title={isAutopilotEnabled ? 'AUTOPILOT: ON' : 'AUTOPILOT: OFF'}
         >
           <svg 
-            className="w-10 h-10" 
+            className="w-8 h-8" 
             style={{ color: (!isEngineRunning || isEmergencyStop || eBrakeActive) ? 'rgb(107, 114, 128)' : (isAutopilotEnabled ? 'rgb(34, 197, 94)' : 'rgb(107, 114, 128)') }}
             xmlns="http://www.w3.org/2000/svg" 
             version="1.1" 
@@ -194,14 +198,12 @@ export const GearShifter = ({
             <path d="m91.172 40.828c-0.1875-0.84375-1.0156-1.375-1.8594-1.1875s-1.375 1.0156-1.1875 1.8594c2.9219 13.125-1 26.625-10.5 36.125-14.375 14.375-37.234 15.172-52.562 2.4375l2.9375-0.1875c0.85938-0.046875 1.5156-0.79688 1.4688-1.6562s-0.78125-1.5-1.6562-1.4688l-6.6094 0.42188c-0.078125 0-0.14062 0.046875-0.21875 0.0625-0.10938 0.015625-0.21875 0.046875-0.32812 0.09375s-0.1875 0.125-0.28125 0.1875c-0.0625 0.046875-0.125 0.0625-0.1875 0.125 0 0 0 0.03125-0.03125 0.046875-0.078125 0.078125-0.125 0.1875-0.1875 0.28125-0.046875 0.078125-0.10938 0.14062-0.14062 0.23438-0.03125 0.078125-0.03125 0.17188-0.046875 0.26562-0.015625 0.10938-0.046875 0.21875-0.046875 0.34375v0.046875l0.42188 6.6094c0.046875 0.82812 0.73438 1.4688 1.5625 1.4688h0.09375c0.85938-0.046875 1.5156-0.79688 1.4688-1.6562l-0.17188-2.7656c7.7812 6.4531 17.344 9.7031 26.922 9.7031 10.797 0 21.609-4.1094 29.828-12.344 10.25-10.25 14.484-24.844 11.328-39.016z" fill="currentColor"/>
           </svg>
         </button>
-      </div>
 
-      {/* CAMERA - Round Button */}
-      <div className="flex w-full gap-1 mb-1.5 justify-center">
+        {/* CAMERA - Round Button */}
         <button
           onClick={onCameraToggle}
           disabled={!isEngineRunning}
-          className="w-12 h-12 rounded-full bg-transparent flex items-center justify-center transition-all duration-100 touch-feedback font-bold disabled:opacity-50 disabled:cursor-not-allowed"
+          className="w-10 h-10 rounded-full bg-transparent flex items-center justify-center transition-all duration-100 touch-feedback font-bold disabled:opacity-50 disabled:cursor-not-allowed"
           style={{
             outline: 'none',
             border: '2px solid rgb(168, 85, 247)'
@@ -209,7 +211,7 @@ export const GearShifter = ({
           title={isCameraEnabled ? 'CAMERA: ON' : 'CAMERA: OFF'}
         >
           <svg 
-            className="w-10 h-10" 
+            className="w-8 h-8" 
             style={{ color: !isEngineRunning ? 'rgb(107, 114, 128)' : (isCameraEnabled ? 'rgb(168, 85, 247)' : 'rgb(107, 114, 128)') }}
             xmlns="http://www.w3.org/2000/svg" 
             version="1.1" 
