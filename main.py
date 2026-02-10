@@ -1410,6 +1410,10 @@ def on_gear_change(data):
     gear = data.get('gear', 'N').upper()
     if gear in ["R", "N", "1", "2", "3", "S"]:
         car_state["gear"] = gear
+        # If emergency brake is active and user manually changes gear, update the saved gear
+        # so that when e-brake is released, it restores to the newly selected gear
+        if car_state["emergency_brake_active"] and gear != "N":
+            car_state["gear_before_ebrake"] = gear
         gear_names = {'R': '🔙 REVERSE', 'N': '⏸️ NEUTRAL', '1': '1️⃣ 1st', '2': '2️⃣ 2nd', '3': '3️⃣ 3rd', 'S': '⚡ SPORT'}
         print(f"\n⚙️ [UI Control] 🔧 GEAR: {gear_names.get(gear, gear)}")
         emit('gear_response', {'status': 'ok', 'gear': gear})
