@@ -33,6 +33,7 @@ const convertSensorStatus = (
     rear_sonar: 'Rear Sonar',
     left_ir: 'Left IR',
     right_ir: 'Right IR',
+    camera: 'Camera',
   };
 
   const statusMap: Record<string, 'ok' | 'warning' | 'error'> = {
@@ -86,6 +87,7 @@ export const CockpitController = () => {
     { name: 'Rear Sonar', status: 'ok' },
     { name: 'Left IR', status: 'ok' },
     { name: 'Right IR', status: 'ok' },
+    { name: 'Camera', status: 'ok' },
   ]);
   const [requiresService, setRequiresService] = useState(false);
   const [tuning, setTuning] = useState<TuningConstants>(DEFAULT_TUNING);
