@@ -1,6 +1,6 @@
 import { SettingsDialog, TuningConstants, DEFAULT_TUNING } from "./SettingsDialog";
 import type { CameraSpecs, NarrationConfig } from "../../lib/socketClient";
-import { Mic, MicOff } from "lucide-react";
+import { Mic, MicOff, Volume2 } from "lucide-react";
 
 interface HeaderProps {
   driverName?: string;
@@ -15,6 +15,9 @@ interface HeaderProps {
   narrationEnabled?: boolean;
   narrationSpeaking?: boolean;
   onNarrationToggle?: (enabled: boolean) => void;
+  // TTS Audio Unlock
+  ttsUnlocked?: boolean;
+  onUnlockAudio?: () => void;
 }
 
 export const Header = ({ 
@@ -29,6 +32,8 @@ export const Header = ({
   narrationEnabled,
   narrationSpeaking,
   onNarrationToggle,
+  ttsUnlocked = false,
+  onUnlockAudio,
 }: HeaderProps) => {
   return (
     <header className="flex items-center justify-between px-1.5 sm:px-4 py-0.5 sm:py-1.5 border-b border-primary/30 bg-card/30 backdrop-blur-sm h-[6dvh] min-h-[1.75rem] max-h-10 flex-shrink-0">
@@ -61,6 +66,19 @@ export const Header = ({
           <span className="text-primary font-bold text-xs sm:text-base racing-text">{position}</span>
           <span className="text-foreground font-bold racing-text text-[10px] sm:text-sm hidden sm:inline">{driverName}</span>
         </div>
+        {/* Unlock Audio Button - shown when narration is enabled but audio isn't unlocked */}
+        {narrationEnabled && !ttsUnlocked && (
+          <button
+            onClick={onUnlockAudio}
+            className="px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border border-amber-500 bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-all touch-feedback flex items-center gap-1.5 animate-pulse"
+            title="Click to enable audio for AI narration"
+          >
+            <Volume2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+            <span className="text-[8px] sm:text-[10px] racing-text hidden sm:inline">
+              UNLOCK AUDIO
+            </span>
+          </button>
+        )}
         {/* AI Narration Quick Toggle + Settings Dialog Button */}
         {narrationConfig?.api_key_set && (
           <button
