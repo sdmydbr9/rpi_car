@@ -1,8 +1,9 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
 import { Settings, X, Minus, Plus, ChevronDown, ChevronRight, HelpCircle } from "lucide-react";
 import * as socketClient from "../../lib/socketClient";
 import type { CameraSpecs } from "../../lib/socketClient";
+import { toast } from "@/components/ui/sonner";
 
 export interface TuningConstants {
   // Tuning constants
@@ -387,6 +388,13 @@ const CollapsibleGroup = ({
 export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAULT_TUNING, cameraSpecs }: SettingsDialogProps) => {
   const [isOpen, setIsOpen] = useState(false);
   const [synced, setSynced] = useState(false);
+  
+  // Store original camera settings before CV mode is enabled
+  const originalCameraSettingsRef = useRef<{
+    resolution: string;
+    jpeg_quality: number;
+    framerate: number;
+  } | null>(null);
 
   // Build dynamic tuning groups with resolution options from camera specs
   const getDynamicTuningGroups = (): typeof TUNING_GROUPS => {
@@ -426,7 +434,58 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
 
   const handleParamChange = useCallback(
     (key: keyof TuningConstants, value: number | string | boolean) => {
-      onTuningChange({ ...tuning, [key]: value });
+      let updatedTuning = { ...tuning, [key]: value };
+      
+      // When VISION_ENABLED changes to true, enforce high-quality video settings
+      if (key === 'VISION_ENABLED' && value === true && tuning.VISION_ENABLED === false) {
+        // Store original settings before changing
+        if (!originalCameraSettingsRef.current) {
+          originalCameraSettingsRef.current = {
+            resolution: tuning.CAMERA_RESOLUTION,
+            jpeg_quality: tuning.CAMERA_JPEG_QUALITY,
+            framerate: tuning.CAMERA_FRAMERATE,
+          };
+          console.log('📷 [CV Mode] Stored original camera settings:', originalCameraSettingsRef.current);
+        }
+        
+        // Set high-quality settings for CV mode
+        updatedTuning = {
+          ...updatedTuning,
+          CAMERA_RESOLUTION: '1920x1080',
+          CAMERA_JPEG_QUALITY: 70,
+          CAMERA_FRAMERATE: 60,
+        };
+        
+        console.log('📷 [CV Mode] Enabled - Automatically setting high-quality video: 1920x1080 @ 60fps, 70% quality');
+        
+        // Notify the user about automatic quality adjustment
+        toast.info('🎥 CV Mode Enabled', {
+          description: 'Video quality automatically set to 1920×1080 @ 60fps, 70% quality for optimal computer vision performance.',
+          duration: 4000,
+        });
+      }
+      // When VISION_ENABLED changes to false, restore original settings
+      else if (key === 'VISION_ENABLED' && value === false && tuning.VISION_ENABLED === true) {
+        if (originalCameraSettingsRef.current) {
+          updatedTuning = {
+            ...updatedTuning,
+            CAMERA_RESOLUTION: originalCameraSettingsRef.current.resolution,
+            CAMERA_JPEG_QUALITY: originalCameraSettingsRef.current.jpeg_quality,
+            CAMERA_FRAMERATE: originalCameraSettingsRef.current.framerate,
+          };
+          console.log('📷 [CV Mode] Disabled - Restoring original camera settings:', originalCameraSettingsRef.current);
+          
+          // Notify the user about restoration
+          toast.info('🎥 CV Mode Disabled', {
+            description: 'Video quality restored to previous settings.',
+            duration: 3000,
+          });
+          
+          originalCameraSettingsRef.current = null;
+        }
+      }
+      
+      onTuningChange(updatedTuning);
       setSynced(false);
     },
     [tuning, onTuningChange]
