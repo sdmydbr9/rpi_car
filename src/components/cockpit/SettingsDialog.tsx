@@ -389,12 +389,29 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
   const [isOpen, setIsOpen] = useState(false);
   const [synced, setSynced] = useState(false);
   
+  // CV mode high-quality camera settings constants
+  const CV_HIGH_QUALITY_SETTINGS = {
+    resolution: '1920x1080',
+    jpeg_quality: 70,
+    framerate: 60,
+  } as const;
+  
   // Store original camera settings before CV mode is enabled
   const originalCameraSettingsRef = useRef<{
     resolution: string;
     jpeg_quality: number;
     framerate: number;
   } | null>(null);
+  
+  // Helper function to persist camera config to localStorage
+  const persistCameraConfig = useCallback((config: {
+    resolution: string;
+    jpeg_quality: number;
+    framerate: number;
+    vision_enabled: boolean;
+  }) => {
+    localStorage.setItem('cameraConfig', JSON.stringify(config));
+  }, []);
 
   // Build dynamic tuning groups with resolution options from camera specs
   const getDynamicTuningGroups = (): typeof TUNING_GROUPS => {
@@ -451,64 +468,52 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
         // Set high-quality settings for CV mode
         updatedTuning = {
           ...updatedTuning,
-          CAMERA_RESOLUTION: '1920x1080',
-          CAMERA_JPEG_QUALITY: 70,
-          CAMERA_FRAMERATE: 60,
+          CAMERA_RESOLUTION: CV_HIGH_QUALITY_SETTINGS.resolution,
+          CAMERA_JPEG_QUALITY: CV_HIGH_QUALITY_SETTINGS.jpeg_quality,
+          CAMERA_FRAMERATE: CV_HIGH_QUALITY_SETTINGS.framerate,
         };
         
-        console.log('📷 [CV Mode] Enabled - Automatically setting high-quality video: 1920x1080 @ 60fps, 70% quality');
+        console.log(`📷 [CV Mode] Enabled - Automatically setting high-quality video: ${CV_HIGH_QUALITY_SETTINGS.resolution} @ ${CV_HIGH_QUALITY_SETTINGS.framerate}fps, ${CV_HIGH_QUALITY_SETTINGS.jpeg_quality}% quality`);
         
         // Immediately send camera config update to backend
-        const cameraConfig = {
-          resolution: '1920x1080',
-          jpeg_quality: 70,
-          framerate: 60,
-        };
-        socketClient.emitCameraConfigUpdate(cameraConfig);
+        socketClient.emitCameraConfigUpdate(CV_HIGH_QUALITY_SETTINGS);
         
         // Persist to localStorage
-        localStorage.setItem('cameraConfig', JSON.stringify({
-          resolution: '1920x1080',
-          jpeg_quality: 70,
-          framerate: 60,
+        persistCameraConfig({
+          ...CV_HIGH_QUALITY_SETTINGS,
           vision_enabled: true,
-        }));
+        });
         
         // Toggle vision mode
         socketClient.emitVisionToggle();
         
         // Notify the user about automatic quality adjustment
         toast.info('🎥 CV Mode Enabled', {
-          description: 'Video quality automatically set to 1920×1080 @ 60fps, 70% quality for optimal computer vision performance.',
+          description: `Video quality automatically set to ${CV_HIGH_QUALITY_SETTINGS.resolution} @ ${CV_HIGH_QUALITY_SETTINGS.framerate}fps, ${CV_HIGH_QUALITY_SETTINGS.jpeg_quality}% quality for optimal computer vision performance.`,
           duration: 4000,
         });
       }
       // When VISION_ENABLED changes to false, restore original settings
       else if (key === 'VISION_ENABLED' && value === false && tuning.VISION_ENABLED === true) {
         if (originalCameraSettingsRef.current) {
+          const originalSettings = originalCameraSettingsRef.current;
+          
           updatedTuning = {
             ...updatedTuning,
-            CAMERA_RESOLUTION: originalCameraSettingsRef.current.resolution,
-            CAMERA_JPEG_QUALITY: originalCameraSettingsRef.current.jpeg_quality,
-            CAMERA_FRAMERATE: originalCameraSettingsRef.current.framerate,
+            CAMERA_RESOLUTION: originalSettings.resolution,
+            CAMERA_JPEG_QUALITY: originalSettings.jpeg_quality,
+            CAMERA_FRAMERATE: originalSettings.framerate,
           };
-          console.log('📷 [CV Mode] Disabled - Restoring original camera settings:', originalCameraSettingsRef.current);
+          console.log('📷 [CV Mode] Disabled - Restoring original camera settings:', originalSettings);
           
           // Immediately send camera config update to backend
-          const cameraConfig = {
-            resolution: originalCameraSettingsRef.current.resolution,
-            jpeg_quality: originalCameraSettingsRef.current.jpeg_quality,
-            framerate: originalCameraSettingsRef.current.framerate,
-          };
-          socketClient.emitCameraConfigUpdate(cameraConfig);
+          socketClient.emitCameraConfigUpdate(originalSettings);
           
           // Persist to localStorage
-          localStorage.setItem('cameraConfig', JSON.stringify({
-            resolution: originalCameraSettingsRef.current.resolution,
-            jpeg_quality: originalCameraSettingsRef.current.jpeg_quality,
-            framerate: originalCameraSettingsRef.current.framerate,
+          persistCameraConfig({
+            ...originalSettings,
             vision_enabled: false,
-          }));
+          });
           
           // Toggle vision mode
           socketClient.emitVisionToggle();
@@ -526,7 +531,7 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
       onTuningChange(updatedTuning);
       setSynced(false);
     },
-    [tuning, onTuningChange]
+    [tuning, onTuningChange, CV_HIGH_QUALITY_SETTINGS, persistCameraConfig]
   );
 
   const sendTuningToBackend = useCallback((t: TuningConstants) => {
