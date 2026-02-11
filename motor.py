@@ -201,6 +201,8 @@ class CarSystem:
         # Internal bookkeeping
         self._current_speed = 0
         self._steering_angle = 0
+        self._last_l_fwd = None   # direction tracking for PWM-glitch prevention
+        self._last_r_fwd = None
 
     # ── raw GPIO helper ─────────────────────────
 
@@ -208,22 +210,44 @@ class CarSystem:
         """
         Write direction + PWM to both motors.
         l_fwd / r_fwd: True = forward, False = reverse.
-        """
-        # Left motor direction
-        if l_fwd:
-            GPIO.output(self.IN1, False)
-            GPIO.output(self.IN2, True)
-        else:
-            GPIO.output(self.IN1, True)
-            GPIO.output(self.IN2, False)
-        # Right motor direction
-        if r_fwd:
-            GPIO.output(self.IN3, False)
-            GPIO.output(self.IN4, True)
-        else:
-            GPIO.output(self.IN3, True)
-            GPIO.output(self.IN4, False)
 
+        Pin-setting strategy — simultaneous motor activation:
+          1. On direction change, zero both PWMs first.
+          2. Compute each pin's target value.
+          3. Set all LOW (deactivating) pins in one batch GPIO call.
+          4. Set all HIGH (activating) pins in one batch GPIO call.
+        Because the L298N drives the motor when it sees one HIGH + one
+        LOW on a channel pair, the HIGH pin is the trigger.  By writing
+        both motors' HIGH pins in a single GPIO.output() call they
+        activate at the same instant — eliminating the timing skew that
+        made one side start before the other.
+        """
+        dir_changed = (l_fwd != self._last_l_fwd or r_fwd != self._last_r_fwd)
+
+        if dir_changed:
+            # Cut power while the H-bridge direction pins settle
+            self.pwm_a.ChangeDutyCycle(0)
+            self.pwm_b.ChangeDutyCycle(0)
+
+        # Determine each pin's target: IN1/IN3 = NOT fwd, IN2/IN4 = fwd
+        pin_vals = [
+            (self.IN1, not l_fwd), (self.IN2, l_fwd),
+            (self.IN3, not r_fwd), (self.IN4, r_fwd),
+        ]
+        pins_low  = [p for p, v in pin_vals if not v]
+        pins_high = [p for p, v in pin_vals if v]
+
+        # Deactivating (LOW) first, then activating (HIGH) — both motors
+        # get their trigger pin in the same batch write.
+        if pins_low:
+            GPIO.output(pins_low, False)
+        if pins_high:
+            GPIO.output(pins_high, True)
+
+        self._last_l_fwd = l_fwd
+        self._last_r_fwd = r_fwd
+
+        # Apply PWM — direction pins are already correct
         self.pwm_a.ChangeDutyCycle(int(max(0, min(100, speed_l))))
         self.pwm_b.ChangeDutyCycle(int(max(0, min(100, speed_r))))
 
@@ -271,6 +295,14 @@ class CarSystem:
         self._current_speed = speed
         self._set_raw_motors(speed, speed, False, False)
 
+    def reverse_steer(self, speed, angle):
+        """Reverse with differential steering for angled escape maneuvers.
+        *angle*: -90 (bias left while reversing) to +90 (bias right)."""
+        speed = max(0, min(100, speed))
+        angle = max(-90, min(90, angle))
+        self._current_speed = speed
+        self._apply_steering(speed, angle, forward=False)
+
     def pivot_turn(self, direction, speed=50):
         """
         True tank turn: one side forward, the other side reverse.
@@ -287,20 +319,28 @@ class CarSystem:
 
     def brake(self):
         """Magnetic lock: short-circuit both H-bridges at 100 % PWM."""
-        GPIO.output(self.IN1, True);  GPIO.output(self.IN2, True)
-        GPIO.output(self.IN3, True);  GPIO.output(self.IN4, True)
+        # Zero PWM before changing to brake configuration to avoid
+        # transient drive pulses while direction pins switch.
+        self.pwm_a.ChangeDutyCycle(0)
+        self.pwm_b.ChangeDutyCycle(0)
+        # All 4 pins HIGH in one call — both motors brake simultaneously
+        GPIO.output([self.IN1, self.IN2, self.IN3, self.IN4], True)
         self.pwm_a.ChangeDutyCycle(100)
         self.pwm_b.ChangeDutyCycle(100)
         self._current_speed = 0
+        self._last_l_fwd = None   # brake is neither fwd nor rev
+        self._last_r_fwd = None
 
     def stop(self):
         """Gentle stop: PWM → 0, direction pins LOW (coast)."""
-        GPIO.output(self.IN1, False); GPIO.output(self.IN2, False)
-        GPIO.output(self.IN3, False); GPIO.output(self.IN4, False)
         self.pwm_a.ChangeDutyCycle(0)
         self.pwm_b.ChangeDutyCycle(0)
+        # All 4 pins LOW in one call — both motors coast simultaneously
+        GPIO.output([self.IN1, self.IN2, self.IN3, self.IN4], False)
         self._current_speed = 0
         self._steering_angle = 0
+        self._last_l_fwd = None   # reset direction tracking
+        self._last_r_fwd = None
 
     def cleanup(self):
         """Release PWM and GPIO resources."""

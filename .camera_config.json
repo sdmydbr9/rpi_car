@@ -1,5 +1,5 @@
 {
-  "resolution": "640x480",
-  "jpeg_quality": 70,
-  "framerate": 30
+  "resolution": "2592x1944",
+  "jpeg_quality": 80,
+  "framerate": 60
 }

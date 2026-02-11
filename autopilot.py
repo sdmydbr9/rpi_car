@@ -109,8 +109,8 @@ class AutoPilot:
 
     # ── Escalating Escape constants ────────────────
     MAX_NORMAL_ESCAPES    = 2       # attempts before triggering U-turn
-    UTURN_SPEED           = 70      # PWM % for U-turn spin
-    UTURN_DURATION        = 0.8     # seconds (tuneable)
+    UTURN_SPEED           = 75      # PWM % for U-turn spin  (was 70)
+    UTURN_DURATION        = 1.2     # seconds (was 0.8)
     ESCAPE_CLEAR_CM       = 20      # cm: path considered clear → reset counter
 
     # ── Camera/Vision fusion constants ─────────────
@@ -166,6 +166,10 @@ class AutoPilot:
         # Escalating Escape Maneuvers
         self._failed_attempts    = 0       # consecutive blocked escape attempts
 
+        # STUCK state active-escape tracking
+        self._stuck_phase        = 0       # 0=pivot-L, 1=pivot-R, 2=uturn, 3=wait
+        self._stuck_pivot_dir    = "left"  # alternates each U-turn cycle
+
     # ── Properties ─────────────────────────────────────
 
     @property
@@ -193,6 +197,7 @@ class AutoPilot:
         self._last_cruise_dist = None
         self._stuck_timer      = 0.0
         self._failed_attempts  = 0
+        self._stuck_phase      = 0
 
     def stop(self):
         """Deactivate autopilot and stop motors immediately."""
@@ -424,14 +429,6 @@ class AutoPilot:
         # ── Pre-reverse rear check ──────────────────────
         rear_dist = self.get_rear_distance()
 
-        if rear_dist < self.REAR_BLOCKED_CM:
-            # Car is pinned: front blocked AND rear blocked
-            self._car.stop()
-            self._state = State.STUCK
-            self._maneuver_start = time.time()
-            print(f"🛑 [AutoPilot] STUCK — Front {distance:.1f}cm, Rear {rear_dist:.1f}cm < {self.REAR_BLOCKED_CM}cm. Cannot reverse.")
-            return
-
         # ── Escalation check ──────────────────────────
         self._failed_attempts += 1
 
@@ -441,6 +438,16 @@ class AutoPilot:
             self._maneuver_start = time.time()
             print(f"🔃 [AutoPilot] Escalation! {self._failed_attempts} attempts "
                   f"→ U-TURN ({self.UTURN_SPEED}% for {self.UTURN_DURATION}s)")
+            return
+
+        if rear_dist < self.REAR_BLOCKED_CM:
+            # Can't reverse — but CAN pivot in place (zero-radius turn).
+            # Skip straight to PIVOTING instead of sitting in STUCK.
+            self._decide_turn_direction(left_ir, right_ir)
+            self._state = State.PIVOTING
+            self._maneuver_start = time.time()
+            print(f"⚠️  [AutoPilot] Rear blocked ({rear_dist:.1f}cm < {self.REAR_BLOCKED_CM}cm) "
+                  f"— skipping reverse, PIVOTING {self._turn_direction}")
             return
 
         # Rear is clear → proceed to rear-aware reverse
@@ -463,8 +470,11 @@ class AutoPilot:
             print(f"⚠️  [AutoPilot] Rear sonar {rear_dist:.1f}cm < {self.REAR_CRITICAL_CM}cm during reverse → STOP, skip to PIVOTING {self._turn_direction}")
             return
 
-        # Continue reversing (use IR to bias direction)
-        self._car.reverse(self.REVERSE_SPEED)
+        # Reverse with slight steering bias for better escape positioning.
+        # Bias OPPOSITE to the planned pivot direction so the car swings
+        # its nose away from the obstacle during the reverse.
+        steer_bias = -25 if self._turn_direction == "left" else 25
+        self._car.reverse_steer(self.REVERSE_SPEED, steer_bias)
 
         elapsed = time.time() - self._maneuver_start
         if elapsed >= self.REVERSE_DURATION:
@@ -495,41 +505,97 @@ class AutoPilot:
                     print(f"✅ [AutoPilot] Path clear ({distance:.1f}cm ≥ {self.ESCAPE_CLEAR_CM}cm) "
                           f"→ reset failed_attempts ({self._failed_attempts} → 0)")
                 self._failed_attempts = 0
-            self._state = State.CRUISING
-            # Reset stuck-boost tracking for fresh cruise
-            self._last_cruise_dist = None
-            self._stuck_boost = 0
-            print("✅ [AutoPilot] RECOVERY → CRUISING")
+                self._state = State.CRUISING
+                # Reset stuck-boost tracking for fresh cruise
+                self._last_cruise_dist = None
+                self._stuck_boost = 0
+                print("✅ [AutoPilot] RECOVERY → CRUISING")
+            else:
+                # Path still blocked — re-enter escape sequence directly
+                # instead of CRUISING (which would immediately re-trigger
+                # PANIC_BRAKE and waste a full cycle).
+                self._decide_turn_direction(left_ir, right_ir)
+                self._state = State.PANIC_BRAKE
+                self._car.brake()
+                self._maneuver_start = time.time()
+                print(f"⚠️  [AutoPilot] RECOVERY → path still blocked ({distance:.1f}cm) → PANIC_BRAKE")
 
     # ── State D: STUCK ─────────────────────────────────
 
     def _state_stuck(self, distance, left_ir, right_ir):
         """
-        Car is pinned between obstacles.  Stay stopped and periodically
-        re-check whether space has opened up behind.
+        Car is pinned between obstacles.  Instead of passively waiting,
+        actively cycle through escape maneuvers:
+          Phase 0 — Pivot left   (1.5 s)
+          Phase 1 — Pivot right  (1.5 s)
+          Phase 2 — Aggressive U-turn spin
+          Phase 3 — Brief pause, then restart the cycle
+        After each phase, check whether front or rear has opened up.
         """
-        self._car.stop()
+        now = time.time()
+        rear_dist = self.get_rear_distance()
+        front_dist = distance
+        elapsed = now - self._maneuver_start
 
-        if time.time() - self._maneuver_start >= self.STUCK_RECHECK_INTERVAL:
-            rear_dist = self.get_rear_distance()
-            front_dist = distance
+        # ── Quick-exit checks (run every tick) ─────────────────────
+        if front_dist >= self.DANGER_CM:
+            self._car.stop()
+            self._failed_attempts = 0
+            self._stuck_phase = 0
+            self._state = State.CRUISING
+            self._last_cruise_dist = None
+            self._stuck_boost = 0
+            print(f"🔓 [AutoPilot] STUCK cleared — front {front_dist:.1f}cm → CRUISING")
+            return
 
-            if rear_dist >= self.REAR_BLOCKED_CM:
-                # Rear cleared — try the escape routine again
-                self._decide_turn_direction(left_ir, right_ir)
-                self._state = State.REVERSING
-                self._maneuver_start = time.time()
-                self._reverse_elapsed = 0.0
-                print(f"🔓 [AutoPilot] STUCK cleared — rear now {rear_dist:.1f}cm → REVERSING")
-            elif front_dist >= self.DANGER_CM:
-                # Front cleared — just go
-                self._failed_attempts = 0
-                self._stuck_boost = 0
-                self._state = State.CRUISING
-                print(f"🔓 [AutoPilot] STUCK cleared — front now {front_dist:.1f}cm → CRUISING")
-            else:
-                self._maneuver_start = time.time()
-                print(f"🛑 [AutoPilot] Still STUCK — Front {front_dist:.1f}cm, Rear {rear_dist:.1f}cm")
+        if rear_dist >= self.REAR_BLOCKED_CM + 3:
+            self._car.stop()
+            self._decide_turn_direction(left_ir, right_ir)
+            self._state = State.REVERSING
+            self._maneuver_start = now
+            self._reverse_elapsed = 0.0
+            self._stuck_phase = 0
+            print(f"🔓 [AutoPilot] STUCK cleared — rear {rear_dist:.1f}cm → REVERSING")
+            return
+
+        # ── Phase 0: Pivot left ────────────────────────────────────
+        if self._stuck_phase == 0:
+            self._car.pivot_turn("left", self.PIVOT_SPEED)
+            if elapsed >= 1.5:
+                self._car.stop()
+                self._stuck_phase = 1
+                self._maneuver_start = now
+                print("🔄 [AutoPilot] STUCK: pivot-left done → trying pivot-right")
+
+        # ── Phase 1: Pivot right ───────────────────────────────────
+        elif self._stuck_phase == 1:
+            self._car.pivot_turn("right", self.PIVOT_SPEED)
+            if elapsed >= 1.5:
+                self._car.stop()
+                self._stuck_phase = 2
+                self._maneuver_start = now
+                # Pick a U-turn direction (alternates each full cycle)
+                self._stuck_pivot_dir = (
+                    "right" if self._stuck_pivot_dir == "left" else "left"
+                )
+                print("🔄 [AutoPilot] STUCK: pivot-right done → trying U-turn")
+
+        # ── Phase 2: Aggressive U-turn spin ────────────────────────
+        elif self._stuck_phase == 2:
+            self._car.pivot_turn(self._stuck_pivot_dir, self.UTURN_SPEED)
+            if elapsed >= self.UTURN_DURATION:
+                self._car.stop()
+                self._stuck_phase = 3
+                self._maneuver_start = now
+                print(f"🔃 [AutoPilot] STUCK: U-turn ({self._stuck_pivot_dir}) done → brief pause")
+
+        # ── Phase 3: Brief pause then restart cycle ────────────────
+        elif self._stuck_phase == 3:
+            self._car.stop()
+            if elapsed >= 0.5:
+                self._stuck_phase = 0
+                self._maneuver_start = now
+                print("🔄 [AutoPilot] STUCK: restarting escape cycle")
 
     # ── State E: U-TURN (escalated escape) ─────────────
 

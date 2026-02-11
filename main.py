@@ -696,6 +696,7 @@ def physics_loop():
     last_right_obstacle = False
     target_steer_angle = 0   # Target angle during steering phase
     was_autonomous = False   # Track autonomous → manual transition
+    _prev_motor_dir = None   # Track motor direction to zero PWM on direction change
     
     while True:
         # --- CHECK IR SENSORS ---
@@ -1086,25 +1087,33 @@ def physics_loop():
 
         # --- 4. APPLY TO MOTORS ---
         try:
+            # Determine current motor direction for glitch prevention
+            if car_state["is_braking"]:
+                _cur_dir = "brake"
+            elif gear == "R":
+                _cur_dir = "reverse"
+            else:
+                _cur_dir = "forward"
+
             # If normal brake is active, apply maximum magnetic braking force to lock the car
             if car_state["is_braking"]:
-                # HARD BRAKE: Set both motor pins HIGH (creates short circuit for max resistance)
-                # This prevents the car from moving even under external force
-                GPIO.output(IN1, True); GPIO.output(IN2, True)
-                GPIO.output(IN3, True); GPIO.output(IN4, True)
+                # Zero PWM before switching to brake pin configuration
+                # to prevent transient drive pulses during the switch.
+                if _prev_motor_dir != "brake":
+                    pwm_a.ChangeDutyCycle(0)
+                    pwm_b.ChangeDutyCycle(0)
+                # HARD BRAKE: All 4 pins HIGH in one call — both motors
+                # brake at the same instant (short-circuit for max resistance)
+                GPIO.output([IN1, IN2, IN3, IN4], True)
                 
                 # Keep PWM at 100% for absolute maximum holding force
                 pwm_a.ChangeDutyCycle(100)
                 pwm_b.ChangeDutyCycle(100)
             else:
                 # Direction Logic — set BEFORE PWM.
-                # Previously PWM was applied first while direction pins
-                # still reflected the prior state (e.g. brake = both
-                # HIGH).  The L298N would briefly see driving-level PWM
-                # in brake configuration; the right motor (updated last)
-                # spent more time in this conflicting state and could
-                # lock up.  Setting direction first ensures the H-bridge
-                # is configured correctly before power is applied.
+                # When switching direction (e.g. brake→forward, forward→reverse),
+                # the L298N briefly sees the old PWM with transient pin states.
+                # Zeroing PWM first prevents one motor from locking up.
                 l_a, l_b = False, True # Default Forward
                 r_a, r_b = False, True # Default Forward
 
@@ -1115,13 +1124,32 @@ def physics_loop():
                     if obstacle_state == "REVERSING":
                         print(f"🔧 REVERSE MOTORS: L={int(left_motor_speed)}% R={int(right_motor_speed)}% IN1={l_a} IN2={l_b} IN3={r_a} IN4={r_b}")
 
-                # Set direction pins FIRST
-                GPIO.output(IN1, l_a); GPIO.output(IN2, l_b)
-                GPIO.output(IN3, r_a); GPIO.output(IN4, r_b)
+                # Zero PWM on direction change to prevent H-bridge glitch
+                if _cur_dir != _prev_motor_dir:
+                    pwm_a.ChangeDutyCycle(0)
+                    pwm_b.ChangeDutyCycle(0)
 
-                # THEN apply PWM — motors now have correct direction
+                # Set direction pins using batch GPIO writes.
+                # Group by target value: LOW (deactivating) pins first,
+                # then HIGH (activating) pins.  The H-bridge drives when
+                # it sees one HIGH + one LOW per channel pair, so the
+                # HIGH pin is the "trigger".  Writing both motors' HIGH
+                # pins in a single GPIO.output() call makes them start
+                # at the same instant — no left-before-right skew.
+                pins_low  = [p for p, v in ((IN1, l_a), (IN2, l_b),
+                                             (IN3, r_a), (IN4, r_b)) if not v]
+                pins_high = [p for p, v in ((IN1, l_a), (IN2, l_b),
+                                             (IN3, r_a), (IN4, r_b)) if v]
+                if pins_low:
+                    GPIO.output(pins_low, False)
+                if pins_high:
+                    GPIO.output(pins_high, True)
+
+                # Apply PWM — direction pins are already correct
                 pwm_a.ChangeDutyCycle(int(left_motor_speed))
                 pwm_b.ChangeDutyCycle(int(right_motor_speed))
+
+            _prev_motor_dir = _cur_dir
         except Exception as e:
             pass  # GPIO not available, skip
 
