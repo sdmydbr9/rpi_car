@@ -147,6 +147,7 @@ export const CockpitController = () => {
   const narrationUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const ttsUnlockedRef = useRef(false);
   const [showAudioUnlockPrompt, setShowAudioUnlockPrompt] = useState(false);
+  const [ttsUnlocked, setTtsUnlocked] = useState(false);
   const autoAccelIntervalRef = useRef<number | null>(null);
   const connectionTimeoutRef = useRef<number | null>(null);
   const autoConnectAttemptedRef = useRef(false);
@@ -154,38 +155,42 @@ export const CockpitController = () => {
 
   // TTS Browser Unlock: Safari and Chrome require a user gesture before speechSynthesis.speak() works.
   // We listen for the first touch/click and perform a silent TTS + AudioContext unlock.
-  useEffect(() => {
-    const unlockTTS = () => {
-      if (ttsUnlockedRef.current) return;
-      ttsUnlockedRef.current = true;
-      setShowAudioUnlockPrompt(false);
-      console.log('🔊 [TTS] Unlocking browser audio via user gesture');
-      // Silent utterance to satisfy browser autoplay policy
-      try {
-        const silentUtterance = new SpeechSynthesisUtterance('');
-        silentUtterance.volume = 0;
-        window.speechSynthesis.speak(silentUtterance);
-      } catch (e) {
-        console.warn('🔊 [TTS] Silent utterance failed:', e);
-      }
-      // Also unlock AudioContext for any future audio needs
-      try {
-        const ctx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
-        ctx.resume().then(() => ctx.close());
-      } catch (e) {
-        console.warn('🔊 [TTS] AudioContext unlock failed:', e);
-      }
-      // Remove listeners after unlock
-      document.removeEventListener('touchstart', unlockTTS, true);
-      document.removeEventListener('click', unlockTTS, true);
-    };
-    document.addEventListener('touchstart', unlockTTS, { capture: true, once: true });
-    document.addEventListener('click', unlockTTS, { capture: true, once: true });
-    return () => {
-      document.removeEventListener('touchstart', unlockTTS, true);
-      document.removeEventListener('click', unlockTTS, true);
-    };
+  const unlockTTS = useCallback(() => {
+    if (ttsUnlockedRef.current) return;
+    ttsUnlockedRef.current = true;
+    setTtsUnlocked(true);
+    setShowAudioUnlockPrompt(false);
+    console.log('🔊 [TTS] Unlocking browser audio via user gesture');
+    // Silent utterance to satisfy browser autoplay policy
+    try {
+      const silentUtterance = new SpeechSynthesisUtterance('');
+      silentUtterance.volume = 0;
+      window.speechSynthesis.speak(silentUtterance);
+    } catch (e) {
+      console.warn('🔊 [TTS] Silent utterance failed:', e);
+    }
+    // Also unlock AudioContext for any future audio needs
+    try {
+      const ctx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+      ctx.resume().then(() => ctx.close());
+    } catch (e) {
+      console.warn('🔊 [TTS] AudioContext unlock failed:', e);
+    }
   }, []);
+
+  useEffect(() => {
+    const handleFirstInteraction = () => {
+      unlockTTS();
+      document.removeEventListener('touchstart', handleFirstInteraction, true);
+      document.removeEventListener('click', handleFirstInteraction, true);
+    };
+    document.addEventListener('touchstart', handleFirstInteraction, { capture: true, once: true });
+    document.addEventListener('click', handleFirstInteraction, { capture: true, once: true });
+    return () => {
+      document.removeEventListener('touchstart', handleFirstInteraction, true);
+      document.removeEventListener('click', handleFirstInteraction, true);
+    };
+  }, [unlockTTS]);
 
   // Smart auto-connect: try localhost first, then fallback to server IP
   useEffect(() => {
@@ -697,8 +702,14 @@ export const CockpitController = () => {
       {showAudioUnlockPrompt && (
         <div 
           className="fixed inset-0 z-[9998] flex items-center justify-center bg-background/70 backdrop-blur-sm cursor-pointer"
-          onClick={() => setShowAudioUnlockPrompt(false)}
-          onTouchStart={() => setShowAudioUnlockPrompt(false)}
+          onClick={() => {
+            unlockTTS();
+            setShowAudioUnlockPrompt(false);
+          }}
+          onTouchStart={() => {
+            unlockTTS();
+            setShowAudioUnlockPrompt(false);
+          }}
         >
           <div className="flex flex-col items-center gap-3 p-6 rounded-xl bg-card border border-primary/50 shadow-lg max-w-xs text-center">
             <div className="w-16 h-16 rounded-full bg-primary/20 border border-primary/50 flex items-center justify-center animate-pulse">
@@ -760,6 +771,8 @@ export const CockpitController = () => {
           narrationEnabled={narrationEnabled}
           narrationSpeaking={narrationSpeaking}
           onNarrationToggle={handleNarrationToggle}
+          ttsUnlocked={ttsUnlocked}
+          onUnlockAudio={unlockTTS}
         />
         
         {/* Main Content - Fixed Layout (No Responsive Changes) */}
