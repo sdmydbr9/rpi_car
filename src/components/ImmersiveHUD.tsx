@@ -1,5 +1,5 @@
-import { useState, useCallback, useMemo, useRef } from "react";
-import { X, Wifi, Zap, Power, VideoOff, Camera } from "lucide-react";
+import { useState, useCallback, useMemo, useRef, useEffect } from "react";
+import { X, Wifi, Zap, Power, VideoOff, Camera, Mic } from "lucide-react";
 import { useGameFeedback } from "@/hooks/useGameFeedback";
 import { useTouchTracking } from "@/hooks/useTouchTracking";
 
@@ -32,6 +32,10 @@ interface ImmersiveHUDProps {
   isCameraEnabled?: boolean;
   userWantsVision?: boolean;
   onToggleCamera?: () => void;
+  // AI Narration overlay
+  narrationEnabled?: boolean;
+  narrationSpeaking?: boolean;
+  narrationLastText?: string;
 }
 
 export const ImmersiveHUD = ({
@@ -62,6 +66,9 @@ export const ImmersiveHUD = ({
   isCameraEnabled,
   userWantsVision,
   onToggleCamera,
+  narrationEnabled,
+  narrationSpeaking,
+  narrationLastText,
 }: ImmersiveHUDProps) => {
   const { triggerHaptic, playSound } = useGameFeedback();
   const [steeringDirection, setSteeringDirection] = useState<'left' | 'right' | null>(null);
@@ -81,6 +88,30 @@ export const ImmersiveHUD = ({
   // RPM simulation based on speed and throttle
   const rpm = Math.min(100, (speed / 100) * 80 + (throttle ? 20 : 0));
   const isRedline = rpm > 85;
+
+  // Narration auto-fade: show text while speaking, fade out after speech ends
+  const [narrationVisible, setNarrationVisible] = useState(false);
+  const [narrationFading, setNarrationFading] = useState(false);
+  const fadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (narrationSpeaking && narrationLastText) {
+      // New speech started — show immediately, cancel any pending fade
+      if (fadeTimerRef.current) clearTimeout(fadeTimerRef.current);
+      setNarrationVisible(true);
+      setNarrationFading(false);
+    } else if (!narrationSpeaking && narrationVisible) {
+      // Speech ended — start fade out after a short delay
+      setNarrationFading(true);
+      fadeTimerRef.current = setTimeout(() => {
+        setNarrationVisible(false);
+        setNarrationFading(false);
+      }, 3000); // 3s fade-out duration
+    }
+    return () => {
+      if (fadeTimerRef.current) clearTimeout(fadeTimerRef.current);
+    };
+  }, [narrationSpeaking, narrationLastText]);
   
   const handleBrakeStart = useCallback(() => {
     triggerHaptic('heavy');
@@ -529,6 +560,35 @@ export const ImmersiveHUD = ({
             <span className="text-xs racing-text mt-1">THROTTLE</span>
           </button>
         </div>
+        
+        {/* AI Narration Overlay */}
+        {narrationEnabled && (
+          <div className="absolute bottom-40 left-1/2 -translate-x-1/2 z-30 pointer-events-none flex flex-col items-center gap-2 max-w-[80vw]">
+            {/* AI badge */}
+            <div className={`flex items-center gap-1 px-2 py-0.5 rounded-full backdrop-blur-md border ${
+              narrationSpeaking 
+                ? 'bg-green-500/20 border-green-500/50' 
+                : 'bg-background/30 border-border/50'
+            }`}>
+              <Mic className={`w-3 h-3 ${narrationSpeaking ? 'text-green-400 animate-pulse' : 'text-primary/70'}`} />
+              <span className={`text-[9px] racing-text ${narrationSpeaking ? 'text-green-400' : 'text-muted-foreground'}`}>
+                {narrationSpeaking ? 'AI SPEAKING' : 'AI ON'}
+              </span>
+            </div>
+            {/* Narration text with auto-fade */}
+            {narrationVisible && narrationLastText && (
+              <div 
+                className={`px-4 py-2 rounded-lg bg-background/60 backdrop-blur-md border border-border/50 transition-opacity duration-[3000ms] ease-out ${
+                  narrationFading ? 'opacity-0' : 'opacity-100'
+                }`}
+              >
+                <p className="text-[11px] sm:text-sm text-foreground racing-text text-center leading-relaxed">
+                  🤖 {narrationLastText}
+                </p>
+              </div>
+            )}
+          </div>
+        )}
         
       </div>
       

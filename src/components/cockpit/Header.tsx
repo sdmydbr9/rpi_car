@@ -1,5 +1,6 @@
 import { SettingsDialog, TuningConstants, DEFAULT_TUNING } from "./SettingsDialog";
-import type { CameraSpecs } from "../../lib/socketClient";
+import type { CameraSpecs, NarrationConfig } from "../../lib/socketClient";
+import { Mic, MicOff } from "lucide-react";
 
 interface HeaderProps {
   driverName?: string;
@@ -9,6 +10,11 @@ interface HeaderProps {
   onTuningChange?: (tuning: TuningConstants) => void;
   backendDefaults?: TuningConstants;
   cameraSpecs?: CameraSpecs;
+  // AI Narration
+  narrationConfig?: NarrationConfig;
+  narrationEnabled?: boolean;
+  narrationSpeaking?: boolean;
+  onNarrationToggle?: (enabled: boolean) => void;
 }
 
 export const Header = ({ 
@@ -19,6 +25,10 @@ export const Header = ({
   onTuningChange = () => {},
   backendDefaults = DEFAULT_TUNING,
   cameraSpecs,
+  narrationConfig,
+  narrationEnabled,
+  narrationSpeaking,
+  onNarrationToggle,
 }: HeaderProps) => {
   return (
     <header className="flex items-center justify-between px-1.5 sm:px-4 py-0.5 sm:py-1.5 border-b border-primary/30 bg-card/30 backdrop-blur-sm h-[6dvh] min-h-[1.75rem] max-h-10 flex-shrink-0">
@@ -51,8 +61,30 @@ export const Header = ({
           <span className="text-primary font-bold text-xs sm:text-base racing-text">{position}</span>
           <span className="text-foreground font-bold racing-text text-[10px] sm:text-sm hidden sm:inline">{driverName}</span>
         </div>
-        {/* Settings Dialog Button */}
-        <SettingsDialog tuning={tuning} onTuningChange={onTuningChange} backendDefaults={backendDefaults} cameraSpecs={cameraSpecs} />
+        {/* AI Narration Quick Toggle + Settings Dialog Button */}
+        {narrationConfig?.api_key_set && (
+          <button
+            onClick={() => onNarrationToggle?.(!narrationEnabled)}
+            className={`p-1.5 sm:p-2 rounded-lg border transition-all touch-feedback flex items-center gap-1 ${
+              narrationEnabled
+                ? narrationSpeaking
+                  ? 'border-green-500 bg-green-500/20 text-green-400 animate-pulse'
+                  : 'border-primary bg-primary/20 text-primary'
+                : 'border-border bg-card text-muted-foreground hover:border-primary/50 hover:text-primary'
+            }`}
+            title={narrationEnabled ? 'Disable AI Narration' : 'Enable AI Narration'}
+          >
+            {narrationEnabled ? (
+              <Mic className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+            ) : (
+              <MicOff className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+            )}
+            <span className="text-[8px] sm:text-[10px] racing-text hidden sm:inline">
+              {narrationEnabled ? (narrationSpeaking ? 'AI SPEAKING' : 'AI ON') : 'AI OFF'}
+            </span>
+          </button>
+        )}
+        <SettingsDialog tuning={tuning} onTuningChange={onTuningChange} backendDefaults={backendDefaults} cameraSpecs={cameraSpecs} narrationConfig={narrationConfig} narrationEnabled={narrationEnabled} onNarrationToggle={onNarrationToggle} />
       </div>
     </header>
   );

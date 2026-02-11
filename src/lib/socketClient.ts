@@ -43,6 +43,9 @@ export interface TelemetryData {
   camera_resolution?: string;
   camera_jpeg_quality?: number;
   camera_framerate?: number;
+  // AI Narration telemetry
+  narration_enabled?: boolean;
+  narration_speaking?: boolean;
 }
 
 /**
@@ -92,6 +95,17 @@ export function connectToServer(serverIp: string, port: number = 5000): Promise<
     socket.on('heartbeat_ping', () => {
       console.log(`[Socket] 💗 Heartbeat ping received from server, sending heartbeat_pong...`);
       socket?.emit('heartbeat_pong', {});
+    });
+
+    // Register narration event listeners at connect time so they persist
+    socket.on('narration_key_result', (data: NarrationKeyResult) => {
+      console.log(`[Socket] 🎙️ Narration key result:`, data);
+      if (narrationKeyResultCallback) narrationKeyResultCallback(data);
+    });
+
+    socket.on('narration_toggle_response', (data: { status: string; enabled: boolean; message?: string }) => {
+      console.log(`[Socket] 🎙️ Narration toggle response:`, data);
+      if (narrationToggleResponseCallback) narrationToggleResponseCallback(data);
     });
   });
 }
@@ -153,6 +167,129 @@ export function onCameraConfigResponse(callback: (data: { status: string; curren
       console.log(`[Socket] 📷 Camera config response:`, data);
       if (cameraConfigResponseCallback) cameraConfigResponseCallback(data);
     });
+  }
+}
+
+// ==========================================
+// 🎙️ NARRATION SOCKET EVENTS
+// ==========================================
+
+export interface NarrationConfig {
+  provider: string;
+  api_key_set: boolean;
+  api_key_masked: string;
+  model: string;
+  interval: number;
+  enabled: boolean;
+  models?: NarrationModel[];
+}
+
+export interface NarrationModel {
+  name: string;
+  display_name: string;
+}
+
+export interface NarrationKeyResult {
+  valid: boolean;
+  models: NarrationModel[];
+  error: string;
+}
+
+let narrationConfigSyncCallback: ((data: NarrationConfig) => void) | null = null;
+let narrationKeyResultCallback: ((data: NarrationKeyResult) => void) | null = null;
+let narrationTextCallback: ((data: { text: string; timestamp: number }) => void) | null = null;
+let narrationToggleResponseCallback: ((data: { status: string; enabled: boolean; message?: string }) => void) | null = null;
+
+/**
+ * Subscribe to narration config sync events (sent on connect)
+ */
+export function onNarrationConfigSync(callback: (data: NarrationConfig) => void): void {
+  narrationConfigSyncCallback = callback;
+  if (socket) {
+    socket.off('narration_config_sync');
+    socket.on('narration_config_sync', (data: NarrationConfig) => {
+      console.log(`[Socket] 🎙️ Narration config sync:`, data);
+      if (narrationConfigSyncCallback) narrationConfigSyncCallback(data);
+    });
+  }
+}
+
+/**
+ * Subscribe to API key validation results
+ */
+export function onNarrationKeyResult(callback: (data: NarrationKeyResult) => void): void {
+  narrationKeyResultCallback = callback;
+  // Don't re-register the socket listener here — it's registered once at connect time
+}
+
+/**
+ * Subscribe to narration text events (AI description of camera feed)
+ */
+export function onNarrationText(callback: (data: { text: string; timestamp: number }) => void): void {
+  narrationTextCallback = callback;
+  if (socket) {
+    socket.off('narration_text');
+    socket.on('narration_text', (data: { text: string; timestamp: number }) => {
+      console.log(`[Socket] 🎙️ Narration text:`, data.text);
+      if (narrationTextCallback) narrationTextCallback(data);
+    });
+  }
+}
+
+/**
+ * Subscribe to narration toggle response events
+ */
+export function onNarrationToggleResponse(callback: (data: { status: string; enabled: boolean; message?: string }) => void): void {
+  narrationToggleResponseCallback = callback;
+  // Don't re-register the socket listener here — it's registered once at connect time
+}
+
+/**
+ * Validate an AI provider API key
+ */
+export function emitNarrationValidateKey(provider: string, apiKey: string): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎙️ NARRATION: Validating ${provider} API key`);
+    socket.emit('narration_validate_key', { provider, api_key: apiKey });
+  }
+}
+
+/**
+ * Update narration configuration (model, interval, etc.)
+ */
+export function emitNarrationConfigUpdate(config: { model?: string; interval?: number; provider?: string }): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎙️ NARRATION CONFIG UPDATE:`, config);
+    socket.emit('narration_config_update', config);
+  }
+}
+
+/**
+ * Toggle AI narration on/off
+ */
+export function emitNarrationToggle(enabled: boolean): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎙️ NARRATION: ${enabled ? 'ENABLE' : 'DISABLE'}`);
+    socket.emit('narration_toggle', { enabled });
+  }
+}
+
+/**
+ * Notify server that TTS playback has finished
+ */
+export function emitNarrationSpeakingDone(): void {
+  if (socket && socket.connected) {
+    socket.emit('narration_speaking_done', {});
+  }
+}
+
+/**
+ * Clear the stored API key on the backend
+ */
+export function emitNarrationKeyClear(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎙️ NARRATION: Clear API key`);
+    socket.emit('narration_key_clear', {});
   }
 }
 
@@ -448,4 +585,13 @@ export default {
   onCameraSpecsSync,
   onCameraConfigResponse,
   requestTuning,
+  // Narration
+  onNarrationConfigSync,
+  onNarrationKeyResult,
+  onNarrationText,
+  onNarrationToggleResponse,
+  emitNarrationValidateKey,
+  emitNarrationConfigUpdate,
+  emitNarrationToggle,
+  emitNarrationSpeakingDone,
 };

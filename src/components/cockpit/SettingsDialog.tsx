@@ -1,8 +1,8 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
-import { Settings, X, Minus, Plus, ChevronDown, ChevronRight, HelpCircle } from "lucide-react";
+import { Settings, X, Minus, Plus, ChevronDown, ChevronRight, HelpCircle, Loader2, Check, Eye, EyeOff, Mic, MicOff, Trash2 } from "lucide-react";
 import * as socketClient from "../../lib/socketClient";
-import type { CameraSpecs } from "../../lib/socketClient";
+import type { CameraSpecs, NarrationConfig, NarrationModel, NarrationKeyResult } from "../../lib/socketClient";
 import { toast } from "@/components/ui/sonner";
 
 export interface TuningConstants {
@@ -198,6 +198,10 @@ interface SettingsDialogProps {
   onTuningChange: (tuning: TuningConstants) => void;
   backendDefaults?: TuningConstants;
   cameraSpecs?: CameraSpecs;
+  // AI Narration props
+  narrationConfig?: NarrationConfig;
+  narrationEnabled?: boolean;
+  onNarrationToggle?: (enabled: boolean) => void;
 }
 
 const ParamRow = ({
@@ -392,10 +396,131 @@ const CollapsibleGroup = ({
   );
 };
 
-export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAULT_TUNING, cameraSpecs }: SettingsDialogProps) => {
+export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAULT_TUNING, cameraSpecs, narrationConfig, narrationEnabled = false, onNarrationToggle }: SettingsDialogProps) => {
   const [isOpen, setIsOpen] = useState(false);
   const [synced, setSynced] = useState(false);
   
+  // AI Narration local state
+  const [narrationProvider, setNarrationProvider] = useState(narrationConfig?.provider || 'gemini');
+  const [apiKeyInput, setApiKeyInput] = useState('');
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [isValidatingKey, setIsValidatingKey] = useState(false);
+  const [isKeyValid, setIsKeyValid] = useState(narrationConfig?.api_key_set || false);
+  const [availableModels, setAvailableModels] = useState<NarrationModel[]>([]);
+  const [selectedModel, setSelectedModel] = useState(narrationConfig?.model || '');
+  const [narrationInterval, setNarrationInterval] = useState(narrationConfig?.interval || 8);
+  const [keyError, setKeyError] = useState('');
+
+  // Sync narration config from backend when it changes
+  useEffect(() => {
+    if (narrationConfig) {
+      setNarrationProvider(narrationConfig.provider || 'gemini');
+      setIsKeyValid(narrationConfig.api_key_set);
+      setSelectedModel(narrationConfig.model || '');
+      setNarrationInterval(narrationConfig.interval || 8);
+      // Populate masked key so returning clients see the saved key state
+      if (narrationConfig.api_key_set && narrationConfig.api_key_masked) {
+        setApiKeyInput(narrationConfig.api_key_masked);
+      } else if (!narrationConfig.api_key_set) {
+        setApiKeyInput('');
+      }
+      // Populate models from persisted backend data
+      if (narrationConfig.models && narrationConfig.models.length > 0) {
+        setAvailableModels(narrationConfig.models);
+      }
+    }
+  }, [narrationConfig]);
+
+  // Subscribe to key validation results (callback only — socket listener is registered at connect time)
+  useEffect(() => {
+    socketClient.onNarrationKeyResult((data: NarrationKeyResult) => {
+      console.log('🎙️ SettingsDialog received key result:', data);
+      setIsValidatingKey(false);
+      if (data.valid) {
+        setIsKeyValid(true);
+        setAvailableModels(data.models);
+        setKeyError('');
+        toast.success('🔑 API Key Validated', {
+          description: `${data.models.length} multimodal models available`,
+          duration: 3000,
+        });
+        // Auto-select first model if none selected
+        if (data.models.length > 0) {
+          const firstModel = data.models[0].name;
+          setSelectedModel(firstModel);
+          socketClient.emitNarrationConfigUpdate({ model: firstModel });
+        }
+      } else {
+        setIsKeyValid(false);
+        setAvailableModels([]);
+        setKeyError(data.error || 'Invalid API key');
+        toast.error('❌ API Key Invalid', {
+          description: data.error || 'Could not validate the API key',
+          duration: 4000,
+        });
+      }
+    });
+
+    socketClient.onNarrationToggleResponse((data) => {
+      if (data.status === 'error' && data.message) {
+        toast.error('🎙️ Narration Error', {
+          description: data.message,
+          duration: 4000,
+        });
+      }
+    });
+  }, []);
+
+  const handleValidateKey = useCallback(() => {
+    if (!apiKeyInput.trim()) {
+      setKeyError('Please enter an API key');
+      return;
+    }
+    // Don't re-validate if the input is the masked key (unchanged from backend)
+    if (apiKeyInput.startsWith('*')) {
+      setKeyError('Key already saved. Enter a new key to re-validate.');
+      return;
+    }
+    setIsValidatingKey(true);
+    setKeyError('');
+    socketClient.emitNarrationValidateKey(narrationProvider, apiKeyInput.trim());
+  }, [apiKeyInput, narrationProvider]);
+
+  const handleClearKey = useCallback(() => {
+    socketClient.emitNarrationKeyClear();
+    setApiKeyInput('');
+    setIsKeyValid(false);
+    setAvailableModels([]);
+    setSelectedModel('');
+    setKeyError('');
+    if (narrationEnabled && onNarrationToggle) {
+      onNarrationToggle(false);
+    }
+    toast.success('🗑️ API Key Cleared', {
+      description: 'API key removed from server',
+      duration: 3000,
+    });
+  }, [narrationEnabled, onNarrationToggle]);
+
+  const handleModelChange = useCallback((modelName: string) => {
+    setSelectedModel(modelName);
+    socketClient.emitNarrationConfigUpdate({ model: modelName });
+  }, []);
+
+  const handleIntervalChange = useCallback((val: number) => {
+    const clamped = Math.max(3, Math.min(30, val));
+    setNarrationInterval(clamped);
+    socketClient.emitNarrationConfigUpdate({ interval: clamped });
+  }, []);
+
+  const handleNarrationToggle = useCallback(() => {
+    const newEnabled = !narrationEnabled;
+    if (onNarrationToggle) {
+      onNarrationToggle(newEnabled);
+    }
+    // Socket emit is handled by the parent's onNarrationToggle callback
+  }, [narrationEnabled, onNarrationToggle]);
+
   // Store original camera settings before CV mode is enabled
   const originalCameraSettingsRef = useRef<{
     resolution: string;
@@ -635,6 +760,173 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
 
             {/* Scrollable Content */}
             <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 min-h-0" data-scrollable="true" style={{ touchAction: 'pan-y' }}>
+              {/* AI NARRATION Section */}
+              <CollapsibleGroup title="🎙️ AI NARRATION" defaultOpen={false}>
+                {/* Provider Select */}
+                <div className="py-0.5">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[9px] sm:text-[11px] text-muted-foreground racing-text">Provider</span>
+                    <select
+                      value={narrationProvider}
+                      onChange={(e) => setNarrationProvider(e.target.value)}
+                      className="px-2 py-1 rounded border border-border bg-card text-[10px] sm:text-xs text-foreground racing-text focus:border-primary focus:outline-none"
+                    >
+                      <option value="gemini">Google Gemini</option>
+                      <option value="openai" disabled>OpenAI (Coming Soon)</option>
+                      <option value="anthropic" disabled>Anthropic (Coming Soon)</option>
+                      <option value="ollama" disabled>Ollama (Coming Soon)</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* API Key Input */}
+                <div className="py-0.5">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[9px] sm:text-[11px] text-muted-foreground racing-text">API Key</span>
+                    {isKeyValid && (
+                      <span className="flex items-center gap-0.5 text-[8px] text-green-400 racing-text">
+                        <Check className="w-2.5 h-2.5" /> Saved
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1 mt-0.5">
+                    <div className="relative flex-1">
+                      <input
+                        type={showApiKey ? 'text' : 'password'}
+                        value={apiKeyInput}
+                        onChange={(e) => { setApiKeyInput(e.target.value); setKeyError(''); }}
+                        placeholder={isKeyValid ? '•••••••• (key saved)' : 'Paste your API key...'}
+                        className="w-full h-6 bg-card border border-border rounded px-2 pr-6 text-[10px] sm:text-xs text-foreground racing-text focus:border-primary focus:outline-none placeholder:text-muted-foreground/50"
+                      />
+                      <button
+                        onClick={() => setShowApiKey(!showApiKey)}
+                        className="absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground/50 hover:text-primary/70"
+                      >
+                        {showApiKey ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                      </button>
+                    </div>
+                    <button
+                      onClick={handleValidateKey}
+                      disabled={isValidatingKey || !apiKeyInput.trim() || apiKeyInput.startsWith('*')}
+                      className="px-2 py-1 rounded border border-primary bg-primary/20 text-primary racing-text text-[9px] sm:text-[10px] hover:bg-primary/30 transition-colors disabled:opacity-40 disabled:pointer-events-none flex items-center gap-1"
+                    >
+                      {isValidatingKey ? (
+                        <><Loader2 className="w-2.5 h-2.5 animate-spin" /> Checking...</>
+                      ) : (
+                        'Validate'
+                      )}
+                    </button>
+                    {isKeyValid && (
+                      <button
+                        onClick={handleClearKey}
+                        className="px-1.5 py-1 rounded border border-destructive/50 bg-destructive/10 text-destructive racing-text text-[9px] sm:text-[10px] hover:bg-destructive/20 transition-colors flex items-center gap-0.5"
+                        title="Clear API key"
+                      >
+                        <Trash2 className="w-2.5 h-2.5" />
+                      </button>
+                    )}
+                  </div>
+                  {keyError && (
+                    <div className="mt-0.5 text-[8px] text-red-400 racing-text">{keyError}</div>
+                  )}
+                </div>
+
+                {/* Model Select */}
+                <div className="py-0.5">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[9px] sm:text-[11px] text-muted-foreground racing-text">Model</span>
+                    <select
+                      value={selectedModel}
+                      onChange={(e) => handleModelChange(e.target.value)}
+                      disabled={!isKeyValid || availableModels.length === 0}
+                      className="px-2 py-1 rounded border border-border bg-card text-[10px] sm:text-xs text-foreground racing-text focus:border-primary focus:outline-none disabled:opacity-40 max-w-[180px]"
+                    >
+                      {availableModels.length === 0 ? (
+                        <option value="">{isKeyValid ? 'Loading models...' : 'Validate key first'}</option>
+                      ) : (
+                        availableModels.map((m) => (
+                          <option key={m.name} value={m.name}>
+                            {m.display_name}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </div>
+                  {isKeyValid && availableModels.length > 0 && (
+                    <div className="mt-0.5 text-[7px] text-muted-foreground/60 racing-text">
+                      Only multimodal (vision) models shown
+                    </div>
+                  )}
+                </div>
+
+                {/* Narration Interval */}
+                <div className="py-0.5">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[9px] sm:text-[11px] text-muted-foreground racing-text">Interval</span>
+                    <div className="flex items-center gap-0.5">
+                      <button
+                        onClick={() => handleIntervalChange(narrationInterval - 1)}
+                        disabled={narrationInterval <= 3}
+                        className="w-5 h-5 sm:w-6 sm:h-6 rounded border border-border bg-muted flex items-center justify-center text-foreground hover:border-primary/50 hover:bg-primary/10 transition-colors touch-feedback disabled:opacity-30 disabled:pointer-events-none"
+                      >
+                        <Minus className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
+                      </button>
+                      <input
+                        type="number"
+                        value={narrationInterval}
+                        onChange={(e) => handleIntervalChange(parseInt(e.target.value) || 8)}
+                        min={3}
+                        max={30}
+                        className="w-12 sm:w-14 h-5 sm:h-6 bg-card border border-border rounded px-1 text-center text-[10px] sm:text-xs text-foreground racing-number focus:border-primary focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                      />
+                      <button
+                        onClick={() => handleIntervalChange(narrationInterval + 1)}
+                        disabled={narrationInterval >= 30}
+                        className="w-5 h-5 sm:w-6 sm:h-6 rounded border border-border bg-muted flex items-center justify-center text-foreground hover:border-primary/50 hover:bg-primary/10 transition-colors touch-feedback disabled:opacity-30 disabled:pointer-events-none"
+                      >
+                        <Plus className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
+                      </button>
+                      <span className="text-[8px] sm:text-[10px] text-muted-foreground racing-text w-4 text-right">s</span>
+                    </div>
+                  </div>
+                  <div className="mt-0.5 text-[7px] text-muted-foreground/60 racing-text">
+                    Seconds between AI descriptions (3–30s)
+                  </div>
+                </div>
+
+                {/* Narration Toggle */}
+                <div className="py-0.5">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[9px] sm:text-[11px] text-muted-foreground racing-text">AI Narration</span>
+                    <button
+                      onClick={handleNarrationToggle}
+                      disabled={!isKeyValid || !selectedModel}
+                      className={`px-3 py-1.5 rounded border text-[10px] sm:text-xs racing-text transition-colors flex items-center gap-1.5 disabled:opacity-40 disabled:pointer-events-none ${
+                        narrationEnabled
+                          ? 'border-green-500 bg-green-500/20 text-green-400 hover:bg-green-500/30'
+                          : 'border-border bg-muted/30 text-muted-foreground hover:bg-muted/50'
+                      }`}
+                    >
+                      {narrationEnabled ? (
+                        <><Mic className="w-3 h-3" /> ON</>
+                      ) : (
+                        <><MicOff className="w-3 h-3" /> OFF</>
+                      )}
+                    </button>
+                  </div>
+                  {!isKeyValid && (
+                    <div className="mt-0.5 text-[7px] text-amber-400/80 racing-text">
+                      ⚠️ Validate an API key and select a model to enable narration
+                    </div>
+                  )}
+                  {narrationEnabled && (
+                    <div className="mt-0.5 text-[7px] text-green-400/80 racing-text">
+                      🎙️ Narration active — AI describes camera feed via browser TTS
+                    </div>
+                  )}
+                </div>
+              </CollapsibleGroup>
+
               {dynamicTuningGroups.map((group, i) => (
                 <CollapsibleGroup key={group.title} title={group.title} defaultOpen={i === 0}>
                   {group.params.map((param) => (

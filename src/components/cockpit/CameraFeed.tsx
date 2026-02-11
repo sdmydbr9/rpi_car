@@ -1,14 +1,17 @@
 import { useState } from "react";
-import { Video, VideoOff } from "lucide-react";
+import { Video, VideoOff, Mic } from "lucide-react";
 
 interface CameraFeedProps {
   isConnected: boolean;
   streamUrl?: string;
   isCameraEnabled?: boolean;
   onToggleCamera?: () => void;
+  narrationEnabled?: boolean;
+  narrationSpeaking?: boolean;
+  narrationLastText?: string;
 }
 
-export const CameraFeed = ({ isConnected, streamUrl, isCameraEnabled = true, onToggleCamera }: CameraFeedProps) => {
+export const CameraFeed = ({ isConnected, streamUrl, isCameraEnabled = true, onToggleCamera, narrationEnabled = false, narrationSpeaking = false, narrationLastText = '' }: CameraFeedProps) => {
   const [hasError, setHasError] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
 
@@ -81,6 +84,25 @@ export const CameraFeed = ({ isConnected, streamUrl, isCameraEnabled = true, onT
               <div className="absolute top-0.5 right-2 flex items-center gap-px">
                 <div className="w-1 h-1 rounded-full bg-destructive animate-pulse" />
                 <span className="text-[4px] sm:text-[5px] text-destructive racing-text">REC</span>
+              </div>
+            )}
+
+            {/* Narration indicator */}
+            {narrationEnabled && showStream && isLoaded && (
+              <div className="absolute bottom-1 left-1 flex items-center gap-0.5 bg-black/60 rounded px-1 py-0.5">
+                <Mic className={`w-2 h-2 sm:w-2.5 sm:h-2.5 ${narrationSpeaking ? 'text-green-400 animate-pulse' : 'text-primary/70'}`} />
+                <span className="text-[4px] sm:text-[5px] racing-text text-green-400/90 max-w-[80px] truncate">
+                  {narrationSpeaking ? 'SPEAKING' : 'AI ON'}
+                </span>
+              </div>
+            )}
+
+            {/* Narration text overlay */}
+            {narrationSpeaking && narrationLastText && showStream && isLoaded && (
+              <div className="absolute bottom-4 left-1 right-1 bg-black/70 rounded px-1.5 py-1">
+                <p className="text-[5px] sm:text-[7px] text-white/90 racing-text leading-relaxed">
+                  🤖 {narrationLastText}
+                </p>
               </div>
             )}
           </>

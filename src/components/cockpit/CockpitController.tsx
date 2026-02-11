@@ -11,7 +11,7 @@ import * as socketClient from "../../lib/socketClient";
 import { useAutoAcceleration } from "../../hooks/useAutoAcceleration";
 import type { SensorStatus } from "./ServiceLight";
 import { DEFAULT_TUNING, type TuningConstants } from "./SettingsDialog";
-import type { CameraSpecs } from "../../lib/socketClient";
+import type { CameraSpecs, NarrationConfig } from "../../lib/socketClient";
 
 interface ControlState {
   steeringAngle: number;
@@ -132,10 +132,60 @@ export const CockpitController = () => {
   const [visionFps, setVisionFps] = useState(0);
   const [userWantsVision, setUserWantsVision] = useState(false);
   const [cameraActualFps, setCameraActualFps] = useState(0);
+  // AI Narration state
+  const [narrationConfig, setNarrationConfig] = useState<NarrationConfig>({
+    provider: 'gemini',
+    api_key_set: false,
+    api_key_masked: '',
+    model: '',
+    interval: 8,
+    enabled: false,
+  });
+  const [narrationEnabled, setNarrationEnabled] = useState(false);
+  const [narrationSpeaking, setNarrationSpeaking] = useState(false);
+  const [narrationLastText, setNarrationLastText] = useState('');
+  const narrationUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const ttsUnlockedRef = useRef(false);
+  const [showAudioUnlockPrompt, setShowAudioUnlockPrompt] = useState(false);
   const autoAccelIntervalRef = useRef<number | null>(null);
   const connectionTimeoutRef = useRef<number | null>(null);
   const autoConnectAttemptedRef = useRef(false);
   const pendingGearRef = useRef<{ gear: string; ts: number } | null>(null);
+
+  // TTS Browser Unlock: Safari and Chrome require a user gesture before speechSynthesis.speak() works.
+  // We listen for the first touch/click and perform a silent TTS + AudioContext unlock.
+  useEffect(() => {
+    const unlockTTS = () => {
+      if (ttsUnlockedRef.current) return;
+      ttsUnlockedRef.current = true;
+      setShowAudioUnlockPrompt(false);
+      console.log('🔊 [TTS] Unlocking browser audio via user gesture');
+      // Silent utterance to satisfy browser autoplay policy
+      try {
+        const silentUtterance = new SpeechSynthesisUtterance('');
+        silentUtterance.volume = 0;
+        window.speechSynthesis.speak(silentUtterance);
+      } catch (e) {
+        console.warn('🔊 [TTS] Silent utterance failed:', e);
+      }
+      // Also unlock AudioContext for any future audio needs
+      try {
+        const ctx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+        ctx.resume().then(() => ctx.close());
+      } catch (e) {
+        console.warn('🔊 [TTS] AudioContext unlock failed:', e);
+      }
+      // Remove listeners after unlock
+      document.removeEventListener('touchstart', unlockTTS, true);
+      document.removeEventListener('click', unlockTTS, true);
+    };
+    document.addEventListener('touchstart', unlockTTS, { capture: true, once: true });
+    document.addEventListener('click', unlockTTS, { capture: true, once: true });
+    return () => {
+      document.removeEventListener('touchstart', unlockTTS, true);
+      document.removeEventListener('click', unlockTTS, true);
+    };
+  }, []);
 
   // Smart auto-connect: try localhost first, then fallback to server IP
   useEffect(() => {
@@ -259,6 +309,73 @@ export const CockpitController = () => {
     // Also explicitly request in case the connect event was missed
     socketClient.requestTuning();
 
+    // Subscribe to narration config sync from backend (fires on connect)
+    socketClient.onNarrationConfigSync((data: NarrationConfig) => {
+      console.log('🎙️ Narration config sync from backend:', data);
+      setNarrationConfig(data);
+      setNarrationEnabled(data.enabled);
+    });
+
+    // Subscribe to narration text events (AI descriptions) and play via browser TTS
+    socketClient.onNarrationText((data) => {
+      console.log('🎙️ Narration text received:', data.text);
+      setNarrationLastText(data.text);
+      setNarrationSpeaking(true);
+
+      // Show unlock prompt if TTS hasn't been unlocked yet via user gesture
+      if (!ttsUnlockedRef.current) {
+        setShowAudioUnlockPrompt(true);
+      }
+
+      // Cancel any in-progress speech
+      if (window.speechSynthesis.speaking) {
+        window.speechSynthesis.cancel();
+      }
+
+      // Create and play new utterance
+      const utterance = new SpeechSynthesisUtterance(data.text);
+      utterance.rate = 1.0;
+      utterance.pitch = 1.0;
+      utterance.volume = 1.0;
+      utterance.onend = () => {
+        setNarrationSpeaking(false);
+        socketClient.emitNarrationSpeakingDone();
+      };
+      utterance.onerror = (e) => {
+        // Don't treat 'interrupted' as a real error (happens when cancel() is called)
+        if ((e as SpeechSynthesisErrorEvent).error !== 'interrupted') {
+          console.warn('🎙️ TTS error:', (e as SpeechSynthesisErrorEvent).error);
+        }
+        setNarrationSpeaking(false);
+        socketClient.emitNarrationSpeakingDone();
+      };
+      narrationUtteranceRef.current = utterance;
+      window.speechSynthesis.speak(utterance);
+
+      // iOS Safari workaround: speechSynthesis pauses after ~15s if not "pumped"
+      // Periodically resume to keep it alive
+      const keepAlive = setInterval(() => {
+        if (window.speechSynthesis.speaking) {
+          window.speechSynthesis.pause();
+          window.speechSynthesis.resume();
+        } else {
+          clearInterval(keepAlive);
+        }
+      }, 10000);
+      utterance.onend = () => {
+        clearInterval(keepAlive);
+        setNarrationSpeaking(false);
+        socketClient.emitNarrationSpeakingDone();
+      };
+    });
+
+    // Subscribe to narration toggle response
+    socketClient.onNarrationToggleResponse((data) => {
+      if (data.status === 'ok') {
+        setNarrationEnabled(data.enabled);
+      }
+    });
+
     // Subscribe to telemetry updates
     // Note: throttle, brake, and steeringAngle are NOT updated from telemetry - they're controlled only by user input
     // This ensures continuous hold behavior works correctly (the server won't overwrite the UI state)
@@ -323,6 +440,9 @@ export const CockpitController = () => {
       if (data.camera_closest_confidence !== undefined) setCameraClosestConfidence(data.camera_closest_confidence);
       if (data.vision_fps !== undefined) setVisionFps(data.vision_fps);
       if (data.camera_actual_fps !== undefined) setCameraActualFps(data.camera_actual_fps);
+      // Update narration telemetry
+      if (data.narration_enabled !== undefined) setNarrationEnabled(data.narration_enabled);
+      if (data.narration_speaking !== undefined) setNarrationSpeaking(prev => prev || data.narration_speaking!);
       // Update live camera config from telemetry (for HUD badge only — does NOT touch tuning state)
       if (data.camera_resolution) setLiveCameraResolution(data.camera_resolution);
       if (data.camera_jpeg_quality !== undefined) setLiveCameraJpegQuality(data.camera_jpeg_quality);
@@ -331,6 +451,10 @@ export const CockpitController = () => {
 
     return () => {
       socketClient.onTelemetry(() => {}); // Unsubscribe
+      // Clean up TTS on unmount
+      if (window.speechSynthesis.speaking) {
+        window.speechSynthesis.cancel();
+      }
     };
   }, [isConnected, isEngineRunning]);
 
@@ -548,6 +672,16 @@ export const CockpitController = () => {
     setIsImmersiveView(prev => !prev);
   }, []);
 
+  const handleNarrationToggle = useCallback((enabled: boolean) => {
+    setNarrationEnabled(enabled);
+    socketClient.emitNarrationToggle(enabled);
+    // If disabling, stop any in-progress speech
+    if (!enabled && window.speechSynthesis.speaking) {
+      window.speechSynthesis.cancel();
+      setNarrationSpeaking(false);
+    }
+  }, []);
+
   // Use auto-acceleration hook for client-side auto-throttle
   useAutoAcceleration({
     enabled: isAutoMode,
@@ -559,6 +693,27 @@ export const CockpitController = () => {
 
   return (
     <>
+      {/* Audio Unlock Prompt - shown when narration text arrives but TTS hasn't been unlocked */}
+      {showAudioUnlockPrompt && (
+        <div 
+          className="fixed inset-0 z-[9998] flex items-center justify-center bg-background/70 backdrop-blur-sm cursor-pointer"
+          onClick={() => setShowAudioUnlockPrompt(false)}
+          onTouchStart={() => setShowAudioUnlockPrompt(false)}
+        >
+          <div className="flex flex-col items-center gap-3 p-6 rounded-xl bg-card border border-primary/50 shadow-lg max-w-xs text-center">
+            <div className="w-16 h-16 rounded-full bg-primary/20 border border-primary/50 flex items-center justify-center animate-pulse">
+              <svg className="w-8 h-8 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+                <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+              </svg>
+            </div>
+            <div className="text-sm racing-text text-foreground font-bold">TAP TO ENABLE AUDIO</div>
+            <div className="text-xs text-muted-foreground">Browser requires a tap to allow AI voice narration</div>
+          </div>
+        </div>
+      )}
+
       {/* Immersive HUD Overlay */}
       <ImmersiveHUD
         isOpen={isImmersiveView}
@@ -588,6 +743,9 @@ export const CockpitController = () => {
         isCameraEnabled={isCameraEnabled}
         userWantsVision={userWantsVision}
         onToggleCamera={handleCameraToggle}
+        narrationEnabled={narrationEnabled}
+        narrationSpeaking={narrationSpeaking}
+        narrationLastText={narrationLastText}
       />
       
       <div className="h-[100dvh] w-full flex flex-col overflow-hidden">
@@ -598,6 +756,10 @@ export const CockpitController = () => {
           onTuningChange={setTuning}
           backendDefaults={backendDefaults}
           cameraSpecs={cameraSpecs}
+          narrationConfig={narrationConfig}
+          narrationEnabled={narrationEnabled}
+          narrationSpeaking={narrationSpeaking}
+          onNarrationToggle={handleNarrationToggle}
         />
         
         {/* Main Content - Fixed Layout (No Responsive Changes) */}
@@ -607,7 +769,7 @@ export const CockpitController = () => {
             {/* Camera Feed */}
             <div className="h-[30%] min-h-0 p-0.5 border-none border-b border-border/30">
               <div onClick={handleImmersiveViewToggle} className="cursor-pointer h-full w-full">
-                <CameraFeed isConnected={isConnected} streamUrl={streamUrl} isCameraEnabled={isCameraEnabled} onToggleCamera={handleCameraToggle} />
+                <CameraFeed isConnected={isConnected} streamUrl={streamUrl} isCameraEnabled={isCameraEnabled} onToggleCamera={handleCameraToggle} narrationEnabled={narrationEnabled} narrationSpeaking={narrationSpeaking} narrationLastText={narrationLastText} />
               </div>
             </div>
             

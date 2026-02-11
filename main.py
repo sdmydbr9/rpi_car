@@ -24,6 +24,7 @@ from sensors import SensorSystem
 from motor import CarSystem
 from autopilot import AutoPilot, State
 from vision import VisionSystem
+from narration import NarrationEngine, validate_key as narration_validate_key, list_multimodal_models
 
 # ==========================================
 # ⚙️ CONFIGURATION
@@ -132,6 +133,32 @@ def _save_camera_config(config):
         print(f"💾 [Camera Config] Saved config to {CAMERA_CONFIG_FILE}")
     except Exception as e:
         print(f"⚠️  [Camera Config] Failed to save config: {e}")
+
+# --- NARRATION CONFIG PERSISTENCE ---
+NARRATION_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.narration_config.json')
+
+def _load_narration_config():
+    """Load persisted narration configuration from JSON file."""
+    try:
+        if os.path.exists(NARRATION_CONFIG_FILE):
+            with open(NARRATION_CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+            print(f"\u2705 [Narration Config] Loaded persisted config")
+            return config
+    except Exception as e:
+        print(f"\u26a0\ufe0f  [Narration Config] Failed to load: {e}")
+    return {'provider': 'gemini', 'api_key': '', 'model': '', 'interval': 8, 'enabled': False, 'models': []}
+
+def _save_narration_config(config):
+    """Save narration configuration to JSON file for persistence."""
+    try:
+        with open(NARRATION_CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=2)
+        print(f"\U0001f4be [Narration Config] Saved")
+    except Exception as e:
+        print(f"\u26a0\ufe0f  [Narration Config] Failed to save: {e}")
+
+_narration_config = _load_narration_config()
 
 # Load persisted camera config (overrides defaults)
 _persisted_camera_config = _load_camera_config()
@@ -276,6 +303,30 @@ except Exception as e:
     vision_system = None
     VISION_AVAILABLE = False
     print(f"⚠️  Vision system initialization failed: {e}")
+
+# ==========================================
+# 🎙️ NARRATION ENGINE SETUP
+# ==========================================
+narration_engine = NarrationEngine()
+narration_engine.set_camera(picam2, vision_system)
+
+# Configure from persisted settings if API key exists
+if _narration_config.get('api_key'):
+    narration_engine.configure(
+        api_key=_narration_config['api_key'],
+        model_name=_narration_config.get('model', ''),
+        interval=_narration_config.get('interval', 8),
+    )
+    print(f"\U0001f399\ufe0f [Narration] Engine configured from persisted config")
+
+def _on_narration_text(text: str):
+    """Callback when narration text is received from AI."""
+    car_state["narration_speaking"] = True
+    with app.app_context():
+        socketio.emit('narration_text', {'text': text, 'timestamp': time.time()})
+    print(f"\U0001f399\ufe0f [Narration] Broadcast: {text[:60]}...")
+
+narration_engine.set_callback(_on_narration_text)
 
 def _reconfigure_camera(resolution_str, framerate):
     """Reconfigure picam2 with new resolution and framerate. Must hold _camera_lock.
@@ -544,6 +595,12 @@ car_state = {
     "camera_resolution": CAMERA_DEFAULT_RESOLUTION,  # Current resolution setting (WxH format, e.g. '640x480')
     "camera_jpeg_quality": CAMERA_JPEG_QUALITY,      # JPEG quality (1-100)
     "camera_framerate": CAMERA_FRAMERATE,            # Camera framerate (FPS)
+    # 🎙️ AI NARRATION
+    "narration_enabled": _narration_config.get('enabled', False),
+    "narration_provider": _narration_config.get('provider', 'gemini'),
+    "narration_model": _narration_config.get('model', ''),
+    "narration_interval": _narration_config.get('interval', 8),
+    "narration_speaking": False,  # True when TTS is playing on client
 }
 
 # ==========================================
@@ -1595,6 +1652,32 @@ def on_connect():
     })
     # Send camera specs for dynamic resolution dropdown
     emit('camera_specs_sync', camera_specs)
+    # Send narration config (mask API key for security)
+    _masked_narration = {
+        'provider': _narration_config.get('provider', 'gemini'),
+        'api_key_set': bool(_narration_config.get('api_key', '')),
+        'api_key_masked': ('*' * 8 + _narration_config.get('api_key', '')[-4:]) if len(_narration_config.get('api_key', '')) > 4 else '',
+        'model': _narration_config.get('model', ''),
+        'interval': _narration_config.get('interval', 8),
+        'enabled': car_state.get('narration_enabled', False),
+        'models': _narration_config.get('models', []),
+    }
+    emit('narration_config_sync', _masked_narration)
+    # Refresh models list in background if key is set
+    _client_sid = request.sid
+    if _narration_config.get('api_key'):
+        def _refresh_models_async(client_id):
+            try:
+                fresh_models = list_multimodal_models(_narration_config['api_key'])
+                if fresh_models:
+                    _narration_config['models'] = fresh_models
+                    _save_narration_config(_narration_config)
+                    _updated = {**_masked_narration, 'models': fresh_models}
+                    socketio.emit('narration_config_sync', _updated, to=client_id)
+                    print(f"\u2705 [Narration] Refreshed {len(fresh_models)} models for client")
+            except Exception as e:
+                print(f"\u26a0\ufe0f [Narration] Background model refresh failed: {e}")
+        threading.Thread(target=_refresh_models_async, args=(_client_sid,), daemon=True).start()
 
 @socketio.on('disconnect')
 def on_disconnect():
@@ -1804,6 +1887,15 @@ def on_camera_toggle(data):
         if VISION_AVAILABLE and vision_system is not None:
             vision_system.active = False
             print(f"📷 VISION: Disabled (camera off)")
+        # Auto-disable narration when camera is off
+        if car_state["narration_enabled"]:
+            narration_engine.stop()
+            car_state["narration_enabled"] = False
+            car_state["narration_speaking"] = False
+            _narration_config['enabled'] = False
+            _save_narration_config(_narration_config)
+            print(f"\U0001f399\ufe0f NARRATION: Disabled (camera off)")
+            emit('narration_toggle_response', {'status': 'ok', 'enabled': False})
     
     emit('camera_response', {'status': 'ok', 'camera_enabled': car_state["camera_enabled"]})
 
@@ -2006,6 +2098,153 @@ def on_state_request(data):
     """Send current car state to client"""
     emit('state_response', car_state)
 
+# ==========================================
+# 🎙️ NARRATION SOCKET EVENTS
+# ==========================================
+
+@socketio.on('narration_validate_key')
+def on_narration_validate_key(data):
+    """Validate an AI provider API key and return available models.
+    Runs in background thread to avoid blocking the SocketIO thread."""
+    provider = data.get('provider', 'gemini')
+    api_key = data.get('api_key', '')
+    client_id = request.sid  # Get the client ID for this connection
+    
+    def validate_async():
+        """Background validation task."""
+        print(f"\n\U0001f399\ufe0f [Narration] Validating {provider} API key (client: {client_id[:8]}...)")
+        
+        if provider != 'gemini':
+            socketio.emit('narration_key_result', {'valid': False, 'error': f'{provider} is not supported yet', 'models': []}, to=client_id)
+            return
+        
+        if not api_key:
+            socketio.emit('narration_key_result', {'valid': False, 'error': 'API key is empty', 'models': []}, to=client_id)
+            return
+        
+        # Validate (blocking, but in background thread)
+        try:
+            is_valid = narration_validate_key(api_key)
+            if is_valid:
+                print(f"✓ [Narration] Key valid, fetching multimodal models...")
+                models = list_multimodal_models(api_key)
+                # Save API key and models to config immediately on successful validation
+                _narration_config['api_key'] = api_key
+                _narration_config['provider'] = provider
+                _narration_config['models'] = models
+                _save_narration_config(_narration_config)
+                print(f"\u2705 [Narration] Key valid, {len(models)} multimodal models available")
+                socketio.emit('narration_key_result', {'valid': True, 'models': models, 'error': ''}, to=client_id)
+            else:
+                print(f"❌ [Narration] Key validation failed")
+                socketio.emit('narration_key_result', {'valid': False, 'models': [], 'error': 'Invalid API key'}, to=client_id)
+        except Exception as e:
+            print(f"❌ [Narration] Validation error: {e}")
+            socketio.emit('narration_key_result', {'valid': False, 'models': [], 'error': f'Validation failed: {str(e)}'}, to=client_id)
+    
+    # Run validation in background thread
+    validation_thread = threading.Thread(target=validate_async, daemon=True)
+    validation_thread.start()
+
+@socketio.on('narration_config_update')
+def on_narration_config_update(data):
+    """Update narration configuration (model, interval, etc)."""
+    print(f"\n\U0001f399\ufe0f [Narration] Config update: {data}")
+    
+    if 'model' in data:
+        _narration_config['model'] = data['model']
+        car_state['narration_model'] = data['model']
+    if 'interval' in data:
+        _narration_config['interval'] = max(3, min(30, int(data['interval'])))
+        car_state['narration_interval'] = _narration_config['interval']
+    if 'provider' in data:
+        _narration_config['provider'] = data['provider']
+        car_state['narration_provider'] = data['provider']
+    
+    _save_narration_config(_narration_config)
+    
+    # Reconfigure the engine
+    if _narration_config.get('api_key') and _narration_config.get('model'):
+        narration_engine.configure(
+            api_key=_narration_config['api_key'],
+            model_name=_narration_config['model'],
+            interval=_narration_config.get('interval', 8),
+        )
+    
+    emit('narration_config_response', {'status': 'ok'})
+
+@socketio.on('narration_toggle')
+def on_narration_toggle(data):
+    """Toggle AI narration on/off."""
+    desired = data.get('enabled', not car_state['narration_enabled'])
+    print(f"\n\U0001f399\ufe0f [Narration] Toggle: {desired}")
+    
+    if desired:
+        # Check prerequisites
+        if not _narration_config.get('api_key'):
+            emit('narration_toggle_response', {'status': 'error', 'message': 'No API key configured', 'enabled': False})
+            return
+        if not _narration_config.get('model'):
+            emit('narration_toggle_response', {'status': 'error', 'message': 'No model selected', 'enabled': False})
+            return
+        if not car_state.get('camera_enabled'):
+            emit('narration_toggle_response', {'status': 'error', 'message': 'Camera must be enabled first', 'enabled': False})
+            return
+        
+        # Configure and start
+        narration_engine.configure(
+            api_key=_narration_config['api_key'],
+            model_name=_narration_config['model'],
+            interval=_narration_config.get('interval', 8),
+        )
+        narration_engine.set_camera(picam2, vision_system)
+        narration_engine.start()
+        car_state['narration_enabled'] = True
+        _narration_config['enabled'] = True
+        _save_narration_config(_narration_config)
+        emit('narration_toggle_response', {'status': 'ok', 'enabled': True})
+    else:
+        narration_engine.stop()
+        car_state['narration_enabled'] = False
+        car_state['narration_speaking'] = False
+        _narration_config['enabled'] = False
+        _save_narration_config(_narration_config)
+        emit('narration_toggle_response', {'status': 'ok', 'enabled': False})
+
+@socketio.on('narration_speaking_done')
+def on_narration_speaking_done(data):
+    """Client reports TTS playback finished."""
+    car_state['narration_speaking'] = False
+
+@socketio.on('narration_key_clear')
+def on_narration_key_clear(data):
+    """Clear the stored API key and disable narration."""
+    print(f"\n\U0001f399\ufe0f [Narration] API key clear requested")
+    # Stop narration if running
+    if car_state.get('narration_enabled'):
+        narration_engine.stop()
+        car_state['narration_enabled'] = False
+        car_state['narration_speaking'] = False
+    # Clear config
+    _narration_config['api_key'] = ''
+    _narration_config['model'] = ''
+    _narration_config['models'] = []
+    _narration_config['enabled'] = False
+    _save_narration_config(_narration_config)
+    # Broadcast cleared config to all clients
+    _cleared = {
+        'provider': _narration_config.get('provider', 'gemini'),
+        'api_key_set': False,
+        'api_key_masked': '',
+        'model': '',
+        'interval': _narration_config.get('interval', 8),
+        'enabled': False,
+        'models': [],
+    }
+    socketio.emit('narration_config_sync', _cleared)
+    emit('narration_key_clear_response', {'status': 'ok'})
+    print(f"\u2705 [Narration] API key cleared and narration disabled")
+
 # Heartbeat monitoring thread
 def heartbeat_monitor():
     """Monitor client heartbeat - ping clients and check for pong responses"""
@@ -2107,6 +2346,9 @@ def telemetry_broadcast():
                 "camera_jpeg_quality": car_state["camera_jpeg_quality"],
                 "camera_framerate": car_state["camera_framerate"],
                 "camera_actual_fps": car_state["camera_actual_fps"],
+                # 🎙️ Narration telemetry
+                "narration_enabled": car_state["narration_enabled"],
+                "narration_speaking": car_state["narration_speaking"],
             }
             
             socketio.emit('telemetry_update', telemetry_data)
@@ -2300,6 +2542,7 @@ if __name__ == "__main__":
         socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
     finally:
         # Safety cleanup
+        narration_engine.stop()
         autopilot.stop()
         car_system.cleanup()
         try:
