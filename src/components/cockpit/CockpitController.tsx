@@ -704,11 +704,9 @@ export const CockpitController = () => {
           className="fixed inset-0 z-[9998] flex items-center justify-center bg-background/70 backdrop-blur-sm cursor-pointer"
           onClick={() => {
             unlockTTS();
-            setShowAudioUnlockPrompt(false);
           }}
           onTouchStart={() => {
             unlockTTS();
-            setShowAudioUnlockPrompt(false);
           }}
         >
           <div className="flex flex-col items-center gap-3 p-6 rounded-xl bg-card border border-primary/50 shadow-lg max-w-xs text-center">
