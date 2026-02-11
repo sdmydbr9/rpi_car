@@ -458,6 +458,25 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
         
         console.log('📷 [CV Mode] Enabled - Automatically setting high-quality video: 1920x1080 @ 60fps, 70% quality');
         
+        // Immediately send camera config update to backend
+        const cameraConfig = {
+          resolution: '1920x1080',
+          jpeg_quality: 70,
+          framerate: 60,
+        };
+        socketClient.emitCameraConfigUpdate(cameraConfig);
+        
+        // Persist to localStorage
+        localStorage.setItem('cameraConfig', JSON.stringify({
+          resolution: '1920x1080',
+          jpeg_quality: 70,
+          framerate: 60,
+          vision_enabled: true,
+        }));
+        
+        // Toggle vision mode
+        socketClient.emitVisionToggle();
+        
         // Notify the user about automatic quality adjustment
         toast.info('🎥 CV Mode Enabled', {
           description: 'Video quality automatically set to 1920×1080 @ 60fps, 70% quality for optimal computer vision performance.',
@@ -474,6 +493,25 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
             CAMERA_FRAMERATE: originalCameraSettingsRef.current.framerate,
           };
           console.log('📷 [CV Mode] Disabled - Restoring original camera settings:', originalCameraSettingsRef.current);
+          
+          // Immediately send camera config update to backend
+          const cameraConfig = {
+            resolution: originalCameraSettingsRef.current.resolution,
+            jpeg_quality: originalCameraSettingsRef.current.jpeg_quality,
+            framerate: originalCameraSettingsRef.current.framerate,
+          };
+          socketClient.emitCameraConfigUpdate(cameraConfig);
+          
+          // Persist to localStorage
+          localStorage.setItem('cameraConfig', JSON.stringify({
+            resolution: originalCameraSettingsRef.current.resolution,
+            jpeg_quality: originalCameraSettingsRef.current.jpeg_quality,
+            framerate: originalCameraSettingsRef.current.framerate,
+            vision_enabled: false,
+          }));
+          
+          // Toggle vision mode
+          socketClient.emitVisionToggle();
           
           // Notify the user about restoration
           toast.info('🎥 CV Mode Disabled', {
