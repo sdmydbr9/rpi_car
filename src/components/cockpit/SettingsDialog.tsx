@@ -186,6 +186,13 @@ const TUNING_GROUPS: { title: string; params: ParamConfig[] }[] = [
   },
 ];
 
+// CV mode high-quality camera settings constants
+const CV_HIGH_QUALITY_SETTINGS = {
+  resolution: '1920x1080',
+  jpeg_quality: 70,
+  framerate: 60,
+} as const;
+
 interface SettingsDialogProps {
   tuning: TuningConstants;
   onTuningChange: (tuning: TuningConstants) => void;
@@ -389,13 +396,6 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
   const [isOpen, setIsOpen] = useState(false);
   const [synced, setSynced] = useState(false);
   
-  // CV mode high-quality camera settings constants
-  const CV_HIGH_QUALITY_SETTINGS = {
-    resolution: '1920x1080',
-    jpeg_quality: 70,
-    framerate: 60,
-  } as const;
-  
   // Store original camera settings before CV mode is enabled
   const originalCameraSettingsRef = useRef<{
     resolution: string;
@@ -475,7 +475,7 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
         
         console.log(`📷 [CV Mode] Enabled - Automatically setting high-quality video: ${CV_HIGH_QUALITY_SETTINGS.resolution} @ ${CV_HIGH_QUALITY_SETTINGS.framerate}fps, ${CV_HIGH_QUALITY_SETTINGS.jpeg_quality}% quality`);
         
-        // Immediately send camera config update to backend
+        // Immediately send camera config update to backend (for video quality settings)
         socketClient.emitCameraConfigUpdate(CV_HIGH_QUALITY_SETTINGS);
         
         // Persist to localStorage
@@ -484,7 +484,7 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
           vision_enabled: true,
         });
         
-        // Toggle vision mode
+        // Toggle vision mode on (separate from camera config - activates CV processing)
         socketClient.emitVisionToggle();
         
         // Notify the user about automatic quality adjustment
@@ -506,7 +506,7 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
           };
           console.log('📷 [CV Mode] Disabled - Restoring original camera settings:', originalSettings);
           
-          // Immediately send camera config update to backend
+          // Immediately send camera config update to backend (restore video quality)
           socketClient.emitCameraConfigUpdate(originalSettings);
           
           // Persist to localStorage
@@ -515,7 +515,7 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
             vision_enabled: false,
           });
           
-          // Toggle vision mode
+          // Toggle vision mode off (separate from camera config - deactivates CV processing)
           socketClient.emitVisionToggle();
           
           // Notify the user about restoration
@@ -531,7 +531,7 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
       onTuningChange(updatedTuning);
       setSynced(false);
     },
-    [tuning, onTuningChange, CV_HIGH_QUALITY_SETTINGS, persistCameraConfig]
+    [tuning, onTuningChange, persistCameraConfig]
   );
 
   const sendTuningToBackend = useCallback((t: TuningConstants) => {
