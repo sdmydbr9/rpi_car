@@ -107,6 +107,17 @@ export function connectToServer(serverIp: string, port: number = 5000): Promise<
       console.log(`[Socket] 🎙️ Narration toggle response:`, data);
       if (narrationToggleResponseCallback) narrationToggleResponseCallback(data);
     });
+
+    // Register Kokoro TTS event listeners at connect time so they persist
+    socket.on('kokoro_validation_result', (data: KokoroValidationResult) => {
+      console.log(`[Socket] 🎤 Kokoro validation result:`, data);
+      if (kokoroValidationResultCallback) kokoroValidationResultCallback(data);
+    });
+
+    socket.on('kokoro_config_response', (data: { status: string; message?: string }) => {
+      console.log(`[Socket] 🎤 Kokoro config response:`, data);
+      if (kokoroConfigResponseCallback) kokoroConfigResponseCallback(data);
+    });
   });
 }
 
@@ -290,6 +301,57 @@ export function emitNarrationKeyClear(): void {
   if (socket && socket.connected) {
     console.log(`[UI Control] 🎙️ NARRATION: Clear API key`);
     socket.emit('narration_key_clear', {});
+  }
+}
+
+// ==========================================
+// 🎤 KOKORO TTS SOCKET EVENTS
+// ==========================================
+
+export interface KokoroValidationResult {
+  valid: boolean;
+  voices: string[];
+  error: string | null;
+}
+
+let kokoroValidationResultCallback: ((data: KokoroValidationResult) => void) | null = null;
+let kokoroConfigResponseCallback: ((data: { status: string; message?: string }) => void) | null = null;
+
+/**
+ * Subscribe to Kokoro API validation results.
+ * The socket listener is registered at connect time in connectToServer().
+ * This function just sets the callback.
+ */
+export function onKokoroValidationResult(callback: (data: KokoroValidationResult) => void): void {
+  kokoroValidationResultCallback = callback;
+}
+
+/**
+ * Subscribe to Kokoro config response events.
+ * The socket listener is registered at connect time in connectToServer().
+ * This function just sets the callback.
+ */
+export function onKokoroConfigResponse(callback: (data: { status: string; message?: string }) => void): void {
+  kokoroConfigResponseCallback = callback;
+}
+
+/**
+ * Validate Kokoro TTS API connection and fetch available voices
+ */
+export function emitKokoroValidateApi(ip: string): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎤 KOKORO: Validating API at ${ip}`);
+    socket.emit('kokoro_validate_api', { ip });
+  }
+}
+
+/**
+ * Update Kokoro TTS configuration (enable/disable, IP, voice)
+ */
+export function emitKokoroConfigUpdate(config: { kokoro_enabled?: boolean; kokoro_ip?: string; kokoro_voice?: string }): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎤 KOKORO CONFIG UPDATE:`, config);
+    socket.emit('kokoro_config_update', config);
   }
 }
 

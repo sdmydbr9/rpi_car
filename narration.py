@@ -10,6 +10,7 @@ import time
 import cv2
 import numpy as np
 from tts_local import get_tts_synthesizer
+from kokoro_client import get_kokoro_client
 
 # ==========================================
 # 🔑 API KEY VALIDATION
@@ -203,6 +204,10 @@ class NarrationEngine:
         self._on_narration_error = None  # callback(error: str)
         self._lock = threading.Lock()
         self._play_local_tts = True  # Always play audio on Pi's headphone jack by default
+        # Kokoro TTS configuration
+        self._kokoro_enabled = False
+        self._kokoro_ip: str = ""
+        self._kokoro_voice: str = ""
     
     def configure(self, api_key: str, model_name: str,
                   interval: float = 90.0, prompt: str = DEFAULT_PROMPT):
@@ -219,6 +224,23 @@ class NarrationEngine:
             self._play_local_tts = enabled
         status = "enabled" if enabled else "disabled"
         print(f"🔊 [Narration] Local TTS playback {status}")
+    
+    def set_kokoro_config(self, ip_address: str | None, voice: str | None):
+        """Configure Kokoro TTS (remote FastAPI server).
+        
+        Pass None for either parameter to disable Kokoro.
+        """
+        with self._lock:
+            if ip_address and voice:
+                self._kokoro_enabled = True
+                self._kokoro_ip = ip_address
+                self._kokoro_voice = voice
+                print(f"🎤 [Narration] Kokoro enabled - IP: {ip_address}, Voice: {voice}")
+            else:
+                self._kokoro_enabled = False
+                self._kokoro_ip = ""
+                self._kokoro_voice = ""
+                print(f"🎤 [Narration] Kokoro disabled - will fallback to local TTS")
     
     def set_camera(self, picam2, vision_system):
         """Set camera references for frame capture."""
@@ -273,6 +295,10 @@ class NarrationEngine:
                     prompt = self._prompt
                     picam2 = self._picam2
                     vision_system = self._vision_system
+                    kokoro_enabled = self._kokoro_enabled
+                    kokoro_ip = self._kokoro_ip
+                    kokoro_voice = self._kokoro_voice
+                    play_local_tts = self._play_local_tts
                 
                 # Capture frame
                 jpeg_bytes = capture_frame_as_jpeg(picam2, vision_system)
@@ -294,8 +320,21 @@ class NarrationEngine:
                     consecutive_errors = 0
                     print(f"⏱️ [Narration] Response in {elapsed:.1f}s")
                     
-                    # Play audio on Pi's headphone jack if enabled
-                    if self._play_local_tts:
+                    # Play audio - try Kokoro first, fallback to local TTS
+                    kokoro_success = False
+                    if kokoro_enabled and kokoro_ip and kokoro_voice:
+                        # Try Kokoro first
+                        print(f"🎤 [Narration] Attempting Kokoro TTS at {kokoro_ip}...")
+                        kokoro = get_kokoro_client()
+                        kokoro_success = kokoro.synthesize_and_stream(
+                            kokoro_ip, text, kokoro_voice
+                        )
+                        if not kokoro_success:
+                            print(f"⚠️  [Narration] Kokoro synthesis failed, falling back to local TTS")
+                    
+                    # Fallback to local TTS if Kokoro not enabled or failed
+                    if not kokoro_success and play_local_tts:
+                        print(f"🔊 [Narration] Using local TTS...")
                         tts = get_tts_synthesizer()
                         tts.speak(text)
                 elif not text:

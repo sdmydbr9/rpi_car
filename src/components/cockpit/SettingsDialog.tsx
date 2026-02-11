@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
 import { Settings, X, Minus, Plus, ChevronDown, ChevronRight, HelpCircle, Loader2, Check, Eye, EyeOff, Mic, MicOff, Trash2 } from "lucide-react";
 import * as socketClient from "../../lib/socketClient";
-import type { CameraSpecs, NarrationConfig, NarrationModel, NarrationKeyResult } from "../../lib/socketClient";
+import type { CameraSpecs, NarrationConfig, NarrationModel, NarrationKeyResult, KokoroValidationResult } from "../../lib/socketClient";
 import { toast } from "@/components/ui/sonner";
 
 export interface TuningConstants {
@@ -411,6 +411,14 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
   const [narrationInterval, setNarrationInterval] = useState(narrationConfig?.interval || 90);
   const [keyError, setKeyError] = useState('');
 
+  // Kokoro TTS local state
+  const [kokoroEnabled, setKokoroEnabled] = useState(false);
+  const [kokoroIp, setKokoroIp] = useState('');
+  const [kokoroVoice, setKokoroVoice] = useState('');
+  const [availableKokoroVoices, setAvailableKokoroVoices] = useState<string[]>([]);
+  const [isValidatingKokoro, setIsValidatingKokoro] = useState(false);
+  const [kokoroError, setKokoroError] = useState('');
+
   // Sync narration config from backend when it changes
   useEffect(() => {
     if (narrationConfig) {
@@ -427,6 +435,12 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
       // Populate models from persisted backend data
       if (narrationConfig.models && narrationConfig.models.length > 0) {
         setAvailableModels(narrationConfig.models);
+      }
+      // Load Kokoro settings from narrationConfig
+      if ('kokoro_enabled' in narrationConfig) {
+        setKokoroEnabled((narrationConfig as any).kokoro_enabled || false);
+        setKokoroIp((narrationConfig as any).kokoro_ip || '');
+        setKokoroVoice((narrationConfig as any).kokoro_voice || '');
       }
     }
   }, [narrationConfig]);
@@ -465,6 +479,49 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
       if (data.status === 'error' && data.message) {
         toast.error('🎙️ Narration Error', {
           description: data.message,
+          duration: 4000,
+        });
+      }
+    });
+
+    // Subscribe to Kokoro validation results
+    socketClient.onKokoroValidationResult((data: KokoroValidationResult) => {
+      console.log('🎤 SettingsDialog received Kokoro validation result:', data);
+      setIsValidatingKokoro(false);
+      if (data.valid && data.voices && data.voices.length > 0) {
+        setAvailableKokoroVoices(data.voices);
+        setKokoroError('');
+        toast.success('🎤 Kokoro API Valid', {
+          description: `${data.voices.length} voices available`,
+          duration: 3000,
+        });
+        // Auto-select first voice if none selected
+        if (data.voices.length > 0 && !kokoroVoice) {
+          setKokoroVoice(data.voices[0]);
+          socketClient.emitKokoroConfigUpdate({
+            kokoro_enabled: true,
+            kokoro_ip: kokoroIp,
+            kokoro_voice: data.voices[0],
+          });
+        }
+      } else {
+        setAvailableKokoroVoices([]);
+        setKokoroError(data.error || 'Failed to validate Kokoro API');
+        toast.error('❌ Kokoro API Invalid', {
+          description: data.error || 'Could not connect to Kokoro API',
+          duration: 4000,
+        });
+      }
+    });
+
+    socketClient.onKokoroConfigResponse((data) => {
+      if (data.status === 'ok') {
+        toast.success('🎤 Kokoro Config Saved', {
+          duration: 2000,
+        });
+      } else {
+        toast.error('🎤 Kokoro Config Error', {
+          description: data.message || 'Failed to save Kokoro configuration',
           duration: 4000,
         });
       }
@@ -509,6 +566,34 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
     setNarrationInterval(clamped);
     socketClient.emitNarrationConfigUpdate({ interval: clamped });
   }, []);
+
+  const handleKokoroValidateApi = useCallback(() => {
+    if (!kokoroIp.trim()) {
+      setKokoroError('Please enter a Kokoro API address');
+      return;
+    }
+    setIsValidatingKokoro(true);
+    setKokoroError('');
+    socketClient.emitKokoroValidateApi(kokoroIp.trim());
+  }, [kokoroIp]);
+
+  const handleKokoroVoiceChange = useCallback((voice: string) => {
+    setKokoroVoice(voice);
+    socketClient.emitKokoroConfigUpdate({
+      kokoro_enabled: kokoroEnabled,
+      kokoro_ip: kokoroIp,
+      kokoro_voice: voice,
+    });
+  }, [kokoroEnabled, kokoroIp]);
+
+  const handleKokoroToggle = useCallback((enabled: boolean) => {
+    setKokoroEnabled(enabled);
+    socketClient.emitKokoroConfigUpdate({
+      kokoro_enabled: enabled,
+      kokoro_ip: kokoroIp,
+      kokoro_voice: kokoroVoice,
+    });
+  }, [kokoroIp, kokoroVoice]);
 
   // Store original camera settings before CV mode is enabled
   const originalCameraSettingsRef = useRef<{
@@ -936,6 +1021,89 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
                     </div>
                   )}
                 </div>
+
+                {/* Kokoro TTS Settings */}
+                <div className="py-0.5 border-t border-border/30 mt-1 pt-1">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[9px] sm:text-[11px] text-muted-foreground racing-text">🎤 Kokoro TTS</span>
+                    <button
+                      onClick={() => handleKokoroToggle(!kokoroEnabled)}
+                      disabled={!availableKokoroVoices.length}
+                      className={`px-3 py-1.5 rounded border text-[10px] sm:text-xs racing-text transition-colors disabled:opacity-40 disabled:pointer-events-none ${
+                        kokoroEnabled
+                          ? 'border-purple-500 bg-purple-500/20 text-purple-400 hover:bg-purple-500/30'
+                          : 'border-border bg-muted/30 text-muted-foreground hover:bg-muted/50'
+                      }`}
+                    >
+                      {kokoroEnabled ? 'ON' : 'OFF'}
+                    </button>
+                  </div>
+                  <div className="mt-0.5 text-[7px] text-muted-foreground/60 racing-text">
+                    Remote TTS server for enhanced speech synthesis (optional — local TTS fallback)
+                  </div>
+                </div>
+
+                {/* Kokoro API Address */}
+                <div className="py-0.5">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[9px] sm:text-[11px] text-muted-foreground racing-text">API Address</span>
+                    {availableKokoroVoices.length > 0 && (
+                      <span className="flex items-center gap-0.5 text-[8px] text-green-400 racing-text">
+                        <Check className="w-2.5 h-2.5" /> Connected
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1 mt-0.5">
+                    <input
+                      type="text"
+                      value={kokoroIp}
+                      onChange={(e) => {
+                        setKokoroIp(e.target.value);
+                        setKokoroError('');
+                        setAvailableKokoroVoices([]);
+                      }}
+                      placeholder="192.169.29.105:8880"
+                      className="flex-1 h-6 bg-card border border-border rounded px-2 text-[10px] sm:text-xs text-foreground racing-text focus:border-primary focus:outline-none placeholder:text-muted-foreground/50"
+                    />
+                    <button
+                      onClick={handleKokoroValidateApi}
+                      disabled={isValidatingKokoro || !kokoroIp.trim()}
+                      className="px-2 py-1 rounded border border-purple-500 bg-purple-500/20 text-purple-400 racing-text text-[9px] sm:text-[10px] hover:bg-purple-500/30 transition-colors disabled:opacity-40 disabled:pointer-events-none flex items-center gap-1 whitespace-nowrap"
+                    >
+                      {isValidatingKokoro ? (
+                        <><Loader2 className="w-2.5 h-2.5 animate-spin" /> Validating...</>
+                      ) : (
+                        'Validate'
+                      )}
+                    </button>
+                  </div>
+                  {kokoroError && (
+                    <div className="mt-0.5 text-[8px] text-red-400 racing-text">{kokoroError}</div>
+                  )}
+                </div>
+
+                {/* Kokoro Voice Selection */}
+                {availableKokoroVoices.length > 0 && (
+                  <div className="py-0.5">
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-[9px] sm:text-[11px] text-muted-foreground racing-text">Voice</span>
+                      <select
+                        value={kokoroVoice}
+                        onChange={(e) => handleKokoroVoiceChange(e.target.value)}
+                        className="px-2 py-1 rounded border border-border bg-card text-[10px] sm:text-xs text-foreground racing-text focus:border-primary focus:outline-none max-w-[180px]"
+                      >
+                        {availableKokoroVoices.map((voice) => (
+                          <option key={voice} value={voice}>
+                            {voice}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="mt-0.5 text-[7px] text-muted-foreground/60 racing-text">
+                      Select preferred voice for Kokoro TTS
+                    </div>
+                  </div>
+                )}
               </CollapsibleGroup>
 
               {dynamicTuningGroups.map((group, i) => (

@@ -6,7 +6,7 @@ except (ImportError, RuntimeError):
     GPIO = MockGPIO()
     print("⚠️  RPi.GPIO not available - using mock GPIO for testing")
     
-from flask import Flask, render_template, send_from_directory, jsonify, request, Response
+from flask import Flask, render_template, send_from_directory, jsonify, request, Response, make_response
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import os
@@ -25,6 +25,7 @@ from motor import CarSystem
 from autopilot import AutoPilot, State
 from vision import VisionSystem
 from narration import NarrationEngine, validate_key as narration_validate_key, list_multimodal_models
+from kokoro_client import get_kokoro_client
 
 # ==========================================
 # ⚙️ CONFIGURATION
@@ -147,7 +148,17 @@ def _load_narration_config():
             return config
     except Exception as e:
         print(f"\u26a0\ufe0f  [Narration Config] Failed to load: {e}")
-    return {'provider': 'gemini', 'api_key': '', 'model': '', 'interval': 90, 'enabled': False, 'models': []}
+    return {
+        'provider': 'gemini',
+        'api_key': '',
+        'model': '',
+        'interval': 90,
+        'enabled': False,
+        'models': [],
+        'kokoro_enabled': False,
+        'kokoro_ip': '',
+        'kokoro_voice': ''
+    }
 
 def _save_narration_config(config):
     """Save narration configuration to JSON file for persistence."""
@@ -1326,7 +1337,15 @@ def get_local_ip():
 
 @app.route("/")
 def index():
-    return render_template('index.html')
+    """Serve the main index.html with no-cache headers to prevent stale HTML."""
+    response = render_template('index.html')
+    # Add headers to prevent caching of index.html (so updates are always fetched)
+    # Assets (JS/CSS) have content hashes and are cached by the browser indefinitely
+    resp = make_response(response)
+    resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate, public, max-age=0'
+    resp.headers['Pragma'] = 'no-cache'
+    resp.headers['Expires'] = '0'
+    return resp
 
 # API endpoint for getting server IP (used by mobile/remote clients)
 @app.route("/api/server-ip")
@@ -2232,6 +2251,65 @@ def on_narration_key_clear(data):
     socketio.emit('narration_config_sync', _cleared)
     emit('narration_key_clear_response', {'status': 'ok'})
     print(f"\u2705 [Narration] API key cleared and narration disabled")
+
+@socketio.on('kokoro_validate_api')
+def on_kokoro_validate_api(data):
+    """Validate Kokoro TTS API connection and fetch available voices.
+    Runs in background thread to avoid blocking the SocketIO thread."""
+    ip_address = data.get('ip', '')
+    client_id = request.sid
+    
+    def validate_async():
+        """Background validation task."""
+        print(f"\n\U0001f3a4 [Kokoro] Validating API at {ip_address} (client: {client_id[:8]}...)")
+        
+        if not ip_address:
+            socketio.emit('kokoro_validation_result', {'valid': False, 'voices': [], 'error': 'IP address is empty'}, to=client_id)
+            return
+        
+        # Validate Kokoro API
+        try:
+            kokoro = get_kokoro_client()
+            result = kokoro.validate_api(ip_address)
+            socketio.emit('kokoro_validation_result', result, to=client_id)
+        except Exception as e:
+            print(f"❌ [Kokoro] Validation error: {e}")
+            socketio.emit('kokoro_validation_result', {'valid': False, 'voices': [], 'error': f'Validation failed: {str(e)}'}, to=client_id)
+    
+    # Run validation in background thread
+    validation_thread = threading.Thread(target=validate_async, daemon=True)
+    validation_thread.start()
+
+@socketio.on('kokoro_config_update')
+def on_kokoro_config_update(data):
+    """Update Kokoro TTS configuration (enable/disable, IP, voice)."""
+    print(f"\n\U0001f3a4 [Kokoro] Config update: {data}")
+    
+    if 'kokoro_enabled' in data:
+        _narration_config['kokoro_enabled'] = data['kokoro_enabled']
+        car_state['kokoro_enabled'] = data['kokoro_enabled']
+    
+    if 'kokoro_ip' in data:
+        _narration_config['kokoro_ip'] = data['kokoro_ip']
+        car_state['kokoro_ip'] = data['kokoro_ip']
+    
+    if 'kokoro_voice' in data:
+        _narration_config['kokoro_voice'] = data['kokoro_voice']
+        car_state['kokoro_voice'] = data['kokoro_voice']
+    
+    _save_narration_config(_narration_config)
+    
+    # Apply configuration to narration engine if narration is running
+    if car_state.get('narration_enabled'):
+        if _narration_config.get('kokoro_enabled'):
+            narration_engine.set_kokoro_config(
+                _narration_config.get('kokoro_ip'),
+                _narration_config.get('kokoro_voice')
+            )
+        else:
+            narration_engine.set_kokoro_config(None, None)
+    
+    emit('kokoro_config_response', {'status': 'ok'})
 
 # Heartbeat monitoring thread
 def heartbeat_monitor():
