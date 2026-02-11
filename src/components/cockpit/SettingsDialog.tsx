@@ -200,8 +200,8 @@ interface SettingsDialogProps {
   cameraSpecs?: CameraSpecs;
   // AI Narration props
   narrationConfig?: NarrationConfig;
-  narrationEnabled?: boolean;
-  onNarrationToggle?: (enabled: boolean) => void;
+  imageAnalysisEnabled?: boolean;
+  onImageAnalysisToggle?: (enabled: boolean) => void;
 }
 
 const ParamRow = ({
@@ -396,7 +396,7 @@ const CollapsibleGroup = ({
   );
 };
 
-export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAULT_TUNING, cameraSpecs, narrationConfig, narrationEnabled = false, onNarrationToggle }: SettingsDialogProps) => {
+export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAULT_TUNING, cameraSpecs, narrationConfig, imageAnalysisEnabled = false, onImageAnalysisToggle }: SettingsDialogProps) => {
   const [isOpen, setIsOpen] = useState(false);
   const [synced, setSynced] = useState(false);
   
@@ -408,7 +408,7 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
   const [isKeyValid, setIsKeyValid] = useState(narrationConfig?.api_key_set || false);
   const [availableModels, setAvailableModels] = useState<NarrationModel[]>([]);
   const [selectedModel, setSelectedModel] = useState(narrationConfig?.model || '');
-  const [narrationInterval, setNarrationInterval] = useState(narrationConfig?.interval || 8);
+  const [narrationInterval, setNarrationInterval] = useState(narrationConfig?.interval || 90);
   const [keyError, setKeyError] = useState('');
 
   // Sync narration config from backend when it changes
@@ -417,7 +417,7 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
       setNarrationProvider(narrationConfig.provider || 'gemini');
       setIsKeyValid(narrationConfig.api_key_set);
       setSelectedModel(narrationConfig.model || '');
-      setNarrationInterval(narrationConfig.interval || 8);
+      setNarrationInterval(narrationConfig.interval || 90);
       // Populate masked key so returning clients see the saved key state
       if (narrationConfig.api_key_set && narrationConfig.api_key_masked) {
         setApiKeyInput(narrationConfig.api_key_masked);
@@ -493,14 +493,11 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
     setAvailableModels([]);
     setSelectedModel('');
     setKeyError('');
-    if (narrationEnabled && onNarrationToggle) {
-      onNarrationToggle(false);
-    }
     toast.success('🗑️ API Key Cleared', {
       description: 'API key removed from server',
       duration: 3000,
     });
-  }, [narrationEnabled, onNarrationToggle]);
+  }, []);
 
   const handleModelChange = useCallback((modelName: string) => {
     setSelectedModel(modelName);
@@ -508,18 +505,10 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
   }, []);
 
   const handleIntervalChange = useCallback((val: number) => {
-    const clamped = Math.max(3, Math.min(30, val));
+    const clamped = Math.max(90, Math.min(120, val));
     setNarrationInterval(clamped);
     socketClient.emitNarrationConfigUpdate({ interval: clamped });
   }, []);
-
-  const handleNarrationToggle = useCallback(() => {
-    const newEnabled = !narrationEnabled;
-    if (onNarrationToggle) {
-      onNarrationToggle(newEnabled);
-    }
-    // Socket emit is handled by the parent's onNarrationToggle callback
-  }, [narrationEnabled, onNarrationToggle]);
 
   // Store original camera settings before CV mode is enabled
   const originalCameraSettingsRef = useRef<{
@@ -866,7 +855,7 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
                     <div className="flex items-center gap-0.5">
                       <button
                         onClick={() => handleIntervalChange(narrationInterval - 1)}
-                        disabled={narrationInterval <= 3}
+                        disabled={narrationInterval <= 90}
                         className="w-5 h-5 sm:w-6 sm:h-6 rounded border border-border bg-muted flex items-center justify-center text-foreground hover:border-primary/50 hover:bg-primary/10 transition-colors touch-feedback disabled:opacity-30 disabled:pointer-events-none"
                       >
                         <Minus className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
@@ -874,14 +863,14 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
                       <input
                         type="number"
                         value={narrationInterval}
-                        onChange={(e) => handleIntervalChange(parseInt(e.target.value) || 8)}
-                        min={3}
-                        max={30}
+                        onChange={(e) => handleIntervalChange(parseInt(e.target.value) || 90)}
+                        min={90}
+                        max={120}
                         className="w-12 sm:w-14 h-5 sm:h-6 bg-card border border-border rounded px-1 text-center text-[10px] sm:text-xs text-foreground racing-number focus:border-primary focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                       />
                       <button
                         onClick={() => handleIntervalChange(narrationInterval + 1)}
-                        disabled={narrationInterval >= 30}
+                        disabled={narrationInterval >= 120}
                         className="w-5 h-5 sm:w-6 sm:h-6 rounded border border-border bg-muted flex items-center justify-center text-foreground hover:border-primary/50 hover:bg-primary/10 transition-colors touch-feedback disabled:opacity-30 disabled:pointer-events-none"
                       >
                         <Plus className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
@@ -894,20 +883,42 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
                   </div>
                 </div>
 
+                {/* Analyse Image Toggle */}
+                <div className="py-0.5">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[9px] sm:text-[11px] text-muted-foreground racing-text">Analyse Image</span>
+                    <button
+                      onClick={() => onImageAnalysisToggle?.(!imageAnalysisEnabled)}
+                      className={`px-3 py-1.5 rounded border text-[10px] sm:text-xs racing-text transition-colors ${
+                        imageAnalysisEnabled
+                          ? 'border-cyan-500 bg-cyan-500/20 text-cyan-400 hover:bg-cyan-500/30'
+                          : 'border-border bg-muted/30 text-muted-foreground hover:bg-muted/50'
+                      }`}
+                    >
+                      {imageAnalysisEnabled ? 'ON' : 'OFF'}
+                    </button>
+                  </div>
+                  {imageAnalysisEnabled && (
+                    <div className="mt-0.5 text-[7px] text-cyan-400/80 racing-text">
+                      👁️ Image analysis active — AI will describe camera frames
+                    </div>
+                  )}
+                </div>
+
                 {/* Narration Toggle */}
                 <div className="py-0.5">
                   <div className="flex items-center justify-between gap-1">
                     <span className="text-[9px] sm:text-[11px] text-muted-foreground racing-text">AI Narration</span>
                     <button
-                      onClick={handleNarrationToggle}
-                      disabled={!isKeyValid || !selectedModel}
+                      onClick={() => onImageAnalysisToggle?.(!imageAnalysisEnabled)}
+                      disabled={!isKeyValid || !selectedModel || !imageAnalysisEnabled}
                       className={`px-3 py-1.5 rounded border text-[10px] sm:text-xs racing-text transition-colors flex items-center gap-1.5 disabled:opacity-40 disabled:pointer-events-none ${
-                        narrationEnabled
+                        imageAnalysisEnabled
                           ? 'border-green-500 bg-green-500/20 text-green-400 hover:bg-green-500/30'
                           : 'border-border bg-muted/30 text-muted-foreground hover:bg-muted/50'
                       }`}
                     >
-                      {narrationEnabled ? (
+                      {imageAnalysisEnabled ? (
                         <><Mic className="w-3 h-3" /> ON</>
                       ) : (
                         <><MicOff className="w-3 h-3" /> OFF</>
@@ -916,12 +927,12 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
                   </div>
                   {!isKeyValid && (
                     <div className="mt-0.5 text-[7px] text-amber-400/80 racing-text">
-                      ⚠️ Validate an API key and select a model to enable narration
+                      ⚠️ Validate an API key and select a model to enable analysis
                     </div>
                   )}
-                  {narrationEnabled && (
+                  {imageAnalysisEnabled && (
                     <div className="mt-0.5 text-[7px] text-green-400/80 racing-text">
-                      🎙️ Narration active — AI describes camera feed via browser TTS
+                      🎙️ Analysis active — descriptions provided via TTS
                     </div>
                   )}
                 </div>

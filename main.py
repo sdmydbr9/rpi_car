@@ -147,7 +147,7 @@ def _load_narration_config():
             return config
     except Exception as e:
         print(f"\u26a0\ufe0f  [Narration Config] Failed to load: {e}")
-    return {'provider': 'gemini', 'api_key': '', 'model': '', 'interval': 8, 'enabled': False, 'models': []}
+    return {'provider': 'gemini', 'api_key': '', 'model': '', 'interval': 90, 'enabled': False, 'models': []}
 
 def _save_narration_config(config):
     """Save narration configuration to JSON file for persistence."""
@@ -327,6 +327,14 @@ def _on_narration_text(text: str):
     print(f"\U0001f399\ufe0f [Narration] Broadcast: {text[:60]}...")
 
 narration_engine.set_callback(_on_narration_text)
+
+def _on_narration_error(error_msg: str):
+    """Callback when narration encounters an error."""
+    with app.app_context():
+        socketio.emit('narration_error', {'error': error_msg, 'timestamp': time.time()})
+    print(f"\U0001f399\ufe0f [Narration] Error broadcast: {error_msg[:80]}")
+
+narration_engine.set_error_callback(_on_narration_error)
 
 def _reconfigure_camera(resolution_str, framerate):
     """Reconfigure picam2 with new resolution and framerate. Must hold _camera_lock.
@@ -596,7 +604,7 @@ car_state = {
     "camera_jpeg_quality": CAMERA_JPEG_QUALITY,      # JPEG quality (1-100)
     "camera_framerate": CAMERA_FRAMERATE,            # Camera framerate (FPS)
     # 🎙️ AI NARRATION
-    "narration_enabled": _narration_config.get('enabled', False),
+    "narration_enabled": False,  # Always start disabled; user toggles on from UI
     "narration_provider": _narration_config.get('provider', 'gemini'),
     "narration_model": _narration_config.get('model', ''),
     "narration_interval": _narration_config.get('interval', 8),
@@ -787,14 +795,7 @@ def physics_loop():
             print("✅ RIGHT CLEAR")
         
         # Sonar distance warnings (only print when crossing thresholds)
-        if sonar_distance < SONAR_STOP_DISTANCE:
-            print(f"🚨 SONAR: {sonar_distance}cm - EMERGENCY STOP!")
-        elif sonar_distance < SONAR_CRAWL_DISTANCE:
-            print(f"🐌 SONAR: {sonar_distance}cm - CRAWL SPEED")
-        elif sonar_distance < SONAR_SLOW_DISTANCE:
-            print(f"⚠️  SONAR: {sonar_distance}cm - SLOWING DOWN")
-        elif sonar_distance < SONAR_CAUTION_DISTANCE:
-            print(f"📍 SONAR: {sonar_distance}cm - CAUTION")
+        # [Sonar logs removed from terminal output]
         
         last_left_obstacle = left_obstacle
         last_right_obstacle = right_obstacle
@@ -858,7 +859,6 @@ def physics_loop():
         
         if emergency_ir_override or emergency_sonar_override:
             # EMERGENCY OVERRIDE: Immediate stop regardless of mode
-            print(f"🚨 EMERGENCY OVERRIDE! IR: {emergency_ir_override}, Sonar: {sonar_distance:.1f}cm - CUTTING POWER")
             car_state["current_pwm"] = 0
             car_state["is_braking"] = True
             # NOTE: Do NOT overwrite gas_pressed / brake_pressed here.
@@ -885,7 +885,6 @@ def physics_loop():
                     if sonar_too_close:
                         obstacle_state = "REVERSING"
                         car_state["obstacle_state"] = "REVERSING"
-                        print(f"🔄 TOO CLOSE ({sonar_distance}cm) - REVERSING FIRST")
                     else:
                         obstacle_state = "STEERING"
                         car_state["obstacle_state"] = "STEERING"
@@ -893,13 +892,10 @@ def physics_loop():
                         if sonar_obstacle_detected and not ir_obstacle_detected:
                             if left_obstacle:
                                 target_steer_angle = 60
-                                print("🚨 SONAR OBSTACLE AHEAD + LEFT IR - GENTLE RIGHT")
                             elif right_obstacle:
                                 target_steer_angle = -60
-                                print("🚨 SONAR OBSTACLE AHEAD + RIGHT IR - GENTLE LEFT")
                             else:
                                 target_steer_angle = 60
-                                print("🚨 SONAR OBSTACLE AHEAD - GENTLE RIGHT")
                         elif left_obstacle and right_obstacle:
                             obstacle_state = "REVERSING"
                             car_state["obstacle_state"] = "REVERSING"
@@ -1043,19 +1039,15 @@ def physics_loop():
                         if sonar_distance < SONAR_STOP_DISTANCE:
                             # Emergency stop - too close!
                             target = 0
-                            print(f"🚨 SONAR EMERGENCY STOP: {sonar_distance}cm")
                         elif sonar_distance < SONAR_CRAWL_DISTANCE:
                             # Very close - crawl speed (5% max)
                             target = min(target, 5)
-                            print(f"🐌 SONAR CRAWLING: {sonar_distance}cm -> {target}%")
                         elif sonar_distance < SONAR_SLOW_DISTANCE:
                             # Close - very slow movement (15% max)
                             target = min(target, 15)
-                            print(f"⚠️  SONAR SLOWING: {sonar_distance}cm -> {target}%")
                         elif sonar_distance < SONAR_CAUTION_DISTANCE:
                             # Getting close - moderate speed (40% max)
                             target = min(target, 40)
-                            print(f"📍 SONAR CAUTION: {sonar_distance}cm -> {target}%")
                     
                     # Smooth Ramping
                     if current < target: current += ACCEL_RATE
@@ -1496,7 +1488,6 @@ def enable_autonomous():
     if _is_vision_available():
         vision_system.active = True
     print(f"🤖 SMART DRIVER: ENABLED - Autonomous driving active")
-    print(f"📡 SAFETY: IR and Sonar sensors force-enabled in autonomous mode")
     return "AUTONOMOUS_ENABLED"
 
 @app.route("/autonomous_disable")
@@ -1865,13 +1856,10 @@ def on_sonar_toggle(data):
     """Handle sonar sensor toggle"""
     # Block Sonar toggle when in autonomous mode for safety
     if car_state["autonomous_mode"]:
-        print(f"\n⚙️ [UI Control] 📡 SONAR SENSOR: BLOCKED - Cannot toggle in autonomous mode")
         emit('sonar_response', {'status': 'blocked', 'sonar_enabled': car_state["sonar_enabled"], 'message': 'Cannot toggle Sonar sensor in autonomous mode'})
         return
     
     car_state["sonar_enabled"] = not car_state["sonar_enabled"]
-    state = '✅ ON' if car_state["sonar_enabled"] else '❌ OFF'
-    print(f"\n⚙️ [UI Control] 📡 SONAR SENSOR: {state}")
     emit('sonar_response', {'status': 'ok', 'sonar_enabled': car_state["sonar_enabled"]})
 
 @socketio.on('camera_toggle')
@@ -2155,7 +2143,7 @@ def on_narration_config_update(data):
         _narration_config['model'] = data['model']
         car_state['narration_model'] = data['model']
     if 'interval' in data:
-        _narration_config['interval'] = max(3, min(30, int(data['interval'])))
+        _narration_config['interval'] = max(90, min(120, int(data['interval'])))
         car_state['narration_interval'] = _narration_config['interval']
     if 'provider' in data:
         _narration_config['provider'] = data['provider']

@@ -467,7 +467,6 @@ class AutoPilot:
             self._car.stop()
             self._state = State.PIVOTING
             self._maneuver_start = time.time()
-            print(f"⚠️  [AutoPilot] Rear sonar {rear_dist:.1f}cm < {self.REAR_CRITICAL_CM}cm during reverse → STOP, skip to PIVOTING {self._turn_direction}")
             return
 
         # Reverse with slight steering bias for better escape positioning.

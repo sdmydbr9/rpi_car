@@ -97,8 +97,8 @@ export const CameraFeed = ({ isConnected, streamUrl, isCameraEnabled = true, onT
               </div>
             )}
 
-            {/* Narration text overlay */}
-            {narrationSpeaking && narrationLastText && showStream && isLoaded && (
+            {/* Narration text overlay - shows when analysis is active */}
+            {narrationEnabled && narrationLastText && showStream && isLoaded && (
               <div className="absolute bottom-4 left-1 right-1 bg-black/70 rounded px-1.5 py-1">
                 <p className="text-[5px] sm:text-[7px] text-white/90 racing-text leading-relaxed">
                   🤖 {narrationLastText}

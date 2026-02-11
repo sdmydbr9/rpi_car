@@ -9,6 +9,7 @@ import threading
 import time
 import cv2
 import numpy as np
+from tts_local import get_tts_synthesizer
 
 # ==========================================
 # 🔑 API KEY VALIDATION
@@ -100,14 +101,36 @@ def describe_image(api_key: str, model_name: str, jpeg_bytes: bytes,
     """
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(model_name)
+        # Normalize model name — strip 'models/' prefix if present
+        clean_name = model_name
+        if clean_name.startswith('models/'):
+            clean_name = clean_name[7:]
+        model = genai.GenerativeModel(clean_name)
         
-        response = model.generate_content([
-            prompt,
-            {'mime_type': 'image/jpeg', 'data': jpeg_bytes}
-        ])
+        # Use relaxed safety settings to avoid blocked responses
+        safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
         
-        text = response.text.strip()
+        response = model.generate_content(
+            [prompt, {'mime_type': 'image/jpeg', 'data': jpeg_bytes}],
+            safety_settings=safety_settings,
+        )
+        
+        # Handle blocked / empty responses
+        if not response.candidates:
+            print(f"⚠️ [Narration] Response blocked (no candidates)")
+            return ""
+        
+        try:
+            text = response.text.strip()
+        except ValueError as e:
+            print(f"⚠️ [Narration] Response blocked by safety filter: {e}")
+            return ""
+        
         print(f"👁️ [Narration] AI says: {text}")
         return text
     except Exception as e:
@@ -172,21 +195,30 @@ class NarrationEngine:
         self._running = False
         self._api_key: str = ""
         self._model_name: str = ""
-        self._interval: float = 8.0  # seconds between narrations
+        self._interval: float = 90.0  # seconds between narrations
         self._prompt: str = DEFAULT_PROMPT
         self._picam2 = None
         self._vision_system = None
         self._on_narration_text = None  # callback(text: str)
+        self._on_narration_error = None  # callback(error: str)
         self._lock = threading.Lock()
+        self._play_local_tts = True  # Always play audio on Pi's headphone jack by default
     
     def configure(self, api_key: str, model_name: str,
-                  interval: float = 8.0, prompt: str = DEFAULT_PROMPT):
+                  interval: float = 90.0, prompt: str = DEFAULT_PROMPT):
         """Configure narration parameters."""
         with self._lock:
             self._api_key = api_key
             self._model_name = model_name
-            self._interval = max(3.0, min(30.0, interval))
+            self._interval = max(90.0, min(120.0, interval))
             self._prompt = prompt
+    
+    def set_local_tts_enabled(self, enabled: bool):
+        """Enable/disable local TTS playback on Pi's headphone jack."""
+        with self._lock:
+            self._play_local_tts = enabled
+        status = "enabled" if enabled else "disabled"
+        print(f"🔊 [Narration] Local TTS playback {status}")
     
     def set_camera(self, picam2, vision_system):
         """Set camera references for frame capture."""
@@ -197,6 +229,10 @@ class NarrationEngine:
     def set_callback(self, callback):
         """Set the callback for narration text output."""
         self._on_narration_text = callback
+    
+    def set_error_callback(self, callback):
+        """Set the callback for narration error output."""
+        self._on_narration_error = callback
     
     @property
     def is_running(self) -> bool:
@@ -227,6 +263,7 @@ class NarrationEngine:
     
     def _loop(self):
         """Background narration loop."""
+        consecutive_errors = 0
         while self._running:
             try:
                 with self._lock:
@@ -240,7 +277,10 @@ class NarrationEngine:
                 # Capture frame
                 jpeg_bytes = capture_frame_as_jpeg(picam2, vision_system)
                 if jpeg_bytes is None:
-                    print("⚠️  [Narration] No frame available, skipping...")
+                    msg = "No camera frame available — is the camera enabled?"
+                    print(f"⚠️  [Narration] {msg}")
+                    if self._on_narration_error:
+                        self._on_narration_error(msg)
                     time.sleep(interval)
                     continue
                 
@@ -251,10 +291,26 @@ class NarrationEngine:
                 
                 if text and self._on_narration_text:
                     self._on_narration_text(text)
+                    consecutive_errors = 0
                     print(f"⏱️ [Narration] Response in {elapsed:.1f}s")
+                    
+                    # Play audio on Pi's headphone jack if enabled
+                    if self._play_local_tts:
+                        tts = get_tts_synthesizer()
+                        tts.speak(text)
+                elif not text:
+                    consecutive_errors += 1
+                    print(f"⚠️  [Narration] Empty response (attempt {consecutive_errors})")
+                    if consecutive_errors >= 3 and self._on_narration_error:
+                        self._on_narration_error(
+                            "AI returned empty responses — check API key, model, or try a different model"
+                        )
+                        consecutive_errors = 0
                 
             except Exception as e:
                 print(f"❌ [Narration] Loop error: {e}")
+                if self._on_narration_error:
+                    self._on_narration_error(str(e))
             
             # Wait for the configured interval
             # Use small sleep increments so we can stop quickly

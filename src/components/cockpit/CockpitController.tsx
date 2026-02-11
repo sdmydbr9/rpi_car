@@ -8,6 +8,8 @@ import { AutopilotTelemetry, type AutopilotStatus } from "./AutopilotTelemetry";
 import { Pedals } from "./Pedals";
 import { ImmersiveHUD } from "../ImmersiveHUD";
 import * as socketClient from "../../lib/socketClient";
+import { ttsService } from "../../lib/ttsService";
+import type { AudioOutputDevice } from "../../lib/ttsService";
 import { useAutoAcceleration } from "../../hooks/useAutoAcceleration";
 import type { SensorStatus } from "./ServiceLight";
 import { DEFAULT_TUNING, type TuningConstants } from "./SettingsDialog";
@@ -132,6 +134,12 @@ export const CockpitController = () => {
   const [visionFps, setVisionFps] = useState(0);
   const [userWantsVision, setUserWantsVision] = useState(false);
   const [cameraActualFps, setCameraActualFps] = useState(0);
+  // AI Image Analysis state (backend-synced: whether AI is analyzing camera frames)
+  // Persisted across sessions — will auto-toggle on backend after connection
+  const [imageAnalysisEnabled, setImageAnalysisEnabled] = useState(() => {
+    const saved = localStorage.getItem('imageAnalysisEnabled');
+    return saved === 'true';
+  });
   // AI Narration state
   const [narrationConfig, setNarrationConfig] = useState<NarrationConfig>({
     provider: 'gemini',
@@ -141,11 +149,8 @@ export const CockpitController = () => {
     interval: 8,
     enabled: false,
   });
-  const [narrationEnabled, setNarrationEnabled] = useState(false);
   const [narrationSpeaking, setNarrationSpeaking] = useState(false);
   const [narrationLastText, setNarrationLastText] = useState('');
-  const narrationUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
-  const ttsUnlockedRef = useRef(false);
   const [showAudioUnlockPrompt, setShowAudioUnlockPrompt] = useState(false);
   const [ttsUnlocked, setTtsUnlocked] = useState(false);
   const autoAccelIntervalRef = useRef<number | null>(null);
@@ -154,28 +159,19 @@ export const CockpitController = () => {
   const pendingGearRef = useRef<{ gear: string; ts: number } | null>(null);
 
   // TTS Browser Unlock: Safari and Chrome require a user gesture before speechSynthesis.speak() works.
-  // We listen for the first touch/click and perform a silent TTS + AudioContext unlock.
+  // We use the ttsService singleton which handles voice preloading, unlock, and the
+  // Chromium cancel-then-speak race condition (60 ms delay between cancel and speak).
   const unlockTTS = useCallback(() => {
-    if (ttsUnlockedRef.current) return;
-    ttsUnlockedRef.current = true;
+    if (ttsService.isUnlocked) return;
+    ttsService.unlock();
     setTtsUnlocked(true);
     setShowAudioUnlockPrompt(false);
-    console.log('🔊 [TTS] Unlocking browser audio via user gesture');
-    // Silent utterance to satisfy browser autoplay policy
-    try {
-      const silentUtterance = new SpeechSynthesisUtterance('');
-      silentUtterance.volume = 0;
-      window.speechSynthesis.speak(silentUtterance);
-    } catch (e) {
-      console.warn('🔊 [TTS] Silent utterance failed:', e);
-    }
-    // Also unlock AudioContext for any future audio needs
-    try {
-      const ctx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
-      ctx.resume().then(() => ctx.close());
-    } catch (e) {
-      console.warn('🔊 [TTS] AudioContext unlock failed:', e);
-    }
+  }, []);
+
+  // Wire ttsService speaking-state changes back into React state
+  useEffect(() => {
+    ttsService.onSpeakingChange((speaking) => setNarrationSpeaking(speaking));
+    ttsService.onDone(() => socketClient.emitNarrationSpeakingDone());
   }, []);
 
   useEffect(() => {
@@ -318,66 +314,46 @@ export const CockpitController = () => {
     socketClient.onNarrationConfigSync((data: NarrationConfig) => {
       console.log('🎙️ Narration config sync from backend:', data);
       setNarrationConfig(data);
-      setNarrationEnabled(data.enabled);
+
+      // Restore persisted image analysis state: if user had it on but backend is off, re-enable
+      const savedAnalysis = localStorage.getItem('imageAnalysisEnabled') === 'true';
+      if (savedAnalysis && data.api_key_set && data.model && !data.enabled) {
+        console.log('🎙️ Auto-restoring image analysis from saved preference');
+        socketClient.emitNarrationToggle(true);
+        setImageAnalysisEnabled(true);
+      } else {
+        setImageAnalysisEnabled(data.enabled);
+        // Keep localStorage in sync with backend truth on first connect
+        localStorage.setItem('imageAnalysisEnabled', String(data.enabled));
+      }
     });
 
     // Subscribe to narration text events (AI descriptions) and play via browser TTS
     socketClient.onNarrationText((data) => {
-      console.log('🎙️ Narration text received:', data.text);
+      console.log(`🎙️ [CockpitController] Narration text received (${data.text?.length} chars): "${data.text?.slice(0, 80)}"`);
       setNarrationLastText(data.text);
-      setNarrationSpeaking(true);
+
+      // Always speak via TTS when image analysis is enabled
+      console.log(`🎙️ [CockpitController] ✅ TTS playback, ttsService.isUnlocked=${ttsService.isUnlocked}, ttsService.isSupported=${ttsService.isSupported}`);
 
       // Show unlock prompt if TTS hasn't been unlocked yet via user gesture
-      if (!ttsUnlockedRef.current) {
+      if (!ttsService.isUnlocked) {
+        console.log('🎙️ [CockpitController] ⚠️ TTS NOT unlocked yet — showing unlock prompt');
         setShowAudioUnlockPrompt(true);
+        setNarrationSpeaking(true);
+        return;
       }
 
-      // Cancel any in-progress speech
-      if (window.speechSynthesis.speaking) {
-        window.speechSynthesis.cancel();
-      }
-
-      // Create and play new utterance
-      const utterance = new SpeechSynthesisUtterance(data.text);
-      utterance.rate = 1.0;
-      utterance.pitch = 1.0;
-      utterance.volume = 1.0;
-      utterance.onend = () => {
-        setNarrationSpeaking(false);
-        socketClient.emitNarrationSpeakingDone();
-      };
-      utterance.onerror = (e) => {
-        // Don't treat 'interrupted' as a real error (happens when cancel() is called)
-        if ((e as SpeechSynthesisErrorEvent).error !== 'interrupted') {
-          console.warn('🎙️ TTS error:', (e as SpeechSynthesisErrorEvent).error);
-        }
-        setNarrationSpeaking(false);
-        socketClient.emitNarrationSpeakingDone();
-      };
-      narrationUtteranceRef.current = utterance;
-      window.speechSynthesis.speak(utterance);
-
-      // iOS Safari workaround: speechSynthesis pauses after ~15s if not "pumped"
-      // Periodically resume to keep it alive
-      const keepAlive = setInterval(() => {
-        if (window.speechSynthesis.speaking) {
-          window.speechSynthesis.pause();
-          window.speechSynthesis.resume();
-        } else {
-          clearInterval(keepAlive);
-        }
-      }, 10000);
-      utterance.onend = () => {
-        clearInterval(keepAlive);
-        setNarrationSpeaking(false);
-        socketClient.emitNarrationSpeakingDone();
-      };
+      // Speak via the TTS service (handles cancel → delay → speak,
+      // voice selection, Chrome keep-alive, and GC protection)
+      console.log('🎙️ [CockpitController] Calling ttsService.speak()...');
+      ttsService.speak(data.text);
     });
 
-    // Subscribe to narration toggle response
+    // Subscribe to narration toggle response (image analysis toggle)
     socketClient.onNarrationToggleResponse((data) => {
       if (data.status === 'ok') {
-        setNarrationEnabled(data.enabled);
+        setImageAnalysisEnabled(data.enabled);
       }
     });
 
@@ -446,7 +422,7 @@ export const CockpitController = () => {
       if (data.vision_fps !== undefined) setVisionFps(data.vision_fps);
       if (data.camera_actual_fps !== undefined) setCameraActualFps(data.camera_actual_fps);
       // Update narration telemetry
-      if (data.narration_enabled !== undefined) setNarrationEnabled(data.narration_enabled);
+      if (data.narration_enabled !== undefined) setImageAnalysisEnabled(data.narration_enabled);
       if (data.narration_speaking !== undefined) setNarrationSpeaking(prev => prev || data.narration_speaking!);
       // Update live camera config from telemetry (for HUD badge only — does NOT touch tuning state)
       if (data.camera_resolution) setLiveCameraResolution(data.camera_resolution);
@@ -677,13 +653,17 @@ export const CockpitController = () => {
     setIsImmersiveView(prev => !prev);
   }, []);
 
-  const handleNarrationToggle = useCallback((enabled: boolean) => {
-    setNarrationEnabled(enabled);
+  const handleImageAnalysisToggle = useCallback((enabled: boolean) => {
+    setImageAnalysisEnabled(enabled);
+    localStorage.setItem('imageAnalysisEnabled', String(enabled));
     socketClient.emitNarrationToggle(enabled);
-    // If disabling, stop any in-progress speech
-    if (!enabled && window.speechSynthesis.speaking) {
-      window.speechSynthesis.cancel();
+    if (!enabled) {
+      // Stop TTS and clear text when analysis is disabled
+      if (window.speechSynthesis.speaking) {
+        window.speechSynthesis.cancel();
+      }
       setNarrationSpeaking(false);
+      setNarrationLastText('');
     }
   }, []);
 
@@ -752,7 +732,7 @@ export const CockpitController = () => {
         isCameraEnabled={isCameraEnabled}
         userWantsVision={userWantsVision}
         onToggleCamera={handleCameraToggle}
-        narrationEnabled={narrationEnabled}
+        narrationEnabled={imageAnalysisEnabled}
         narrationSpeaking={narrationSpeaking}
         narrationLastText={narrationLastText}
       />
@@ -766,9 +746,8 @@ export const CockpitController = () => {
           backendDefaults={backendDefaults}
           cameraSpecs={cameraSpecs}
           narrationConfig={narrationConfig}
-          narrationEnabled={narrationEnabled}
-          narrationSpeaking={narrationSpeaking}
-          onNarrationToggle={handleNarrationToggle}
+          imageAnalysisEnabled={imageAnalysisEnabled}
+          onImageAnalysisToggle={handleImageAnalysisToggle}
           ttsUnlocked={ttsUnlocked}
           onUnlockAudio={unlockTTS}
         />
@@ -780,7 +759,7 @@ export const CockpitController = () => {
             {/* Camera Feed */}
             <div className="h-[30%] min-h-0 p-0.5 border-none border-b border-border/30">
               <div onClick={handleImmersiveViewToggle} className="cursor-pointer h-full w-full">
-                <CameraFeed isConnected={isConnected} streamUrl={streamUrl} isCameraEnabled={isCameraEnabled} onToggleCamera={handleCameraToggle} narrationEnabled={narrationEnabled} narrationSpeaking={narrationSpeaking} narrationLastText={narrationLastText} />
+                <CameraFeed isConnected={isConnected} streamUrl={streamUrl} isCameraEnabled={isCameraEnabled} onToggleCamera={handleCameraToggle} narrationEnabled={imageAnalysisEnabled} narrationSpeaking={narrationSpeaking} narrationLastText={narrationLastText} />
               </div>
             </div>
             

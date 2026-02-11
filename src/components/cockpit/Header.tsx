@@ -1,6 +1,6 @@
 import { SettingsDialog, TuningConstants, DEFAULT_TUNING } from "./SettingsDialog";
 import type { CameraSpecs, NarrationConfig } from "../../lib/socketClient";
-import { Mic, MicOff, Volume2 } from "lucide-react";
+import { Volume2 } from "lucide-react";
 
 interface HeaderProps {
   driverName?: string;
@@ -12,9 +12,8 @@ interface HeaderProps {
   cameraSpecs?: CameraSpecs;
   // AI Narration
   narrationConfig?: NarrationConfig;
-  narrationEnabled?: boolean;
-  narrationSpeaking?: boolean;
-  onNarrationToggle?: (enabled: boolean) => void;
+  imageAnalysisEnabled?: boolean;
+  onImageAnalysisToggle?: (enabled: boolean) => void;
   // TTS Audio Unlock
   ttsUnlocked?: boolean;
   onUnlockAudio?: () => void;
@@ -29,9 +28,8 @@ export const Header = ({
   backendDefaults = DEFAULT_TUNING,
   cameraSpecs,
   narrationConfig,
-  narrationEnabled,
-  narrationSpeaking,
-  onNarrationToggle,
+  imageAnalysisEnabled,
+  onImageAnalysisToggle,
   ttsUnlocked = false,
   onUnlockAudio,
 }: HeaderProps) => {
@@ -66,8 +64,8 @@ export const Header = ({
           <span className="text-primary font-bold text-xs sm:text-base racing-text">{position}</span>
           <span className="text-foreground font-bold racing-text text-[10px] sm:text-sm hidden sm:inline">{driverName}</span>
         </div>
-        {/* Unlock Audio Button - shown when narration is enabled but audio isn't unlocked */}
-        {narrationEnabled && !ttsUnlocked && (
+        {/* Unlock Audio Button - shown when image analysis is enabled but audio isn't unlocked */}
+        {imageAnalysisEnabled && !ttsUnlocked && (
           <button
             onClick={onUnlockAudio}
             className="px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border border-amber-500 bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-all touch-feedback flex items-center gap-1.5 animate-pulse"
@@ -79,30 +77,7 @@ export const Header = ({
             </span>
           </button>
         )}
-        {/* AI Narration Quick Toggle + Settings Dialog Button */}
-        {narrationConfig?.api_key_set && (
-          <button
-            onClick={() => onNarrationToggle?.(!narrationEnabled)}
-            className={`p-1.5 sm:p-2 rounded-lg border transition-all touch-feedback flex items-center gap-1 ${
-              narrationEnabled
-                ? narrationSpeaking
-                  ? 'border-green-500 bg-green-500/20 text-green-400 animate-pulse'
-                  : 'border-primary bg-primary/20 text-primary'
-                : 'border-border bg-card text-muted-foreground hover:border-primary/50 hover:text-primary'
-            }`}
-            title={narrationEnabled ? 'Disable AI Narration' : 'Enable AI Narration'}
-          >
-            {narrationEnabled ? (
-              <Mic className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-            ) : (
-              <MicOff className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-            )}
-            <span className="text-[8px] sm:text-[10px] racing-text hidden sm:inline">
-              {narrationEnabled ? (narrationSpeaking ? 'AI SPEAKING' : 'AI ON') : 'AI OFF'}
-            </span>
-          </button>
-        )}
-        <SettingsDialog tuning={tuning} onTuningChange={onTuningChange} backendDefaults={backendDefaults} cameraSpecs={cameraSpecs} narrationConfig={narrationConfig} narrationEnabled={narrationEnabled} onNarrationToggle={onNarrationToggle} />
+        <SettingsDialog tuning={tuning} onTuningChange={onTuningChange} backendDefaults={backendDefaults} cameraSpecs={cameraSpecs} narrationConfig={narrationConfig} imageAnalysisEnabled={imageAnalysisEnabled} onImageAnalysisToggle={onImageAnalysisToggle} />
       </div>
     </header>
   );
