@@ -408,7 +408,7 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
   const [isKeyValid, setIsKeyValid] = useState(narrationConfig?.api_key_set || false);
   const [availableModels, setAvailableModels] = useState<NarrationModel[]>([]);
   const [selectedModel, setSelectedModel] = useState(narrationConfig?.model || '');
-  const [narrationInterval, setNarrationInterval] = useState(narrationConfig?.interval || 90);
+  const [narrationInterval, setNarrationInterval] = useState(narrationConfig?.interval || 30);
   const [keyError, setKeyError] = useState('');
 
   // Kokoro TTS local state
@@ -425,7 +425,7 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
       setNarrationProvider(narrationConfig.provider || 'gemini');
       setIsKeyValid(narrationConfig.api_key_set);
       setSelectedModel(narrationConfig.model || '');
-      setNarrationInterval(narrationConfig.interval || 90);
+      setNarrationInterval(narrationConfig.interval || 30);
       // Populate masked key so returning clients see the saved key state
       if (narrationConfig.api_key_set && narrationConfig.api_key_masked) {
         setApiKeyInput(narrationConfig.api_key_masked);
@@ -436,11 +436,19 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
       if (narrationConfig.models && narrationConfig.models.length > 0) {
         setAvailableModels(narrationConfig.models);
       }
-      // Load Kokoro settings from narrationConfig
-      if ('kokoro_enabled' in narrationConfig) {
-        setKokoroEnabled((narrationConfig as any).kokoro_enabled || false);
-        setKokoroIp((narrationConfig as any).kokoro_ip || '');
-        setKokoroVoice((narrationConfig as any).kokoro_voice || '');
+      // Load Kokoro settings from narrationConfig (persisted server-side)
+      if (narrationConfig.kokoro_enabled !== undefined) {
+        setKokoroEnabled(narrationConfig.kokoro_enabled || false);
+      }
+      if (narrationConfig.kokoro_ip) {
+        setKokoroIp(narrationConfig.kokoro_ip);
+      }
+      if (narrationConfig.kokoro_voice) {
+        setKokoroVoice(narrationConfig.kokoro_voice);
+      }
+      // Restore persisted voices list (marks Kokoro as validated)
+      if (narrationConfig.kokoro_voices && narrationConfig.kokoro_voices.length > 0) {
+        setAvailableKokoroVoices(narrationConfig.kokoro_voices);
       }
     }
   }, [narrationConfig]);
@@ -562,7 +570,7 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
   }, []);
 
   const handleIntervalChange = useCallback((val: number) => {
-    const clamped = Math.max(90, Math.min(120, val));
+    const clamped = Math.max(10, Math.min(300, val));
     setNarrationInterval(clamped);
     socketClient.emitNarrationConfigUpdate({ interval: clamped });
   }, []);
@@ -940,7 +948,7 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
                     <div className="flex items-center gap-0.5">
                       <button
                         onClick={() => handleIntervalChange(narrationInterval - 1)}
-                        disabled={narrationInterval <= 90}
+                        disabled={narrationInterval <= 10}
                         className="w-5 h-5 sm:w-6 sm:h-6 rounded border border-border bg-muted flex items-center justify-center text-foreground hover:border-primary/50 hover:bg-primary/10 transition-colors touch-feedback disabled:opacity-30 disabled:pointer-events-none"
                       >
                         <Minus className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
@@ -948,14 +956,14 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
                       <input
                         type="number"
                         value={narrationInterval}
-                        onChange={(e) => handleIntervalChange(parseInt(e.target.value) || 90)}
-                        min={90}
-                        max={120}
+                        onChange={(e) => handleIntervalChange(parseInt(e.target.value) || 30)}
+                        min={10}
+                        max={300}
                         className="w-12 sm:w-14 h-5 sm:h-6 bg-card border border-border rounded px-1 text-center text-[10px] sm:text-xs text-foreground racing-number focus:border-primary focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                       />
                       <button
                         onClick={() => handleIntervalChange(narrationInterval + 1)}
-                        disabled={narrationInterval >= 120}
+                        disabled={narrationInterval >= 300}
                         className="w-5 h-5 sm:w-6 sm:h-6 rounded border border-border bg-muted flex items-center justify-center text-foreground hover:border-primary/50 hover:bg-primary/10 transition-colors touch-feedback disabled:opacity-30 disabled:pointer-events-none"
                       >
                         <Plus className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
@@ -964,7 +972,7 @@ export const SettingsDialog = ({ tuning, onTuningChange, backendDefaults = DEFAU
                     </div>
                   </div>
                   <div className="mt-0.5 text-[7px] text-muted-foreground/60 racing-text">
-                    Seconds between AI descriptions (3–30s)
+                    Seconds between AI descriptions (10–300s)
                   </div>
                 </div>
 

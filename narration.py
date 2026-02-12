@@ -196,7 +196,7 @@ class NarrationEngine:
         self._running = False
         self._api_key: str = ""
         self._model_name: str = ""
-        self._interval: float = 90.0  # seconds between narrations
+        self._interval: float = 30.0  # seconds between narrations
         self._prompt: str = DEFAULT_PROMPT
         self._picam2 = None
         self._vision_system = None
@@ -215,7 +215,7 @@ class NarrationEngine:
         with self._lock:
             self._api_key = api_key
             self._model_name = model_name
-            self._interval = max(90.0, min(120.0, interval))
+            self._interval = max(10.0, min(300.0, interval))
             self._prompt = prompt
     
     def set_local_tts_enabled(self, enabled: bool):

@@ -152,12 +152,13 @@ def _load_narration_config():
         'provider': 'gemini',
         'api_key': '',
         'model': '',
-        'interval': 90,
+        'interval': 30,
         'enabled': False,
         'models': [],
         'kokoro_enabled': False,
         'kokoro_ip': '',
-        'kokoro_voice': ''
+        'kokoro_voice': '',
+        'kokoro_voices': []
     }
 
 def _save_narration_config(config):
@@ -326,9 +327,17 @@ if _narration_config.get('api_key'):
     narration_engine.configure(
         api_key=_narration_config['api_key'],
         model_name=_narration_config.get('model', ''),
-        interval=_narration_config.get('interval', 8),
+        interval=_narration_config.get('interval', 30),
     )
     print(f"\U0001f399\ufe0f [Narration] Engine configured from persisted config")
+
+# Apply persisted Kokoro TTS config to the engine
+if _narration_config.get('kokoro_enabled') and _narration_config.get('kokoro_ip') and _narration_config.get('kokoro_voice'):
+    narration_engine.set_kokoro_config(
+        _narration_config['kokoro_ip'],
+        _narration_config['kokoro_voice']
+    )
+    print(f"\U0001f3a4 [Kokoro] Restored persisted config: {_narration_config['kokoro_ip']} / {_narration_config['kokoro_voice']}")
 
 def _on_narration_text(text: str):
     """Callback when narration text is received from AI."""
@@ -346,6 +355,11 @@ def _on_narration_error(error_msg: str):
     print(f"\U0001f399\ufe0f [Narration] Error broadcast: {error_msg[:80]}")
 
 narration_engine.set_error_callback(_on_narration_error)
+
+# Auto-start narration engine if it was previously enabled (persist across restarts)
+if _narration_config.get('enabled') and _narration_config.get('api_key') and _narration_config.get('model'):
+    narration_engine.start()
+    print(f"\U0001f399\ufe0f [Narration] Auto-started from persisted enabled state")
 
 def _reconfigure_camera(resolution_str, framerate):
     """Reconfigure picam2 with new resolution and framerate. Must hold _camera_lock.
@@ -615,7 +629,7 @@ car_state = {
     "camera_jpeg_quality": CAMERA_JPEG_QUALITY,      # JPEG quality (1-100)
     "camera_framerate": CAMERA_FRAMERATE,            # Camera framerate (FPS)
     # 🎙️ AI NARRATION
-    "narration_enabled": False,  # Always start disabled; user toggles on from UI
+    "narration_enabled": _narration_config.get('enabled', False),  # Restore from persisted config
     "narration_provider": _narration_config.get('provider', 'gemini'),
     "narration_model": _narration_config.get('model', ''),
     "narration_interval": _narration_config.get('interval', 8),
@@ -1668,9 +1682,13 @@ def on_connect():
         'api_key_set': bool(_narration_config.get('api_key', '')),
         'api_key_masked': ('*' * 8 + _narration_config.get('api_key', '')[-4:]) if len(_narration_config.get('api_key', '')) > 4 else '',
         'model': _narration_config.get('model', ''),
-        'interval': _narration_config.get('interval', 8),
+        'interval': _narration_config.get('interval', 30),
         'enabled': car_state.get('narration_enabled', False),
         'models': _narration_config.get('models', []),
+        'kokoro_enabled': _narration_config.get('kokoro_enabled', False),
+        'kokoro_ip': _narration_config.get('kokoro_ip', ''),
+        'kokoro_voice': _narration_config.get('kokoro_voice', ''),
+        'kokoro_voices': _narration_config.get('kokoro_voices', []),
     }
     emit('narration_config_sync', _masked_narration)
     # Refresh models list in background if key is set
@@ -1682,7 +1700,11 @@ def on_connect():
                 if fresh_models:
                     _narration_config['models'] = fresh_models
                     _save_narration_config(_narration_config)
-                    _updated = {**_masked_narration, 'models': fresh_models}
+                    _updated = {**_masked_narration, 'models': fresh_models,
+                                 'kokoro_enabled': _narration_config.get('kokoro_enabled', False),
+                                 'kokoro_ip': _narration_config.get('kokoro_ip', ''),
+                                 'kokoro_voice': _narration_config.get('kokoro_voice', ''),
+                                 'kokoro_voices': _narration_config.get('kokoro_voices', [])}
                     socketio.emit('narration_config_sync', _updated, to=client_id)
                     print(f"\u2705 [Narration] Refreshed {len(fresh_models)} models for client")
             except Exception as e:
@@ -2162,7 +2184,7 @@ def on_narration_config_update(data):
         _narration_config['model'] = data['model']
         car_state['narration_model'] = data['model']
     if 'interval' in data:
-        _narration_config['interval'] = max(90, min(120, int(data['interval'])))
+        _narration_config['interval'] = max(10, min(300, int(data['interval'])))
         car_state['narration_interval'] = _narration_config['interval']
     if 'provider' in data:
         _narration_config['provider'] = data['provider']
@@ -2175,7 +2197,7 @@ def on_narration_config_update(data):
         narration_engine.configure(
             api_key=_narration_config['api_key'],
             model_name=_narration_config['model'],
-            interval=_narration_config.get('interval', 8),
+            interval=_narration_config.get('interval', 30),
         )
     
     emit('narration_config_response', {'status': 'ok'})
@@ -2202,7 +2224,7 @@ def on_narration_toggle(data):
         narration_engine.configure(
             api_key=_narration_config['api_key'],
             model_name=_narration_config['model'],
-            interval=_narration_config.get('interval', 8),
+            interval=_narration_config.get('interval', 30),
         )
         narration_engine.set_camera(picam2, vision_system)
         narration_engine.start()
@@ -2244,9 +2266,13 @@ def on_narration_key_clear(data):
         'api_key_set': False,
         'api_key_masked': '',
         'model': '',
-        'interval': _narration_config.get('interval', 8),
+        'interval': _narration_config.get('interval', 30),
         'enabled': False,
         'models': [],
+        'kokoro_enabled': _narration_config.get('kokoro_enabled', False),
+        'kokoro_ip': _narration_config.get('kokoro_ip', ''),
+        'kokoro_voice': _narration_config.get('kokoro_voice', ''),
+        'kokoro_voices': _narration_config.get('kokoro_voices', []),
     }
     socketio.emit('narration_config_sync', _cleared)
     emit('narration_key_clear_response', {'status': 'ok'})
@@ -2271,6 +2297,12 @@ def on_kokoro_validate_api(data):
         try:
             kokoro = get_kokoro_client()
             result = kokoro.validate_api(ip_address)
+            # Persist voices list and IP on successful validation
+            if result.get('valid') and result.get('voices'):
+                _narration_config['kokoro_voices'] = result['voices']
+                _narration_config['kokoro_ip'] = ip_address
+                _save_narration_config(_narration_config)
+                print(f"✅ [Kokoro] Persisted {len(result['voices'])} voices for {ip_address}")
             socketio.emit('kokoro_validation_result', result, to=client_id)
         except Exception as e:
             print(f"❌ [Kokoro] Validation error: {e}")

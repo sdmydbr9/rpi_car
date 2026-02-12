@@ -193,6 +193,10 @@ export interface NarrationConfig {
   interval: number;
   enabled: boolean;
   models?: NarrationModel[];
+  kokoro_enabled?: boolean;
+  kokoro_ip?: string;
+  kokoro_voice?: string;
+  kokoro_voices?: string[];
 }
 
 export interface NarrationModel {
