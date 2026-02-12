@@ -361,25 +361,25 @@ export const CockpitController = () => {
     // Note: throttle, brake, and steeringAngle are NOT updated from telemetry - they're controlled only by user input
     // This ensures continuous hold behavior works correctly (the server won't overwrite the UI state)
     socketClient.onTelemetry((data) => {
-      setControlState(prev => {
-        // Gear bounce-back guard: ignore stale telemetry gear during pending window
-        let newGear = data.gear || prev.gear;
-        const pending = pendingGearRef.current;
-        if (pending) {
-          if (data.gear === pending.gear) {
-            // Backend confirmed the pending gear change
-            pendingGearRef.current = null;
-          } else if (Date.now() - pending.ts < 500) {
-            // Stale telemetry arrived before backend processed our gear change — keep optimistic value
-            newGear = pending.gear;
-          } else {
-            // Timeout expired, accept whatever server says
-            pendingGearRef.current = null;
-          }
+      // Gear bounce-back guard: compute outside the state updater to avoid
+      // side-effects (ref mutation) inside React's updater function, which
+      // breaks under Strict Mode double-invocation and concurrent rendering.
+      const pending = pendingGearRef.current;
+      let gearOverride: string | null = null;
+      if (pending) {
+        if (data.gear === pending.gear) {
+          // Backend confirmed the pending gear change — clear guard
+          pendingGearRef.current = null;
+        } else {
+          // Stale telemetry arrived before backend echoed our change — keep optimistic value
+          gearOverride = pending.gear;
         }
+      }
+
+      setControlState(prev => {
         return {
           ...prev,
-          gear: newGear,
+          gear: gearOverride ?? data.gear ?? prev.gear,
           speed: data.current_pwm || prev.speed,
           // Only show system metrics when engine is running
           temperature: isEngineRunning ? (data.temperature || prev.temperature) : 0,
