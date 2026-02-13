@@ -41,8 +41,8 @@ IN1 = 17  # Left Motor Direction A
 IN2 = 27  # Left Motor Direction B
 IN3 = 22  # Right Motor Direction A
 IN4 = 23  # Right Motor Direction B
-ENA = 18  # Left Motor Speed (PWM)
-ENB = 19  # Right Motor Speed (PWM)
+ENA = 12  # Left Motor Speed (PWM)
+ENB = 13  # Right Motor Speed (PWM)
 
 # --- SONAR SENSOR PINS (BCM Numbering) ---
 # Front Sonar: TRIG → Pin 22 (GPIO 25), ECHO → Pin 18 (GPIO 24)

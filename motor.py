@@ -160,7 +160,7 @@ class CarSystem:
     # Pin assignments (BCM)
     IN1 = 17;  IN2 = 27   # Left motor direction
     IN3 = 22;  IN4 = 23   # Right motor direction
-    ENA = 18;  ENB = 19   # Left / Right PWM
+    ENA = 12;  ENB = 13   # Left / Right PWM
     LEFT_IR = 5;  RIGHT_IR = 6  # IR obstacle sensors
     PWM_FREQ = 1000        # Hz
 
