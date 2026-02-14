@@ -41,8 +41,8 @@ IN1 = 17  # Left Motor Direction A
 IN2 = 27  # Left Motor Direction B
 IN3 = 22  # Right Motor Direction A
 IN4 = 23  # Right Motor Direction B
-ENA = 12  # Left Motor Speed (PWM)
-ENB = 13  # Right Motor Speed (PWM)
+ENA = 18  # Left Motor Speed (PWM)
+ENB = 19  # Right Motor Speed (PWM)
 
 # --- SONAR SENSOR PINS (BCM Numbering) ---
 # Front Sonar: TRIG → Pin 22 (GPIO 25), ECHO → Pin 18 (GPIO 24)
@@ -463,42 +463,25 @@ def generate_camera_frames():
 # 🚗 HARDWARE SETUP
 # ==========================================
 
-# Clean up any existing GPIO first
-try:
-    GPIO.cleanup()
-except:
-    pass
+# CarSystem (motor.py) owns ALL motor GPIO: direction pins, PWM
+# channels, and the lgpio chip handle.  Do NOT call GPIO.setmode()
+# or GPIO.setup() on motor pins here — it opens a second lgpio
+# handle that becomes stale once CarSystem re-opens the chip,
+# causing silent "unknown handle" errors in the physics_loop.
 
+car_system = CarSystem()
+
+# GPIO mode is now set by CarSystem; sensor pins are set up below.
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
 
-# Setup Motor Pins
-try:
-    GPIO.setup([IN1, IN2, IN3, IN4, ENA, ENB], GPIO.OUT)
-except Exception as e:
-    print(f"⚠️  GPIO setup error: {e}")
-    print("   Retrying with force_cleanup...")
-    try:
-        GPIO.cleanup()
-        GPIO.setup([IN1, IN2, IN3, IN4, ENA, ENB], GPIO.OUT)
-    except Exception as e2:
-        print(f"❌ GPIO setup failed: {e2}")
-        print("   Running without physical GPIO (simulation mode)")
-
-# Setup IR Sensor Pins (Input)
+# Setup IR Sensor Pins (Input) — also done by CarSystem, but kept
+# here so the physics_loop's direct GPIO.input() reads work even
+# if CarSystem's definition ever changes.
 try:
     GPIO.setup([LEFT_IR, RIGHT_IR], GPIO.IN)
 except Exception as e:
     print(f"⚠️  IR sensor setup error: {e}")
-
-# ── CarSystem owns the ONLY PWM channels on ENA / ENB ────────────
-# Creating module-level PWMs here and again inside CarSystem caused
-# RPi.GPIO to raise RuntimeError ("A PWM object already exists"),
-# forcing CarSystem to fall back to DummyPWM (silent no-ops).
-# Fix: let CarSystem create them first; physics_loop reuses them.
-car_system = CarSystem()
-pwm_a = car_system.pwm_a
-pwm_b = car_system.pwm_b
 
 # Initialize Sensor System
 try:
@@ -602,7 +585,7 @@ car_state = {
     "sonar_enabled": True,   # Sonar sensor toggle
     # 🤖 AUTONOMOUS DRIVING MODE
     "autonomous_mode": False,  # Smart Driver autonomous mode toggle
-    "autonomous_state": State.CRUISING.value,  # Current autonomous driving state (read from AutoPilot)
+    "autonomous_state": State.FORWARD_CRUISE.value,  # Current autonomous driving state (read from AutoPilot)
     "last_obstacle_side": "none",  # Track which side detected obstacle for escape logic
     # 🚨 SENSOR HEALTH STATUS
     "sensor_status": {
@@ -786,7 +769,6 @@ def physics_loop():
     last_right_obstacle = False
     target_steer_angle = 0   # Target angle during steering phase
     was_autonomous = False   # Track autonomous → manual transition
-    _prev_motor_dir = None   # Track motor direction to zero PWM on direction change
     
     while True:
         # --- CHECK IR SENSORS ---
@@ -1160,72 +1142,24 @@ def physics_loop():
             left_motor_speed = current # Outer wheel stays fast
 
         # --- 4. APPLY TO MOTORS ---
+        # Use car_system methods (which go through motor.py's GPIO
+        # wrapper) instead of raw GPIO calls.  RPi.GPIO 0.7.2 uses
+        # lgpio chip handles internally; the physics_loop's direct
+        # RPi.GPIO calls see a stale handle after CarSystem.__init__
+        # re-opens the chip — causing silent 'unknown handle' errors.
         try:
-            # Determine current motor direction for glitch prevention
             if car_state["is_braking"]:
-                _cur_dir = "brake"
-            elif gear == "R":
-                _cur_dir = "reverse"
+                car_system.brake()
             else:
-                _cur_dir = "forward"
-
-            # If normal brake is active, apply maximum magnetic braking force to lock the car
-            if car_state["is_braking"]:
-                # Zero PWM before switching to brake pin configuration
-                # to prevent transient drive pulses during the switch.
-                if _prev_motor_dir != "brake":
-                    pwm_a.ChangeDutyCycle(0)
-                    pwm_b.ChangeDutyCycle(0)
-                # HARD BRAKE: All 4 pins HIGH in one call — both motors
-                # brake at the same instant (short-circuit for max resistance)
-                GPIO.output([IN1, IN2, IN3, IN4], True)
-                
-                # Keep PWM at 100% for absolute maximum holding force
-                pwm_a.ChangeDutyCycle(100)
-                pwm_b.ChangeDutyCycle(100)
-            else:
-                # Direction Logic — set BEFORE PWM.
-                # When switching direction (e.g. brake→forward, forward→reverse),
-                # the L298N briefly sees the old PWM with transient pin states.
-                # Zeroing PWM first prevents one motor from locking up.
-                l_a, l_b = False, True # Default Forward
-                r_a, r_b = False, True # Default Forward
-
-                if gear == "R": # Reverse Logic
-                    l_a, l_b = True, False
-                    r_a, r_b = True, False
-                    # Debug output for reverse gear
-                    if obstacle_state == "REVERSING":
-                        print(f"🔧 REVERSE MOTORS: L={int(left_motor_speed)}% R={int(right_motor_speed)}% IN1={l_a} IN2={l_b} IN3={r_a} IN4={r_b}")
-
-                # Zero PWM on direction change to prevent H-bridge glitch
-                if _cur_dir != _prev_motor_dir:
-                    pwm_a.ChangeDutyCycle(0)
-                    pwm_b.ChangeDutyCycle(0)
-
-                # Set direction pins using batch GPIO writes.
-                # Group by target value: LOW (deactivating) pins first,
-                # then HIGH (activating) pins.  The H-bridge drives when
-                # it sees one HIGH + one LOW per channel pair, so the
-                # HIGH pin is the "trigger".  Writing both motors' HIGH
-                # pins in a single GPIO.output() call makes them start
-                # at the same instant — no left-before-right skew.
-                pins_low  = [p for p, v in ((IN1, l_a), (IN2, l_b),
-                                             (IN3, r_a), (IN4, r_b)) if not v]
-                pins_high = [p for p, v in ((IN1, l_a), (IN2, l_b),
-                                             (IN3, r_a), (IN4, r_b)) if v]
-                if pins_low:
-                    GPIO.output(pins_low, False)
-                if pins_high:
-                    GPIO.output(pins_high, True)
-
-                # Apply PWM — direction pins are already correct
-                pwm_a.ChangeDutyCycle(int(left_motor_speed))
-                pwm_b.ChangeDutyCycle(int(right_motor_speed))
-
-            _prev_motor_dir = _cur_dir
+                is_forward = (gear != "R")
+                if obstacle_state == "REVERSING":
+                    print(f"🔧 REVERSE MOTORS: L={int(left_motor_speed)}% R={int(right_motor_speed)}%")
+                car_system._set_raw_motors(
+                    left_motor_speed, right_motor_speed,
+                    is_forward, is_forward
+                )
         except Exception as e:
-            pass  # GPIO not available, skip
+            print(f"❌ [Physics] Motor GPIO error: {e}")
 
         time.sleep(0.02)  # 20ms loop = 50Hz (2.5x faster reaction than 50ms)
 
@@ -1283,7 +1217,7 @@ def drive_autonomous():
         # Only if camera + CV enabled — otherwise autopilot relies on sonar/IR only
         if _is_vision_available():
             # Vision should be active whenever autopilot is driving forward AND user wants CV
-            is_forward = autopilot.state in (State.CRUISING, State.RECOVERY)
+            is_forward = autopilot.state == State.FORWARD_CRUISE
             vision_system.active = car_state["user_wants_vision"] and is_forward
             # Mirror vision telemetry
             summary = vision_system.get_detections_summary()
@@ -1511,7 +1445,7 @@ def emergency_stop():
 def enable_autonomous():
     """Enable Smart Driver autonomous mode"""
     car_state["autonomous_mode"] = True
-    car_state["autonomous_state"] = State.CRUISING.value
+    car_state["autonomous_state"] = State.FORWARD_CRUISE.value
     car_state["last_obstacle_side"] = "none"
     # Force IR and Sonar sensors enabled in autonomous mode for safety
     car_state["ir_enabled"] = True
@@ -2037,7 +1971,7 @@ def on_camera_config_update(data):
 def on_autonomous_enable(data):
     """Handle Smart Driver autonomous mode enable"""
     car_state["autonomous_mode"] = True
-    car_state["autonomous_state"] = State.CRUISING.value
+    car_state["autonomous_state"] = State.FORWARD_CRUISE.value
     car_state["last_obstacle_side"] = "none"
     # Force IR and Sonar sensors enabled in autonomous mode for safety
     car_state["ir_enabled"] = True
@@ -2106,11 +2040,6 @@ def on_tuning_update(data):
                 applied.append(attr)
             except Exception as e:
                 print(f"⚠️ [Tuning] Failed to set {attr}={value}: {e}")
-    # If SONAR_HISTORY_LEN changed, resize the deques
-    if 'SONAR_HISTORY_LEN' in tuning:
-        new_len = int(tuning['SONAR_HISTORY_LEN'])
-        autopilot._sonar_history = deque(autopilot._sonar_history, maxlen=new_len)
-        autopilot._rear_sonar_history = deque(autopilot._rear_sonar_history, maxlen=new_len)
     print(f"\n⚙️ [Tuning] Applied {len(applied)} constants from UI: {applied}")
     emit('tuning_response', {'status': 'ok', 'applied': applied})
 
@@ -2639,13 +2568,7 @@ if __name__ == "__main__":
         # Host 0.0.0.0 makes it available on your Wi-Fi
         socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
     finally:
-        # Safety cleanup
+        # Safety cleanup — car_system.cleanup() stops PWMs + releases GPIO
         narration_engine.stop()
         autopilot.stop()
         car_system.cleanup()
-        try:
-            pwm_a.stop()
-            pwm_b.stop()
-        except Exception:
-            pass
-        GPIO.cleanup()

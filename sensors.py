@@ -13,7 +13,7 @@ TRIG = 25  # Output (Sends sound)
 ECHO = 24  # Input (Receives sound - voltage divided)
 
 # Rear Sonar
-REAR_TRIG = 26  # Output (Sends sound)
+REAR_TRIG = 20  # Output (Sends sound)
 REAR_ECHO = 16  # Input (Receives sound - voltage divided)
 
 # IR Obstacle Sensors

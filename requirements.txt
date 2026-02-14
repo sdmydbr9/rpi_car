@@ -7,4 +7,8 @@ python-dotenv==1.0.0
 websocket-client==1.9.0
 opencv-python==4.10.0.84
 numpy==1.26.4
-google-generativeai>=0.8.0pyttsx3>=2.90
+google-generativeai>=0.8.0
+pyttsx3>=2.90
+smbus2>=0.4.0
+mpu6050-raspberrypi>=1.2
+mpu6050-raspberrypi>=1.2

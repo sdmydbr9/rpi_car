@@ -20,6 +20,29 @@ def main():
         print(f"\nError details: {e}")
         return
 
+    # 1b. TEST MPU6050 (Gyroscope)
+    try:
+        import smbus2 as _smbus
+    except ImportError:
+        try:
+            import smbus as _smbus
+        except ImportError:
+            _smbus = None
+
+    if _smbus:
+        try:
+            bus = _smbus.SMBus(1)
+            who = bus.read_byte_data(0x68, 0x75)
+            bus.close()
+            if who in (0x68, 0x72):
+                print(f"{'MPU6050':<15} | {'ID=0x' + format(who, '02X'):<15} | [OK] ✅")
+            else:
+                print(f"{'MPU6050':<15} | {'ID=0x' + format(who, '02X'):<15} | [WARNING] ⚠️")
+        except Exception as e:
+            print(f"{'MPU6050':<15} | {'No Response':<15} | [FAILED] ❌")
+    else:
+        print(f"{'MPU6050':<15} | {'No smbus lib':<15} | [SKIPPED] ⚠️")
+
     # 2. TEST FRONT SONAR
     dist_front = car.get_sonar_distance()
     status_front = "UNKNOWN"

@@ -1,53 +1,33 @@
 """
-autopilot.py — Finite State Machine for autonomous collision-avoidance navigation.
+autopilot.py — Autonomous Rover with PID Heading Correction.
 
-States
-──────
-  CRUISING      Proportional speed control (fast in open space, brakes near walls)
-  PANIC_BRAKE   Immediate motor stop on obstacle detection
-  REVERSING     Drive backward to create maneuvering space (rear-aware)
-  PIVOTING      True tank turn (opposite wheels) to face away from obstacle
-  RECOVERY      Brief pause to let sensors stabilise before resuming
-  STUCK         Emergency stop — car is pinned between front and rear obstacles
-  UTURN         180° spin escape after repeated failed escape attempts
+3-State Finite State Machine
+─────────────────────────────
+  FORWARD_CRUISE       Drive forward with gyro-based PID heading correction.
+  OBSTACLE_AVOIDANCE   Stop → reverse → spin right → resume.
+  EMERGENCY_STOP       Cliff detected or manual kill — all motors locked.
 
-Sensor layout
-─────────────
-  Front Sonar   (Trig: 25, Echo: 24)  — forward obstacle detection
-  Rear Sonar    (Trig: 26, Echo: 16)  — reverse-path safety
-  Left/Right IR (GPIO 5 / 6)          — front-facing side detection
+Hardware
+────────
+  Motors (L298N)    IN1=17, IN2=27, ENA=12 (PWM0)
+                    IN3=22, IN4=23, ENB=13 (PWM1)  @ 1000 Hz
+  MPU6050           I2C Bus 1, Address 0x68 — Gyro Z-axis yaw rate
+  Front Sonar       Trig=25, Echo=24
+  Rear Sonar        Trig=20, Echo=16
+  IR Edge           Left=GPIO5, Right=GPIO6  (Active LOW = cliff)
 
-Dual-Direction Protection
-─────────────────────────
-  1.  Forward driving: if Front Sonar < 5 cm → ESCAPE ROUTINE.
-  2.  Escape Routine checks Rear Sonar *before* reversing:
-      • Rear < 10 cm → STUCK (car pinned, full stop).
-      • Otherwise → reverse in 0.1 s micro-steps, checking rear each step.
-      • If Rear < 5 cm *during* reverse → immediate stop & skip to pivot.
+PID Logic
+─────────
+  Target yaw rate = 0 °/s (straight line).
+  Gyro_Z drifting left  → increase left motor speed.
+  Gyro_Z drifting right → increase right motor speed.
 
-Sensor noise
-────────────
-  Sonar glitch filter: maintains a rolling window of recent readings.
-  Single 0 cm / negative spikes are discarded; the median of the window
-  is used as the "true" distance, eliminating single-reading glitches.
-
-Smart Power Management (Anti-Stuck Logic)
-─────────────────────────────────────────
-  While cruising with throttle > 0, monitors sonar distance continuously.
-  If distance hasn't changed by ±2 cm for 1.0 s, adds +5 % PWM boost per
-  second (capped at 80 % PWM).  Resets to default speed once movement is
-  detected (distance change > 5 cm).
-
-Escalating Escape Maneuvers
-───────────────────────────
-  Tracks consecutive failed escape attempts (failed_attempts counter).
-  Attempts 1-2: standard Reverse + Pivot.  Attempt 3+: executes a 180°
-  U-Turn (high-speed spin for 0.8 s).  Counter resets when path clears
-  (> 20 cm).
+Wraps the existing CarSystem (motor.py) and SensorSystem (sensors.py)
+through MotorDriver and Sonar helper classes for clean abstraction.
 """
 
-import random
 import time
+import threading
 from collections import deque
 from enum import Enum
 
@@ -55,122 +35,389 @@ from enum import Enum
 # ── FSM States ─────────────────────────────────────────
 
 class State(Enum):
-    CRUISING    = "CRUISING"
-    PANIC_BRAKE = "PANIC_BRAKE"
-    REVERSING   = "REVERSING"
-    PIVOTING    = "PIVOTING"
-    RECOVERY    = "RECOVERY"
-    STUCK       = "STUCK"
-    UTURN       = "UTURN"
+    FORWARD_CRUISE      = "FORWARD_CRUISE"
+    OBSTACLE_AVOIDANCE  = "OBSTACLE_AVOIDANCE"
+    EMERGENCY_STOP      = "EMERGENCY_STOP"
 
 
-# ── AutoPilot ──────────────────────────────────────────
+# ── PID Controller ─────────────────────────────────────
+
+class PIDController:
+    """Discrete PID controller with anti-windup clamping."""
+
+    def __init__(self, kp=2.0, ki=0.0, kd=0.5, output_limit=30.0):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.output_limit = output_limit
+        self._integral = 0.0
+        self._prev_error = 0.0
+
+    def update(self, error, dt):
+        """Compute PID output given current error and timestep (seconds)."""
+        if dt <= 0:
+            return 0.0
+
+        # Proportional
+        p = self.kp * error
+
+        # Integral with anti-windup
+        self._integral += error * dt
+        max_integral = self.output_limit / max(self.ki, 0.001)
+        self._integral = max(-max_integral, min(max_integral, self._integral))
+        i = self.ki * self._integral
+
+        # Derivative
+        d = self.kd * (error - self._prev_error) / dt
+        self._prev_error = error
+
+        # Sum and clamp
+        output = p + i + d
+        return max(-self.output_limit, min(self.output_limit, output))
+
+    def reset(self):
+        """Zero all internal state."""
+        self._integral = 0.0
+        self._prev_error = 0.0
+
+
+# ── MPU6050 Sensor ─────────────────────────────────────
+
+class MPU6050Sensor:
+    """
+    Reads Gyro Z-axis yaw rate from the MPU6050 over I2C.
+
+    Tries the high-level `mpu6050` pip library first; falls back to raw
+    smbus register reads if the library is unavailable.
+
+    I2C Address: 0x68 (default)
+    Register Map:
+        0x6B  PWR_MGMT_1  — write 0x00 to wake from sleep
+        0x47  GYRO_ZOUT_H — high byte of Z-axis gyro
+        0x48  GYRO_ZOUT_L — low byte of Z-axis gyro
+        0x75  WHO_AM_I    — should read 0x68
+    """
+
+    # Sensitivity for ±250 °/s range (default after reset)
+    _GYRO_SCALE = 131.0  # LSB per °/s
+
+    def __init__(self, address=0x68, bus_number=1):
+        self._address = address
+        self._bus_number = bus_number
+        self._offset_z = 0.0
+        self._available = False
+        self._use_lib = False
+        self._sensor = None
+        self._bus = None
+
+        # ── Try high-level library first ──
+        try:
+            from mpu6050 import mpu6050 as MPU6050Lib
+            self._sensor = MPU6050Lib(self._address)
+            # Quick read to verify hardware is present
+            self._sensor.get_gyro_data()
+            self._use_lib = True
+            self._available = True
+            print("🧭 MPU6050: Connected (mpu6050 library)")
+            return
+        except Exception:
+            pass
+
+        # ── Fallback: raw smbus ──
+        try:
+            import smbus2 as smbus_mod
+        except ImportError:
+            try:
+                import smbus as smbus_mod
+            except ImportError:
+                print("⚠️  MPU6050: No I2C library (install smbus2 or mpu6050)")
+                return
+
+        try:
+            self._bus = smbus_mod.SMBus(self._bus_number)
+            # Wake the sensor (clear sleep bit in PWR_MGMT_1)
+            self._bus.write_byte_data(self._address, 0x6B, 0x00)
+            time.sleep(0.05)
+            # Verify identity
+            who = self._bus.read_byte_data(self._address, 0x75)
+            if who not in (0x68, 0x72):  # MPU6050 or MPU6052
+                print(f"⚠️  MPU6050: Unexpected WHO_AM_I=0x{who:02X}")
+            self._available = True
+            print("🧭 MPU6050: Connected (raw smbus)")
+        except Exception as e:
+            print(f"⚠️  MPU6050: I2C init failed — {e}")
+
+    # ── Raw register helpers ───────────────────
+
+    def _read_raw_gyro_z(self):
+        """Read signed 16-bit Gyro-Z from registers 0x47-0x48."""
+        high = self._bus.read_byte_data(self._address, 0x47)
+        low = self._bus.read_byte_data(self._address, 0x48)
+        value = (high << 8) | low
+        if value >= 0x8000:
+            value -= 0x10000
+        return value / self._GYRO_SCALE
+
+    # ── Public API ─────────────────────────────
+
+    @property
+    def available(self):
+        return self._available
+
+    def read_gyro_z(self):
+        """
+        Return drift-corrected Z-axis yaw rate in °/s.
+
+        Positive = rotating clockwise (drifting right).
+        Negative = rotating counter-clockwise (drifting left).
+        Returns 0.0 if sensor is unavailable or on I2C error.
+        """
+        if not self._available:
+            return 0.0
+        try:
+            if self._use_lib:
+                data = self._sensor.get_gyro_data()
+                raw = data['z']
+            else:
+                raw = self._read_raw_gyro_z()
+            return raw - self._offset_z
+        except Exception:
+            return 0.0
+
+    def calibrate(self, duration=2.0):
+        """
+        Measure gyro Z drift while the robot is stationary.
+
+        Reads at ~100 Hz for *duration* seconds, computes the mean bias,
+        and stores it as the zero offset.  The robot MUST be still.
+        """
+        if not self._available:
+            print("🧭 MPU6050: Unavailable — skipping calibration (heading correction disabled)")
+            return
+
+        print(f"🧭 [CALIBRATING] Stand still for {duration:.0f}s — measuring gyro drift...")
+        samples = []
+        start = time.time()
+        while time.time() - start < duration:
+            try:
+                if self._use_lib:
+                    data = self._sensor.get_gyro_data()
+                    samples.append(data['z'])
+                else:
+                    samples.append(self._read_raw_gyro_z())
+            except Exception:
+                pass
+            time.sleep(0.01)  # ~100 Hz
+
+        if samples:
+            self._offset_z = sum(samples) / len(samples)
+            print(f"🧭 [CALIBRATED] {len(samples)} samples — drift offset = {self._offset_z:+.3f} °/s")
+        else:
+            self._offset_z = 0.0
+            print("🧭 [CALIBRATED] No samples collected — offset = 0.0")
+
+
+# ── Sonar Wrapper ──────────────────────────────────────
+
+class Sonar:
+    """
+    Wraps a sonar read callable with timeout protection and median filtering.
+
+    The underlying callable (from SensorSystem) already has its own
+    0.1 s per-pulse timeout.  This class adds a hard 0.15 s thread-level
+    timeout as a safety net, plus a 3-sample rolling median filter to
+    reject single-reading noise spikes.
+    """
+
+    def __init__(self, get_distance_fn, name="sonar"):
+        self._read = get_distance_fn
+        self.name = name
+        self._history = deque(maxlen=3)
+
+    def read(self):
+        """
+        Return filtered distance in cm.
+
+        -1  → timeout / sensor error
+        >0  → valid distance
+
+        The read is executed inside a daemon thread with a 0.15 s hard
+        timeout so a hung I/O bus can never freeze the main loop.
+        """
+        if self._read is None:
+            return -1
+
+        result = [None]
+
+        def _worker():
+            try:
+                result[0] = self._read()
+            except Exception:
+                result[0] = -1
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        t.join(timeout=0.15)
+
+        raw = result[0] if result[0] is not None else -1
+
+        # Feed valid readings into the median filter
+        if raw >= 0:
+            self._history.append(raw)
+
+        if len(self._history) == 0:
+            return raw
+
+        # Return median of buffered readings
+        buf = sorted(self._history)
+        return buf[len(buf) // 2]
+
+
+# ── Motor Driver Wrapper ──────────────────────────────
+
+class MotorDriver:
+    """
+    High-level motor commands with PID differential support.
+
+    Wraps CarSystem and adds the ability to apply an asymmetric
+    correction to left/right wheels for straight-line heading control.
+    """
+
+    def __init__(self, car):
+        """
+        Parameters
+        ----------
+        car : motor.CarSystem
+            The existing low-level motor controller.
+        """
+        self._car = car
+
+    def forward(self, base_speed, correction=0.0):
+        """
+        Drive forward with differential PID heading correction.
+
+        correction > 0 → drifting right → boost left, slow right.
+        correction < 0 → drifting left  → boost right, slow left.
+
+        Parameters
+        ----------
+        base_speed : float
+            Base PWM % (0-100).
+        correction : float
+            PID output added/subtracted to left/right wheels.
+        """
+        left_speed = max(0, min(100, base_speed + correction))
+        right_speed = max(0, min(100, base_speed - correction))
+        self._car._set_raw_motors(left_speed, right_speed, True, True)
+        self._car._current_speed = base_speed
+
+    def reverse(self, speed, duration=0.8):
+        """Reverse at *speed* for *duration* seconds, then stop."""
+        self._car.reverse(speed)
+        time.sleep(duration)
+        self._car.stop()
+
+    def spin_right(self, speed=50, duration=0.4):
+        """Tank-turn right (left fwd / right back) for *duration* s."""
+        self._car.pivot_turn("right", speed)
+        time.sleep(duration)
+        self._car.stop()
+
+    def stop(self):
+        """Gentle coast stop (all pins LOW, PWM 0)."""
+        self._car.stop()
+
+    def brake(self):
+        """Magnetic lock brake (H-bridge short-circuit)."""
+        self._car.brake()
+
+
+# ── Autonomous Rover (AutoPilot) ──────────────────────
 
 class AutoPilot:
     """
-    Finite State Machine for intelligent autonomous navigation with
-    dual-direction (front + rear) sonar protection.
+    3-State Autonomous Rover with PID heading correction.
+
+    States
+    ------
+    FORWARD_CRUISE      Drive forward; PID keeps heading straight.
+    OBSTACLE_AVOIDANCE  Stop → check rear → reverse → spin right → resume.
+    EMERGENCY_STOP      Cliff/edge detected or manual kill.
 
     Parameters
     ----------
     car : motor.CarSystem
-        Low-level motor controller (set_speed, reverse, pivot_turn, brake, stop).
-    get_sonar : callable  →  float
-        Returns front-centre distance in cm.
-    get_ir : callable  →  (bool, bool)
-        Returns (left_obstacle, right_obstacle).
-    get_rear_sonar : callable  →  float
-        Returns rear-centre distance in cm.
+        Low-level motor controller.
+    get_sonar : callable → float
+        Returns front sonar distance in cm.
+    get_ir : callable → (bool, bool)
+        Returns (left_cliff, right_cliff).  True = cliff/edge detected.
+    get_rear_sonar : callable → float | None
+        Returns rear sonar distance in cm (optional).
+    get_camera_distance : callable → float | None
+        Accepted for API compatibility; not used by the rover FSM.
     """
 
-    # ── Tuning constants ───────────────────────────────
-    FRONT_CRITICAL_CM    = 5      # Front sonar: escape trigger threshold
-    REAR_BLOCKED_CM      = 3     # Rear sonar: refuse to reverse below this
-    REAR_CRITICAL_CM     = 5      # Rear sonar: interrupt reverse below this
-    DANGER_CM            = 40     # Below this → escape maneuver (IR or sonar)
-    FULL_SPEED_CM        = 100    # Above this → max cruise speed
-    MAX_SPEED            = 80     # PWM % at full cruise
-    MIN_SPEED            = 30     # PWM % at DANGER_CM boundary
-    REVERSE_SPEED        = 40     # PWM % while reversing
-    PIVOT_SPEED          = 50    # PWM % while pivoting
-    REVERSE_DURATION     = 1    # max seconds of reverse (sum of micro-steps)
-    REVERSE_STEP         = 1.0    # seconds per reverse micro-step
-    PIVOT_DURATION       = 1.0    # seconds
-    RECOVERY_DURATION    = 1.0    # seconds
-    STUCK_RECHECK_INTERVAL = 1.0  # seconds between re-checking while stuck
-    SONAR_HISTORY_LEN    = 3      # median filter window
+    # ── Tuning constants (exposed to UI via TUNING_KEYS) ──
 
-    # ── Smart Power Management constants ───────────
-    STUCK_DISTANCE_THRESH = 2       # cm: distance change below this = "not moving"
-    STUCK_TIME_THRESH     = 1.0     # seconds of no movement before boost
-    STUCK_BOOST_STEP      = 5       # PWM % added per stuck interval
-    STUCK_BOOST_MAX       = 80      # PWM % absolute cap for boost
-    STUCK_MOVE_RESET      = 5       # cm: distance change above this = "moving again"
+    BASE_SPEED       = 50     # Forward cruise PWM %
+    FRONT_DANGER_CM  = 25     # Front obstacle threshold (cm)
+    REAR_CLEAR_CM    = 20     # Rear must be > this to reverse (cm)
+    REVERSE_SPEED    = 50     # Reverse PWM %
+    REVERSE_DURATION = 0.8    # Reverse time (seconds)
+    SPIN_SPEED       = 50     # Spin/pivot PWM %
+    SPIN_DURATION    = 0.4    # Spin-right time (seconds)
+    STOP_PAUSE       = 0.5    # Pause before avoidance maneuver (seconds)
+    PID_KP           = 2.0    # PID proportional gain
+    PID_KI           = 0.0    # PID integral gain
+    PID_KD           = 0.5    # PID derivative gain
+    PID_LIMIT        = 30.0   # Max PID correction (PWM %)
+    STATUS_INTERVAL  = 0.5    # Status print interval (seconds)
+    CALIBRATION_TIME = 2.0    # Gyro calibration duration (seconds)
 
-    # ── Escalating Escape constants ────────────────
-    MAX_NORMAL_ESCAPES    = 2       # attempts before triggering U-turn
-    UTURN_SPEED           = 75      # PWM % for U-turn spin  (was 70)
-    UTURN_DURATION        = 1.2     # seconds (was 0.8)
-    ESCAPE_CLEAR_CM       = 20      # cm: path considered clear → reset counter
-
-    # ── Camera/Vision fusion constants ─────────────
-    CAMERA_DANGER_CM      = 60      # camera-only early-warning threshold (cm)
-    CAMERA_CRITICAL_CM    = 20      # camera-only hard-stop threshold (cm)
-    CAMERA_TRUST_MIN_CM   = 10      # ignore camera distances below this (noise)
-
-    # All tunable keys (used for serialisation)
     TUNING_KEYS = [
-        'FRONT_CRITICAL_CM', 'REAR_BLOCKED_CM', 'REAR_CRITICAL_CM',
-        'DANGER_CM', 'FULL_SPEED_CM', 'MAX_SPEED', 'MIN_SPEED',
-        'REVERSE_SPEED', 'PIVOT_SPEED', 'REVERSE_DURATION', 'REVERSE_STEP',
-        'PIVOT_DURATION', 'RECOVERY_DURATION', 'STUCK_RECHECK_INTERVAL',
-        'SONAR_HISTORY_LEN', 'STUCK_DISTANCE_THRESH', 'STUCK_TIME_THRESH',
-        'STUCK_BOOST_STEP', 'STUCK_BOOST_MAX', 'STUCK_MOVE_RESET',
-        'MAX_NORMAL_ESCAPES', 'UTURN_SPEED', 'UTURN_DURATION', 'ESCAPE_CLEAR_CM',
-        'CAMERA_DANGER_CM', 'CAMERA_CRITICAL_CM', 'CAMERA_TRUST_MIN_CM',
+        "BASE_SPEED", "FRONT_DANGER_CM", "REAR_CLEAR_CM",
+        "REVERSE_SPEED", "REVERSE_DURATION",
+        "SPIN_SPEED", "SPIN_DURATION", "STOP_PAUSE",
+        "PID_KP", "PID_KI", "PID_KD", "PID_LIMIT",
+        "STATUS_INTERVAL", "CALIBRATION_TIME",
     ]
 
-    def get_tuning(self):
-        """Return current tuning constants as a dict."""
-        return {k: getattr(self, k) for k in self.TUNING_KEYS}
+    def __init__(self, car, get_sonar, get_ir,
+                 get_rear_sonar=None, get_camera_distance=None):
+        # Wrap low-level motor controller
+        self._motor = MotorDriver(car)
+        self._car = car  # Keep direct ref for speed telemetry
 
-    @classmethod
-    def get_default_tuning(cls):
-        """Return the original class-level default tuning constants."""
-        # Read from the class itself (not an instance) to get compile-time defaults
-        return {k: getattr(AutoPilot, k) for k in cls.TUNING_KEYS}
+        # Wrap sonar callables with timeout + median filter
+        self._front_sonar = Sonar(get_sonar, "front")
+        self._rear_sonar = Sonar(get_rear_sonar, "rear")
 
-    def __init__(self, car, get_sonar, get_ir, get_rear_sonar=None, get_camera_distance=None):
-        self._car               = car
-        self._get_sonar         = get_sonar
-        self._get_ir            = get_ir
-        self._get_rear_sonar    = get_rear_sonar
+        # IR callable: returns (left_cliff, right_cliff)
+        self._get_ir = get_ir
+
+        # Camera distance callable (kept for API compat, unused in rover FSM)
         self._get_camera_distance = get_camera_distance
 
-        # FSM
-        self._state           = State.CRUISING
-        self._active          = False
-        self._maneuver_start  = 0.0
-        self._reverse_elapsed = 0.0
-        self._turn_direction  = ""
+        # MPU6050 gyroscope
+        self._gyro = MPU6050Sensor()
 
-        # Sensor noise filters
-        self._sonar_history      = deque(maxlen=self.SONAR_HISTORY_LEN)
-        self._rear_sonar_history = deque(maxlen=self.SONAR_HISTORY_LEN)
+        # PID controller for heading correction
+        self._pid = PIDController(
+            kp=self.PID_KP,
+            ki=self.PID_KI,
+            kd=self.PID_KD,
+            output_limit=self.PID_LIMIT,
+        )
 
-        # Smart Power Management (anti-stuck boost)
-        self._stuck_boost        = 0       # accumulated PWM % on top of cruise speed
-        self._last_cruise_dist   = None    # last distance reading while cruising
-        self._stuck_timer        = 0.0     # time.time() when distance last changed
+        # State
+        self._state = State.FORWARD_CRUISE
+        self._active = False
+        self._turn_direction = ""
+        self._last_status_time = 0.0
+        self._last_pid_time = 0.0
 
-        # Escalating Escape Maneuvers
-        self._failed_attempts    = 0       # consecutive blocked escape attempts
-
-        # STUCK state active-escape tracking
-        self._stuck_phase        = 0       # 0=pivot-L, 1=pivot-R, 2=uturn, 3=wait
-        self._stuck_pivot_dir    = "left"  # alternates each U-turn cycle
-
-    # ── Properties ─────────────────────────────────────
+    # ── Properties (read-only for main.py) ─────
 
     @property
     def state(self):
@@ -184,429 +431,199 @@ class AutoPilot:
     def turn_direction(self):
         return self._turn_direction
 
-    # ── Start / Stop ───────────────────────────────────
+    # ── Tuning API ─────────────────────────────
+
+    @classmethod
+    def get_default_tuning(cls):
+        """Return compile-time default values for all tuning keys."""
+        return {key: getattr(cls, key) for key in cls.TUNING_KEYS}
+
+    def get_tuning(self):
+        """Return current instance values for all tuning keys."""
+        return {key: getattr(self, key) for key in self.TUNING_KEYS}
+
+    # ── Lifecycle ──────────────────────────────
 
     def start(self):
-        """Activate autopilot; begins in CRUISING."""
+        """Calibrate gyro, reset PID, begin FORWARD_CRUISE."""
+        self._gyro.calibrate(duration=self.CALIBRATION_TIME)
+        self._pid = PIDController(
+            kp=self.PID_KP,
+            ki=self.PID_KI,
+            kd=self.PID_KD,
+            output_limit=self.PID_LIMIT,
+        )
+        self._state = State.FORWARD_CRUISE
+        self._turn_direction = ""
+        self._last_status_time = time.time()
+        self._last_pid_time = time.time()
         self._active = True
-        self._state  = State.CRUISING
-        self._sonar_history.clear()
-        self._rear_sonar_history.clear()
-        # Reset power management & escalation state
-        self._stuck_boost      = 0
-        self._last_cruise_dist = None
-        self._stuck_timer      = 0.0
-        self._failed_attempts  = 0
-        self._stuck_phase      = 0
+        print("🚀 [ROVER] Autonomous navigation STARTED")
 
     def stop(self):
-        """Deactivate autopilot and stop motors immediately."""
+        """Halt all motors and deactivate FSM."""
         self._active = False
-        self._state  = State.CRUISING
-        self._car.stop()
-        self._stuck_boost     = 0
-        self._failed_attempts = 0
+        self._motor.brake()
+        self._pid.reset()
+        print("🛑 [ROVER] Autonomous navigation STOPPED")
 
-    # ── Sensor helpers ─────────────────────────────────
+    # ── Sensor helpers ─────────────────────────
 
-    def _filtered_sonar(self, raw):
-        """
-        Push a raw front reading into the history; return the median.
-        Rejects invalid values (≤ 0) — they are not added to the window.
-        If the window is empty, returns a safe fallback (999 cm).
-        """
-        if raw is not None and raw > 0:
-            self._sonar_history.append(raw)
-
-        if not self._sonar_history:
-            return 999.0  # safe fallback: assume wide open
-
-        buf = sorted(self._sonar_history)
-        mid = len(buf) // 2
-        return float(buf[mid])
-
-    def _filtered_rear_sonar(self, raw):
-        """
-        Push a raw rear reading into the history; return the median.
-        Same glitch-rejection logic as the front sonar filter.
-        """
-        if raw is not None and raw > 0:
-            self._rear_sonar_history.append(raw)
-
-        if not self._rear_sonar_history:
-            return 999.0
-
-        buf = sorted(self._rear_sonar_history)
-        mid = len(buf) // 2
-        return float(buf[mid])
+    def _read_ir(self):
+        """Read IR cliff sensors. Returns (left_cliff, right_cliff)."""
+        try:
+            return self._get_ir()
+        except Exception:
+            return (False, False)
 
     def get_rear_distance(self):
-        """
-        Public helper: read and filter the rear sonar.
-        Returns filtered distance in cm (999.0 if sensor unavailable).
-        """
-        if self._get_rear_sonar is None:
-            return 999.0
-        raw = self._get_rear_sonar()
-        return self._filtered_rear_sonar(raw)
+        """Public accessor for rear sonar (used by telemetry if needed)."""
+        return self._rear_sonar.read()
 
-    def _get_front_distance(self):
-        """Internal helper to read and filter the front sonar."""
-        raw = self._get_sonar()
-        return self._filtered_sonar(raw)
+    # ── Status printer ─────────────────────────
 
-    def _get_camera_distance_safe(self):
-        """
-        Read camera virtual distance; returns 999.0 if unavailable.
-        Rejects values below CAMERA_TRUST_MIN_CM as noise.
-        """
-        if self._get_camera_distance is None:
-            return 999.0
-        try:
-            d = self._get_camera_distance()
-            if d is None or d < self.CAMERA_TRUST_MIN_CM:
-                return 999.0
-            return float(d)
-        except Exception:
-            return 999.0
+    def _maybe_print_status(self, front_dist, gyro_z, correction):
+        """Print status line at STATUS_INTERVAL frequency."""
+        now = time.time()
+        if now - self._last_status_time >= self.STATUS_INTERVAL:
+            self._last_status_time = now
+            state_name = self._state.value
+            print(f"📡 [{state_name}] Front: {front_dist:.0f}cm | "
+                  f"Gyro_Z: {gyro_z:+.2f}°/s | "
+                  f"PID: {correction:+.1f} | "
+                  f"Speed: {self.BASE_SPEED}")
 
-    def _get_fused_front_distance(self):
-        """
-        Fused forward distance: minimum of sonar and camera.
-        Conservative — reacts to whichever sensor sees an obstacle first.
-        Camera provides earlier detection at medium range; sonar gives
-        accurate close-range data.
-        """
-        sonar_dist = self._get_front_distance()
-        camera_dist = self._get_camera_distance_safe()
-        return min(sonar_dist, camera_dist)
-
-    # ── Turn direction decision ────────────────────────
-
-    def _decide_turn_direction(self, left_ir, right_ir):
-        if left_ir and not right_ir:
-            self._turn_direction = "right"
-        elif right_ir and not left_ir:
-            self._turn_direction = "left"
-        else:
-            # Both blocked or only sonar (center hit) → random
-            self._turn_direction = random.choice(["left", "right"])
-
-    # ── Main update (call at ~20 Hz) ───────────────────
+    # ── FSM Core ───────────────────────────────
 
     def update(self):
         """
-        Single tick of the FSM.  Should be called in a loop at ~20 Hz.
-        Reads sensors, dispatches to the current state handler.
-        Uses fused distance (sonar + camera) for forward-facing states
-        (CRUISING, threat detection).  Reverse/stuck states use sonar only
-        since the camera faces forward.
+        Single tick of the 3-state FSM.
+
+        Called by the drive_autonomous thread at ~20 Hz.
+        OBSTACLE_AVOIDANCE is a blocking sequence (~1.7 s) which is
+        acceptable since it runs in a dedicated daemon thread.
         """
         if not self._active:
             return
 
-        # Read sensors — fused distance for forward states
-        raw_sonar         = self._get_sonar()
-        sonar_distance    = self._filtered_sonar(raw_sonar)
-        camera_distance   = self._get_camera_distance_safe()
-        # Use minimum of both sensors (conservative)
-        distance          = min(sonar_distance, camera_distance)
-        left_ir, right_ir = self._get_ir()
-
-        # Dispatch
-        handler = {
-            State.CRUISING:    self._state_cruising,
-            State.PANIC_BRAKE: self._state_panic_brake,
-            State.REVERSING:   self._state_reversing,
-            State.PIVOTING:    self._state_pivoting,
-            State.RECOVERY:    self._state_recovery,
-            State.STUCK:       self._state_stuck,
-            State.UTURN:       self._state_uturn,
-        }[self._state]
-
-        handler(distance, left_ir, right_ir)
-
-    # ── State A: CRUISING ──────────────────────────────
-
-    def _state_cruising(self, distance, left_ir, right_ir):
-        # CRITICAL CHECK: Fused distance < 5 cm → escape
-        if distance < self.FRONT_CRITICAL_CM:
-            self._decide_turn_direction(left_ir, right_ir)
-            self._state = State.PANIC_BRAKE
-            self._car.brake()
-            self._maneuver_start = time.time()
-            print(f"🚨 [AutoPilot] CRITICAL: Fused distance {distance:.1f}cm < {self.FRONT_CRITICAL_CM}cm → PANIC_BRAKE, plan turn {self._turn_direction}")
+        # ── STATE: EMERGENCY_STOP ──
+        if self._state == State.EMERGENCY_STOP:
+            # Stay locked.  Only start() can exit this state.
+            self._motor.brake()
             return
 
-        # Camera-only critical check (object very close in camera)
-        camera_dist = self._get_camera_distance_safe()
-        if camera_dist < self.CAMERA_CRITICAL_CM:
-            self._decide_turn_direction(left_ir, right_ir)
-            self._state = State.PANIC_BRAKE
-            self._car.brake()
-            self._maneuver_start = time.time()
-            print(f"📷 [AutoPilot] CAMERA CRITICAL: Object at {camera_dist:.1f}cm → PANIC_BRAKE, plan turn {self._turn_direction}")
+        # ── Check IR cliff sensors (applies in any non-emergency state) ──
+        left_cliff, right_cliff = self._read_ir()
+        if left_cliff or right_cliff:
+            self._state = State.EMERGENCY_STOP
+            self._motor.brake()
+            side = "LEFT" if left_cliff else "RIGHT"
+            if left_cliff and right_cliff:
+                side = "BOTH"
+            print(f"\n⚠️  EMERGENCY STOP — Cliff detected ({side})!")
+            print(f"    IR Left: {'CLIFF' if left_cliff else 'OK'} | "
+                  f"IR Right: {'CLIFF' if right_cliff else 'OK'}")
             return
 
-        # Wider threat check (IR or moderate sonar/camera proximity)
-        if distance < self.DANGER_CM or left_ir or right_ir:
-            self._decide_turn_direction(left_ir, right_ir)
-            self._state = State.PANIC_BRAKE
-            self._car.brake()
-            self._maneuver_start = time.time()
-            if left_ir:
-                side = "LEFT_IR"
-            elif right_ir:
-                side = "RIGHT_IR"
-            elif camera_dist < self.DANGER_CM:
-                side = f"CAMERA {camera_dist:.0f}cm"
+        # ── STATE: FORWARD_CRUISE ──
+        if self._state == State.FORWARD_CRUISE:
+            self._turn_direction = ""
+
+            # Read front sonar
+            front_dist = self._front_sonar.read()
+
+            # Obstacle check
+            if 0 < front_dist < self.FRONT_DANGER_CM:
+                print(f"\n🚧 [CRUISE→AVOID] Obstacle at {front_dist:.0f}cm "
+                      f"(threshold: {self.FRONT_DANGER_CM}cm)")
+                self._state = State.OBSTACLE_AVOIDANCE
+                # Fall through to avoidance handler below
             else:
-                side = f"SONAR {distance:.0f}cm"
-            print(f"🚨 [AutoPilot] Threat detected ({side}) → PANIC_BRAKE, plan turn {self._turn_direction}")
-            return
+                # PID heading correction
+                now = time.time()
+                dt = now - self._last_pid_time
+                self._last_pid_time = now
 
-        # Proportional speed (based on fused distance)
-        if distance >= self.FULL_SPEED_CM:
-            base_speed = self.MAX_SPEED
-        else:
-            # Linear map: DANGER_CM → MIN_SPEED,  FULL_SPEED_CM → MAX_SPEED
-            ratio = (distance - self.DANGER_CM) / (self.FULL_SPEED_CM - self.DANGER_CM)
-            base_speed = self.MIN_SPEED + ratio * (self.MAX_SPEED - self.MIN_SPEED)
-            base_speed = max(self.MIN_SPEED, min(self.MAX_SPEED, base_speed))
+                gyro_z = self._gyro.read_gyro_z()
 
-        # ── Camera early-warning speed reduction ──────
-        # If camera sees something sonar doesn't, proactively slow down
-        if camera_dist < self.CAMERA_DANGER_CM and camera_dist < distance:
-            cam_ratio = camera_dist / self.CAMERA_DANGER_CM  # 0.0 at 0cm, 1.0 at threshold
-            cam_speed = self.MIN_SPEED + cam_ratio * (base_speed - self.MIN_SPEED)
-            if cam_speed < base_speed:
-                base_speed = cam_speed
+                # Error = deviation from target yaw rate of 0
+                # Positive gyro_z = drifting right → need positive correction
+                # (boost left wheel, slow right wheel)
+                correction = self._pid.update(gyro_z, dt)
 
-        # ── Dynamic Power Boost (anti-stuck) ──────────
-        now = time.time()
+                # Drive forward with differential correction
+                self._motor.forward(self.BASE_SPEED, correction)
 
-        if self._last_cruise_dist is None:
-            # First tick — initialise tracking
-            self._last_cruise_dist = distance
-            self._stuck_timer = now
+                # Periodic status
+                self._maybe_print_status(
+                    front_dist if front_dist >= 0 else 999,
+                    gyro_z, correction)
+                return
 
-        delta = abs(distance - self._last_cruise_dist)
+        # ── STATE: OBSTACLE_AVOIDANCE ──
+        if self._state == State.OBSTACLE_AVOIDANCE:
+            self._turn_direction = "right"
 
-        if delta > self.STUCK_MOVE_RESET:
-            # Car is clearly moving — reset boost
-            if self._stuck_boost > 0:
-                print(f"✅ [AutoPilot] Movement detected (Δ{delta:.1f}cm) → reset boost")
-            self._stuck_boost = 0
-            self._last_cruise_dist = distance
-            self._stuck_timer = now
-        elif delta > self.STUCK_DISTANCE_THRESH:
-            # Some movement — update reference but keep current boost
-            self._last_cruise_dist = distance
-            self._stuck_timer = now
-        else:
-            # Distance unchanged — check if stuck long enough to boost
-            if (now - self._stuck_timer) >= self.STUCK_TIME_THRESH:
-                new_boost = self._stuck_boost + self.STUCK_BOOST_STEP
-                cap = self.STUCK_BOOST_MAX - base_speed
-                self._stuck_boost = max(0, min(new_boost, cap))
-                self._stuck_timer = now  # restart interval
-                self._last_cruise_dist = distance
-                print(f"⚡ [AutoPilot] Stuck detected — boost now +{self._stuck_boost}% "
-                      f"(total {base_speed + self._stuck_boost}%)")
+            # Phase 1: Stop
+            self._motor.stop()
+            time.sleep(self.STOP_PAUSE)
 
-        speed = min(base_speed + self._stuck_boost, self.STUCK_BOOST_MAX)
+            if not self._active:
+                return
 
-        self._car.set_speed(int(speed))
-        self._car.set_steering(0)
-
-    # ── State B: PANIC_BRAKE ───────────────────────────
-
-    def _state_panic_brake(self, distance, left_ir, right_ir):
-        # Brake is already applied on entry.  Hold for one cycle (~50 ms)
-        # to guarantee motors are fully stopped before the escape routine.
-        self._car.brake()
-
-        # ── Pre-reverse rear check ──────────────────────
-        rear_dist = self.get_rear_distance()
-
-        # ── Escalation check ──────────────────────────
-        self._failed_attempts += 1
-
-        if self._failed_attempts > self.MAX_NORMAL_ESCAPES:
-            # Too many failed escapes → perform U-turn
-            self._state = State.UTURN
-            self._maneuver_start = time.time()
-            print(f"🔃 [AutoPilot] Escalation! {self._failed_attempts} attempts "
-                  f"→ U-TURN ({self.UTURN_SPEED}% for {self.UTURN_DURATION}s)")
-            return
-
-        if rear_dist < self.REAR_BLOCKED_CM:
-            # Can't reverse — but CAN pivot in place (zero-radius turn).
-            # Skip straight to PIVOTING instead of sitting in STUCK.
-            self._decide_turn_direction(left_ir, right_ir)
-            self._state = State.PIVOTING
-            self._maneuver_start = time.time()
-            print(f"⚠️  [AutoPilot] Rear blocked ({rear_dist:.1f}cm < {self.REAR_BLOCKED_CM}cm) "
-                  f"— skipping reverse, PIVOTING {self._turn_direction}")
-            return
-
-        # Rear is clear → proceed to rear-aware reverse
-        self._state = State.REVERSING
-        self._maneuver_start = time.time()
-        self._reverse_elapsed = 0.0
-        print(f"🔄 [AutoPilot] PANIC_BRAKE → REVERSING (rear clear at {rear_dist:.1f}cm, attempt {self._failed_attempts})")
-
-    # ── State C1: REVERSING (rear-aware micro-steps) ───
-
-    def _state_reversing(self, distance, left_ir, right_ir):
-        # Check rear sonar every tick
-        rear_dist = self.get_rear_distance()
-
-        if rear_dist < self.REAR_CRITICAL_CM:
-            # Rear obstacle appeared during reverse → STOP IMMEDIATELY
-            self._car.stop()
-            self._state = State.PIVOTING
-            self._maneuver_start = time.time()
-            return
-
-        # Reverse with slight steering bias for better escape positioning.
-        # Bias OPPOSITE to the planned pivot direction so the car swings
-        # its nose away from the obstacle during the reverse.
-        steer_bias = -25 if self._turn_direction == "left" else 25
-        self._car.reverse_steer(self.REVERSE_SPEED, steer_bias)
-
-        elapsed = time.time() - self._maneuver_start
-        if elapsed >= self.REVERSE_DURATION:
-            self._car.stop()
-            self._state = State.PIVOTING
-            self._maneuver_start = time.time()
-            print(f"🔄 [AutoPilot] REVERSING complete ({elapsed:.2f}s) → PIVOTING {self._turn_direction}")
-
-    # ── State C2: PIVOTING ─────────────────────────────
-
-    def _state_pivoting(self, distance, left_ir, right_ir):
-        self._car.pivot_turn(self._turn_direction, self.PIVOT_SPEED)
-
-        if time.time() - self._maneuver_start >= self.PIVOT_DURATION:
-            self._car.stop()
-            self._state = State.RECOVERY
-            self._maneuver_start = time.time()
-            print("🔄 [AutoPilot] PIVOTING → RECOVERY")
-
-    # ── State C3: RECOVERY ─────────────────────────────
-
-    def _state_recovery(self, distance, left_ir, right_ir):
-        # Car is stopped; sensors stabilise.
-        if time.time() - self._maneuver_start >= self.RECOVERY_DURATION:
-            # If path is clear, reset escalation counter
-            if distance >= self.ESCAPE_CLEAR_CM:
-                if self._failed_attempts > 0:
-                    print(f"✅ [AutoPilot] Path clear ({distance:.1f}cm ≥ {self.ESCAPE_CLEAR_CM}cm) "
-                          f"→ reset failed_attempts ({self._failed_attempts} → 0)")
-                self._failed_attempts = 0
-                self._state = State.CRUISING
-                # Reset stuck-boost tracking for fresh cruise
-                self._last_cruise_dist = None
-                self._stuck_boost = 0
-                print("✅ [AutoPilot] RECOVERY → CRUISING")
+            # Phase 2: Check rear and reverse if clear
+            rear_dist = self._rear_sonar.read()
+            if rear_dist < 0 or rear_dist > self.REAR_CLEAR_CM:
+                # Rear is clear (or no rear sensor) — reverse
+                print(f"    ↩️  Reversing for {self.REVERSE_DURATION:.1f}s "
+                      f"(rear: {rear_dist:.0f}cm)")
+                self._motor.reverse(self.REVERSE_SPEED, self.REVERSE_DURATION)
             else:
-                # Path still blocked — re-enter escape sequence directly
-                # instead of CRUISING (which would immediately re-trigger
-                # PANIC_BRAKE and waste a full cycle).
-                self._decide_turn_direction(left_ir, right_ir)
-                self._state = State.PANIC_BRAKE
-                self._car.brake()
-                self._maneuver_start = time.time()
-                print(f"⚠️  [AutoPilot] RECOVERY → path still blocked ({distance:.1f}cm) → PANIC_BRAKE")
+                print(f"    ⛔ Rear blocked ({rear_dist:.0f}cm) — skipping reverse")
 
-    # ── State D: STUCK ─────────────────────────────────
+            if not self._active:
+                return
 
-    def _state_stuck(self, distance, left_ir, right_ir):
-        """
-        Car is pinned between obstacles.  Instead of passively waiting,
-        actively cycle through escape maneuvers:
-          Phase 0 — Pivot left   (1.5 s)
-          Phase 1 — Pivot right  (1.5 s)
-          Phase 2 — Aggressive U-turn spin
-          Phase 3 — Brief pause, then restart the cycle
-        After each phase, check whether front or rear has opened up.
-        """
-        now = time.time()
-        rear_dist = self.get_rear_distance()
-        front_dist = distance
-        elapsed = now - self._maneuver_start
+            # Phase 3: Brief stop before spin
+            self._motor.stop()
+            time.sleep(0.1)
 
-        # ── Quick-exit checks (run every tick) ─────────────────────
-        if front_dist >= self.DANGER_CM:
-            self._car.stop()
-            self._failed_attempts = 0
-            self._stuck_phase = 0
-            self._state = State.CRUISING
-            self._last_cruise_dist = None
-            self._stuck_boost = 0
-            print(f"🔓 [AutoPilot] STUCK cleared — front {front_dist:.1f}cm → CRUISING")
+            if not self._active:
+                return
+
+            # Phase 4: Spin right to change direction
+            print(f"    🔄 Spinning right for {self.SPIN_DURATION:.1f}s")
+            self._motor.spin_right(self.SPIN_SPEED, self.SPIN_DURATION)
+
+            if not self._active:
+                return
+
+            # Phase 5: Reset PID and resume cruising
+            self._pid.reset()
+            self._last_pid_time = time.time()
+            self._turn_direction = ""
+            self._state = State.FORWARD_CRUISE
+            print("    ✅ Avoidance complete — resuming FORWARD_CRUISE\n")
             return
 
-        if rear_dist >= self.REAR_BLOCKED_CM + 3:
-            self._car.stop()
-            self._decide_turn_direction(left_ir, right_ir)
-            self._state = State.REVERSING
-            self._maneuver_start = now
-            self._reverse_elapsed = 0.0
-            self._stuck_phase = 0
-            print(f"🔓 [AutoPilot] STUCK cleared — rear {rear_dist:.1f}cm → REVERSING")
-            return
 
-        # ── Phase 0: Pivot left ────────────────────────────────────
-        if self._stuck_phase == 0:
-            self._car.pivot_turn("left", self.PIVOT_SPEED)
-            if elapsed >= 1.5:
-                self._car.stop()
-                self._stuck_phase = 1
-                self._maneuver_start = now
-                print("🔄 [AutoPilot] STUCK: pivot-left done → trying pivot-right")
+# ── Standalone test ────────────────────────────────────
 
-        # ── Phase 1: Pivot right ───────────────────────────────────
-        elif self._stuck_phase == 1:
-            self._car.pivot_turn("right", self.PIVOT_SPEED)
-            if elapsed >= 1.5:
-                self._car.stop()
-                self._stuck_phase = 2
-                self._maneuver_start = now
-                # Pick a U-turn direction (alternates each full cycle)
-                self._stuck_pivot_dir = (
-                    "right" if self._stuck_pivot_dir == "left" else "left"
-                )
-                print("🔄 [AutoPilot] STUCK: pivot-right done → trying U-turn")
+if __name__ == "__main__":
+    print("=" * 60)
+    print("  AUTONOMOUS ROVER — Standalone Sensor Test")
+    print("=" * 60)
 
-        # ── Phase 2: Aggressive U-turn spin ────────────────────────
-        elif self._stuck_phase == 2:
-            self._car.pivot_turn(self._stuck_pivot_dir, self.UTURN_SPEED)
-            if elapsed >= self.UTURN_DURATION:
-                self._car.stop()
-                self._stuck_phase = 3
-                self._maneuver_start = now
-                print(f"🔃 [AutoPilot] STUCK: U-turn ({self._stuck_pivot_dir}) done → brief pause")
+    # Test MPU6050
+    gyro = MPU6050Sensor()
+    if gyro.available:
+        gyro.calibrate(2.0)
+        print("\nReading Gyro Z for 5 seconds:")
+        for _ in range(50):
+            z = gyro.read_gyro_z()
+            print(f"  Gyro_Z: {z:+.2f} °/s")
+            time.sleep(0.1)
+    else:
+        print("\nMPU6050 not available — skipping gyro test")
 
-        # ── Phase 3: Brief pause then restart cycle ────────────────
-        elif self._stuck_phase == 3:
-            self._car.stop()
-            if elapsed >= 0.5:
-                self._stuck_phase = 0
-                self._maneuver_start = now
-                print("🔄 [AutoPilot] STUCK: restarting escape cycle")
-
-    # ── State E: U-TURN (escalated escape) ─────────────
-
-    def _state_uturn(self, distance, left_ir, right_ir):
-        """
-        180° spin escape: triggered after MAX_NORMAL_ESCAPES consecutive
-        failed reverse-and-pivot maneuvers.
-        """
-        self._car.pivot_turn(self._turn_direction, self.UTURN_SPEED)
-
-        if time.time() - self._maneuver_start >= self.UTURN_DURATION:
-            self._car.stop()
-            self._state = State.RECOVERY
-            self._maneuver_start = time.time()
-            print(f"🔃 [AutoPilot] U-TURN complete → RECOVERY")
+    print("\nDone.")
