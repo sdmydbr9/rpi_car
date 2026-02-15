@@ -1,11 +1,23 @@
 """
 autopilot.py — Autonomous Rover with PID Heading Correction.
 
-3-State Finite State Machine
+4-State Finite State Machine
 ─────────────────────────────
   FORWARD_CRUISE       Drive forward with gyro-based PID heading correction.
-  OBSTACLE_AVOIDANCE   Stop → reverse → spin right → resume.
+  OBSTACLE_STEERING    Smooth path correction — steer around obstacles using
+                       front sonar + IR direction sensing + MPU6050 heading.
+  OBSTACLE_FALLBACK    Last-resort: stop → reverse → spin (if steering fails).
   EMERGENCY_STOP       Cliff detected or manual kill — all motors locked.
+
+Smart Steering
+──────────────
+  When front sonar detects an obstacle within STEER_DETECT_CM (60cm):
+  1. Speed is proportionally reduced based on distance.
+  2. IR sensors choose steer direction (away from blocked side).
+  3. Steering angle increases as distance decreases.
+  4. MPU6050 gyro tracks heading offset for course-return after clearing.
+  5. If distance drops below STEER_FALLBACK_CM (15cm) or times out,
+     falls back to the old stop → reverse → spin sequence.
 
 Hardware
 ────────
@@ -14,7 +26,7 @@ Hardware
   MPU6050           I2C Bus 1, Address 0x68 — Gyro Z-axis yaw rate
   Front Sonar       Trig=25, Echo=24
   Rear Sonar        Trig=20, Echo=16
-  IR Edge           Left=GPIO5, Right=GPIO6  (Active LOW = cliff)
+  IR Edge           Left=GPIO5, Right=GPIO6  (Active LOW = obstacle)
 
 PID Logic
 ─────────
@@ -36,7 +48,8 @@ from enum import Enum
 
 class State(Enum):
     FORWARD_CRUISE      = "FORWARD_CRUISE"
-    OBSTACLE_AVOIDANCE  = "OBSTACLE_AVOIDANCE"
+    OBSTACLE_STEERING   = "OBSTACLE_STEERING"
+    OBSTACLE_FALLBACK   = "OBSTACLE_FALLBACK"
     EMERGENCY_STOP      = "EMERGENCY_STOP"
 
 
@@ -327,6 +340,38 @@ class MotorDriver:
         """Gentle coast stop (all pins LOW, PWM 0)."""
         self._car.stop()
 
+    def forward_steer(self, speed, angle):
+        """
+        Drive forward with a steering angle (like a car turn).
+
+        Uses differential speed: inner wheel slows, outer stays at full.
+
+        Parameters
+        ----------
+        speed : float
+            Forward PWM % (0-100).
+        angle : float
+            Steering angle. Negative = left, positive = right.
+            Magnitude 0-90; deadzone ±5° treated as straight.
+        """
+        turn_factor = abs(angle) / 90.0
+        inner = speed * (1.0 - turn_factor * 0.9)  # drops to 10% at ±90°
+
+        left_speed = speed
+        right_speed = speed
+
+        if angle < -5:      # turning LEFT → slow left wheel
+            left_speed = inner
+        elif angle > 5:     # turning RIGHT → slow right wheel
+            right_speed = inner
+
+        self._car._set_raw_motors(
+            max(0, min(100, left_speed)),
+            max(0, min(100, right_speed)),
+            True, True
+        )
+        self._car._current_speed = speed
+
     def brake(self):
         """Magnetic lock brake (H-bridge short-circuit)."""
         self._car.brake()
@@ -336,12 +381,13 @@ class MotorDriver:
 
 class AutoPilot:
     """
-    3-State Autonomous Rover with PID heading correction.
+    4-State Autonomous Rover with smart steering obstacle avoidance.
 
     States
     ------
     FORWARD_CRUISE      Drive forward; PID keeps heading straight.
-    OBSTACLE_AVOIDANCE  Stop → check rear → reverse → spin right → resume.
+    OBSTACLE_STEERING   Proportional slow-down + steer around obstacle.
+    OBSTACLE_FALLBACK   Last-resort: stop → reverse → spin (if steering fails).
     EMERGENCY_STOP      Cliff/edge detected or manual kill.
 
     Parameters
@@ -351,7 +397,7 @@ class AutoPilot:
     get_sonar : callable → float
         Returns front sonar distance in cm.
     get_ir : callable → (bool, bool)
-        Returns (left_cliff, right_cliff).  True = cliff/edge detected.
+        Returns (left_obstacle, right_obstacle).  True = obstacle detected.
     get_rear_sonar : callable → float | None
         Returns rear sonar distance in cm (optional).
     get_camera_distance : callable → float | None
@@ -360,14 +406,9 @@ class AutoPilot:
 
     # ── Tuning constants (exposed to UI via TUNING_KEYS) ──
 
+    # ── Cruise tuning ──
     BASE_SPEED       = 50     # Forward cruise PWM %
-    FRONT_DANGER_CM  = 25     # Front obstacle threshold (cm)
     REAR_CLEAR_CM    = 20     # Rear must be > this to reverse (cm)
-    REVERSE_SPEED    = 50     # Reverse PWM %
-    REVERSE_DURATION = 0.8    # Reverse time (seconds)
-    SPIN_SPEED       = 50     # Spin/pivot PWM %
-    SPIN_DURATION    = 0.4    # Spin-right time (seconds)
-    STOP_PAUSE       = 0.5    # Pause before avoidance maneuver (seconds)
     PID_KP           = 2.0    # PID proportional gain
     PID_KI           = 0.0    # PID integral gain
     PID_KD           = 0.5    # PID derivative gain
@@ -375,12 +416,37 @@ class AutoPilot:
     STATUS_INTERVAL  = 0.5    # Status print interval (seconds)
     CALIBRATION_TIME = 2.0    # Gyro calibration duration (seconds)
 
+    # ── Smart steering avoidance ──
+    STEER_DETECT_CM  = 60     # Begin slowing + steering at this distance (cm)
+    STEER_ACTIVE_CM  = 40     # Steering becomes more aggressive below this (cm)
+    STEER_FALLBACK_CM = 15    # Give up steering, fall back to stop-reverse (cm)
+    STEER_CLEAR_CM   = 70     # Path is clear above this distance (cm)
+    STEER_ANGLE_MIN  = 15     # Min avoidance steering angle (degrees)
+    STEER_ANGLE_MAX  = 55     # Max avoidance steering angle (degrees)
+    STEER_SPEED_MIN  = 25     # Min forward speed during avoidance (PWM %)
+    STEER_TIMEOUT    = 5.0    # Max seconds in OBSTACLE_STEERING before fallback
+    HEADING_KP       = 1.5    # Proportional gain for heading return after clearing
+    HEADING_TOLERANCE = 3.0   # Degrees — heading considered restored below this
+
+    # ── Fallback (stop-reverse-spin) ──
+    FRONT_DANGER_CM  = 25     # Legacy threshold (used for fallback only)
+    REVERSE_SPEED    = 50     # Reverse PWM %
+    REVERSE_DURATION = 0.8    # Reverse time (seconds)
+    SPIN_SPEED       = 50     # Spin/pivot PWM %
+    SPIN_DURATION    = 0.4    # Spin-right time (seconds)
+    STOP_PAUSE       = 0.5    # Pause before fallback maneuver (seconds)
+
     TUNING_KEYS = [
-        "BASE_SPEED", "FRONT_DANGER_CM", "REAR_CLEAR_CM",
-        "REVERSE_SPEED", "REVERSE_DURATION",
-        "SPIN_SPEED", "SPIN_DURATION", "STOP_PAUSE",
+        "BASE_SPEED", "REAR_CLEAR_CM",
         "PID_KP", "PID_KI", "PID_KD", "PID_LIMIT",
         "STATUS_INTERVAL", "CALIBRATION_TIME",
+        # Smart steering
+        "STEER_DETECT_CM", "STEER_ACTIVE_CM", "STEER_FALLBACK_CM",
+        "STEER_CLEAR_CM", "STEER_ANGLE_MIN", "STEER_ANGLE_MAX",
+        "STEER_SPEED_MIN", "STEER_TIMEOUT", "HEADING_KP", "HEADING_TOLERANCE",
+        # Fallback
+        "FRONT_DANGER_CM", "REVERSE_SPEED", "REVERSE_DURATION",
+        "SPIN_SPEED", "SPIN_DURATION", "STOP_PAUSE",
     ]
 
     def __init__(self, car, get_sonar, get_ir,
@@ -416,6 +482,12 @@ class AutoPilot:
         self._turn_direction = ""
         self._last_status_time = 0.0
         self._last_pid_time = 0.0
+
+        # Smart steering state
+        self._steer_direction = ""        # "left" or "right" during OBSTACLE_STEERING
+        self._steer_entry_time = 0.0      # Timestamp when steering avoidance started
+        self._heading_offset = 0.0        # Accumulated yaw drift in degrees
+        self._returning_to_heading = False # True while correcting back to original heading
 
         # Telemetry (exposed for UI)
         self._last_gyro_z = 0.0
@@ -481,6 +553,10 @@ class AutoPilot:
         )
         self._state = State.FORWARD_CRUISE
         self._turn_direction = ""
+        self._steer_direction = ""
+        self._steer_entry_time = 0.0
+        self._heading_offset = 0.0
+        self._returning_to_heading = False
         self._last_status_time = time.time()
         self._last_pid_time = time.time()
         self._active = True
@@ -493,16 +569,53 @@ class AutoPilot:
         self._pid.reset()
         self._last_gyro_z = 0.0
         self._last_pid_correction = 0.0
+        self._heading_offset = 0.0
+        self._returning_to_heading = False
+        self._steer_direction = ""
         print("🛑 [ROVER] Autonomous navigation STOPPED")
 
     # ── Sensor helpers ─────────────────────────
 
     def _read_ir(self):
-        """Read IR cliff sensors. Returns (left_cliff, right_cliff)."""
+        """Read IR sensors. Returns (left_obstacle, right_obstacle)."""
         try:
             return self._get_ir()
         except Exception:
             return (False, False)
+
+    def _choose_steer_direction(self):
+        """
+        Pick left or right for obstacle avoidance using IR proximity.
+
+        IR active-LOW: True = obstacle/proximity detected on that side.
+        Steer AWAY from the blocked side.
+
+        Returns
+        -------
+        str
+            "left" or "right"
+        """
+        left_blocked, right_blocked = self._read_ir()
+        if left_blocked and not right_blocked:
+            return "right"   # obstacle on left → steer right
+        if right_blocked and not left_blocked:
+            return "left"    # obstacle on right → steer left
+        # Both clear or both blocked → default right
+        return "right"
+
+    def _interpolate(self, dist, far_cm, near_cm, far_val, near_val):
+        """
+        Linear interpolation between two distance thresholds.
+
+        Returns far_val when dist >= far_cm, near_val when dist <= near_cm,
+        and linearly interpolated in between.
+        """
+        if dist >= far_cm:
+            return far_val
+        if dist <= near_cm:
+            return near_val
+        t = (far_cm - dist) / max(far_cm - near_cm, 0.01)
+        return far_val + t * (near_val - far_val)
 
     def get_rear_distance(self):
         """Public accessor for rear sonar (used by telemetry if needed)."""
@@ -510,25 +623,27 @@ class AutoPilot:
 
     # ── Status printer ─────────────────────────
 
-    def _maybe_print_status(self, front_dist, gyro_z, correction):
+    def _maybe_print_status(self, front_dist, gyro_z, correction, extra=""):
         """Print status line at STATUS_INTERVAL frequency."""
         now = time.time()
         if now - self._last_status_time >= self.STATUS_INTERVAL:
             self._last_status_time = now
             state_name = self._state.value
+            heading_str = f" | Heading: {self._heading_offset:+.1f}°" if self._heading_offset != 0 else ""
+            extra_str = f" | {extra}" if extra else ""
             print(f"📡 [{state_name}] Front: {front_dist:.0f}cm | "
                   f"Gyro_Z: {gyro_z:+.2f}°/s | "
-                  f"PID: {correction:+.1f} | "
-                  f"Speed: {self.BASE_SPEED}")
+                  f"PID: {correction:+.1f}{heading_str}{extra_str}")
 
     # ── FSM Core ───────────────────────────────
 
     def update(self):
         """
-        Single tick of the 3-state FSM.
+        Single tick of the 4-state FSM.
 
         Called by the drive_autonomous thread at ~20 Hz.
-        OBSTACLE_AVOIDANCE is a blocking sequence (~1.7 s) which is
+        OBSTACLE_STEERING is non-blocking (runs per-tick for smooth steering).
+        OBSTACLE_FALLBACK is a blocking sequence (~1.7 s) which is
         acceptable since it runs in a dedicated daemon thread.
         """
         if not self._active:
@@ -540,18 +655,16 @@ class AutoPilot:
             self._motor.brake()
             return
 
-        # ── Check IR cliff sensors (applies in any non-emergency state) ──
-        left_cliff, right_cliff = self._read_ir()
-        if left_cliff or right_cliff:
-            self._state = State.EMERGENCY_STOP
-            self._motor.brake()
-            side = "LEFT" if left_cliff else "RIGHT"
-            if left_cliff and right_cliff:
-                side = "BOTH"
-            print(f"\n⚠️  EMERGENCY STOP — Cliff detected ({side})!")
-            print(f"    IR Left: {'CLIFF' if left_cliff else 'OK'} | "
-                  f"IR Right: {'CLIFF' if right_cliff else 'OK'}")
-            return
+        # ── Read gyro for all active states ──
+        now = time.time()
+        dt = now - self._last_pid_time
+        self._last_pid_time = now
+        gyro_z = self._gyro.read_gyro_z()
+        self._last_gyro_z = gyro_z
+
+        # ── Track heading offset (integrate yaw rate) ──
+        if dt > 0 and dt < 0.5:  # ignore huge gaps (startup, pause)
+            self._heading_offset += gyro_z * dt
 
         # ── STATE: FORWARD_CRUISE ──
         if self._state == State.FORWARD_CRUISE:
@@ -560,41 +673,138 @@ class AutoPilot:
             # Read front sonar
             front_dist = self._front_sonar.read()
 
-            # Obstacle check
-            if 0 < front_dist < self.FRONT_DANGER_CM:
-                print(f"\n🚧 [CRUISE→AVOID] Obstacle at {front_dist:.0f}cm "
-                      f"(threshold: {self.FRONT_DANGER_CM}cm)")
-                self._state = State.OBSTACLE_AVOIDANCE
-                # Fall through to avoidance handler below
+            # ── Graduated obstacle response ──
+            if 0 < front_dist < self.STEER_FALLBACK_CM:
+                # Too close — go straight to fallback (stop-reverse-spin)
+                print(f"\n🚨 [CRUISE→FALLBACK] Obstacle dangerously close "
+                      f"at {front_dist:.0f}cm (< {self.STEER_FALLBACK_CM}cm)")
+                self._state = State.OBSTACLE_FALLBACK
+                # Fall through to fallback handler below
+
+            elif 0 < front_dist < self.STEER_DETECT_CM:
+                # Obstacle in steering range — begin smart steering
+                self._steer_direction = self._choose_steer_direction()
+                self._steer_entry_time = now
+                # Record heading at entry so we can return to it later
+                # (heading_offset is already being tracked continuously)
+                self._returning_to_heading = False
+                print(f"\n🔀 [CRUISE→STEER] Obstacle at {front_dist:.0f}cm "
+                      f"— steering {self._steer_direction} "
+                      f"(threshold: {self.STEER_DETECT_CM}cm)")
+                self._state = State.OBSTACLE_STEERING
+                # Fall through to steering handler below
+
             else:
-                # PID heading correction
-                now = time.time()
-                dt = now - self._last_pid_time
-                self._last_pid_time = now
-
-                gyro_z = self._gyro.read_gyro_z()
-
-                # Error = deviation from target yaw rate of 0
-                # Positive gyro_z = drifting right → need positive correction
-                # (boost left wheel, slow right wheel)
+                # ── Normal PID cruise (with heading return if needed) ──
                 correction = self._pid.update(gyro_z, dt)
 
+                # Heading return: blend in a correction to steer back on course
+                if self._returning_to_heading:
+                    heading_correction = -self.HEADING_KP * self._heading_offset
+                    heading_correction = max(-self.PID_LIMIT, min(self.PID_LIMIT, heading_correction))
+                    correction += heading_correction
+                    correction = max(-self.PID_LIMIT * 2, min(self.PID_LIMIT * 2, correction))
+
+                    if abs(self._heading_offset) < self.HEADING_TOLERANCE:
+                        self._heading_offset = 0.0
+                        self._returning_to_heading = False
+                        print("    🧭 Heading restored — resuming pure PID cruise")
+
                 # Store for telemetry
-                self._last_gyro_z = gyro_z
                 self._last_pid_correction = correction
 
                 # Drive forward with differential correction
                 self._motor.forward(self.BASE_SPEED, correction)
 
                 # Periodic status
+                extra = ""
+                if self._returning_to_heading:
+                    extra = f"Returning to heading ({self._heading_offset:+.1f}°)"
                 self._maybe_print_status(
                     front_dist if front_dist >= 0 else 999,
-                    gyro_z, correction)
+                    gyro_z, correction, extra)
                 return
 
-        # ── STATE: OBSTACLE_AVOIDANCE ──
-        if self._state == State.OBSTACLE_AVOIDANCE:
-            self._turn_direction = "right"
+        # ── STATE: OBSTACLE_STEERING (non-blocking, per-tick) ──
+        if self._state == State.OBSTACLE_STEERING:
+            self._turn_direction = self._steer_direction
+
+            # Read front sonar
+            front_dist = self._front_sonar.read()
+            display_dist = front_dist if front_dist >= 0 else 999
+
+            # ── Exit conditions ──
+            elapsed = now - self._steer_entry_time
+
+            if front_dist > self.STEER_CLEAR_CM or front_dist < 0:
+                # Path is clear — resume cruise with heading return
+                self._pid.reset()
+                self._returning_to_heading = (abs(self._heading_offset) > self.HEADING_TOLERANCE)
+                self._turn_direction = ""
+                self._steer_direction = ""
+                self._state = State.FORWARD_CRUISE
+                print(f"    ✅ Path clear at {display_dist:.0f}cm "
+                      f"— resuming cruise (heading offset: {self._heading_offset:+.1f}°)\n")
+                return
+
+            if 0 < front_dist < self.STEER_FALLBACK_CM:
+                # Too close despite steering — fall back to stop-reverse
+                print(f"    🚨 [STEER→FALLBACK] Still too close "
+                      f"at {front_dist:.0f}cm — stopping")
+                self._state = State.OBSTACLE_FALLBACK
+                # Fall through to fallback handler below
+                # Don't return — let it execute fallback this tick
+
+            elif elapsed > self.STEER_TIMEOUT:
+                # Timed out — steering alone couldn't clear, fall back
+                print(f"    ⏱️  [STEER→FALLBACK] Timeout after "
+                      f"{elapsed:.1f}s — obstacle still at {display_dist:.0f}cm")
+                self._state = State.OBSTACLE_FALLBACK
+                # Fall through to fallback handler
+
+            else:
+                # ── Active steering ──
+                # Proportional speed: slow down as we get closer
+                speed = self._interpolate(
+                    front_dist,
+                    self.STEER_DETECT_CM, self.STEER_FALLBACK_CM,
+                    self.BASE_SPEED, self.STEER_SPEED_MIN
+                )
+
+                # Proportional steering angle: more aggressive as we get closer
+                steer_angle = self._interpolate(
+                    front_dist,
+                    self.STEER_DETECT_CM, self.STEER_FALLBACK_CM,
+                    self.STEER_ANGLE_MIN, self.STEER_ANGLE_MAX
+                )
+
+                # Apply direction sign
+                if self._steer_direction == "left":
+                    steer_angle = -steer_angle
+
+                # Re-evaluate direction mid-steer if IR changes
+                new_dir = self._choose_steer_direction()
+                if new_dir != self._steer_direction:
+                    self._steer_direction = new_dir
+                    self._turn_direction = new_dir
+                    print(f"    🔄 IR direction change → now steering {new_dir}")
+
+                # Drive with steering
+                self._motor.forward_steer(speed, steer_angle)
+
+                # Telemetry
+                self._last_pid_correction = steer_angle
+
+                # Periodic status
+                self._maybe_print_status(
+                    display_dist, gyro_z, steer_angle,
+                    f"Steer {self._steer_direction} | Spd: {speed:.0f}% | "
+                    f"Angle: {abs(steer_angle):.0f}° | {elapsed:.1f}s")
+                return
+
+        # ── STATE: OBSTACLE_FALLBACK (blocking stop-reverse-spin) ──
+        if self._state == State.OBSTACLE_FALLBACK:
+            self._turn_direction = self._steer_direction or "right"
 
             # Phase 1: Stop
             self._motor.stop()
@@ -623,9 +833,15 @@ class AutoPilot:
             if not self._active:
                 return
 
-            # Phase 4: Spin right to change direction
-            print(f"    🔄 Spinning right for {self.SPIN_DURATION:.1f}s")
-            self._motor.spin_right(self.SPIN_SPEED, self.SPIN_DURATION)
+            # Phase 4: Spin to change direction (use steer direction from IR)
+            spin_dir = self._steer_direction or "right"
+            print(f"    🔄 Spinning {spin_dir} for {self.SPIN_DURATION:.1f}s")
+            if spin_dir == "left":
+                self._car.pivot_turn("left", self.SPIN_SPEED)
+                time.sleep(self.SPIN_DURATION)
+                self._car.stop()
+            else:
+                self._motor.spin_right(self.SPIN_SPEED, self.SPIN_DURATION)
 
             if not self._active:
                 return
@@ -634,8 +850,11 @@ class AutoPilot:
             self._pid.reset()
             self._last_pid_time = time.time()
             self._turn_direction = ""
+            self._steer_direction = ""
+            self._heading_offset = 0.0  # Reset heading after major maneuver
+            self._returning_to_heading = False
             self._state = State.FORWARD_CRUISE
-            print("    ✅ Avoidance complete — resuming FORWARD_CRUISE\n")
+            print("    ✅ Fallback avoidance complete — resuming FORWARD_CRUISE\n")
             return
 
 

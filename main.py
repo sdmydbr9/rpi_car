@@ -1270,11 +1270,11 @@ def drive_autonomous():
         car_state["gyro_available"] = autopilot.gyro_available
         car_state["gyro_calibrated"] = autopilot.gyro_calibrated
 
-        # Activate vision when cruising forward (camera faces front)
+        # Activate vision when driving forward (camera faces front)
         # Only if camera + CV enabled — otherwise autopilot relies on sonar/IR only
         if _is_vision_available():
             # Vision should be active whenever autopilot is driving forward AND user wants CV
-            is_forward = autopilot.state == State.FORWARD_CRUISE
+            is_forward = autopilot.state in (State.FORWARD_CRUISE, State.OBSTACLE_STEERING)
             vision_system.active = car_state["user_wants_vision"] and is_forward
             # Mirror vision telemetry
             summary = vision_system.get_detections_summary()

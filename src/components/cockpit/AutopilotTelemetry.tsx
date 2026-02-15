@@ -1,6 +1,11 @@
-import { Navigation, AlertTriangle, RotateCcw, OctagonX, Compass, Activity, Gauge, Ruler, Play, Square, RefreshCw, Eye, EyeOff, Crosshair } from "lucide-react";
+import { Navigation, AlertTriangle, RotateCcw, OctagonX, Compass, Activity, Gauge, Ruler, Play, Square, RefreshCw, Eye, EyeOff, Crosshair, ArrowRightLeft } from "lucide-react";
 
 export type AutopilotStatus = 
+  | "FORWARD_CRUISE"
+  | "OBSTACLE_STEERING"
+  | "OBSTACLE_FALLBACK"
+  | "EMERGENCY_STOP"
+  // Legacy states (kept for backward compat with old autopilot)
   | "CRUISING" 
   | "PANIC_BRAKE" 
   | "REVERSING" 
@@ -42,6 +47,40 @@ const STATUS_CONFIG: Record<AutopilotStatus, {
   borderColor: string;
   description: string;
 }> = {
+  // ── Current autopilot states ──
+  FORWARD_CRUISE: {
+    icon: Navigation,
+    label: "CRUISING",
+    color: "text-primary",
+    bgColor: "bg-primary/20",
+    borderColor: "border-primary",
+    description: "PID heading correction active",
+  },
+  OBSTACLE_STEERING: {
+    icon: ArrowRightLeft,
+    label: "STEERING",
+    color: "text-cyan-400",
+    bgColor: "bg-cyan-400/20",
+    borderColor: "border-cyan-400",
+    description: "Steering around obstacle",
+  },
+  OBSTACLE_FALLBACK: {
+    icon: RotateCcw,
+    label: "FALLBACK",
+    color: "text-amber-500",
+    bgColor: "bg-amber-500/20",
+    borderColor: "border-amber-500",
+    description: "Stop → reverse → spin escape",
+  },
+  EMERGENCY_STOP: {
+    icon: OctagonX,
+    label: "E-STOP",
+    color: "text-destructive",
+    bgColor: "bg-destructive/20",
+    borderColor: "border-destructive",
+    description: "Cliff detected — motors locked",
+  },
+  // ── Legacy states (old autopilot compat) ──
   CRUISING: {
     icon: Navigation,
     label: "CRUISING",
