@@ -30,6 +30,16 @@ export interface TelemetryData {
   autonomous_target_speed?: number;
   sonar_distance?: number;
   sonar_enabled?: boolean;
+  mpu6050_enabled?: boolean;
+  rear_sonar_enabled?: boolean;
+  // MPU6050 Gyro telemetry
+  gyro_z?: number;
+  pid_correction?: number;
+  gyro_available?: boolean;
+  gyro_calibrated?: boolean;
+  // Sensor health
+  sensor_status?: Record<string, string>;
+  service_light_active?: boolean;
   // Camera / Vision telemetry
   camera_enabled?: boolean;
   vision_active?: boolean;
@@ -46,6 +56,8 @@ export interface TelemetryData {
   // AI Narration telemetry
   narration_enabled?: boolean;
   narration_speaking?: boolean;
+  // Camera actual FPS
+  camera_actual_fps?: number;
 }
 
 /**
@@ -537,6 +549,30 @@ export function emitSonarToggle(): void {
 }
 
 /**
+ * Toggle Rear Sonar sensor control
+ */
+export function emitRearSonarToggle(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎮 REAR SONAR: TOGGLED`);
+    socket.emit('rear_sonar_toggle', {});
+  } else {
+    console.warn(`[UI Control] ⚠️ Cannot emit rear sonar toggle - socket not connected`);
+  }
+}
+
+/**
+ * Toggle MPU6050 gyroscope sensor control
+ */
+export function emitMPU6050Toggle(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎮 MPU6050: TOGGLED`);
+    socket.emit('mpu6050_toggle', {});
+  } else {
+    console.warn(`[UI Control] ⚠️ Cannot emit MPU6050 toggle - socket not connected`);
+  }
+}
+
+/**
  * Toggle Camera (enables/disables camera and all vision-related functions)
  */
 export function emitCameraToggle(): void {
@@ -640,6 +676,8 @@ export default {
   emitAutoAccelDisable,
   emitIRToggle,
   emitSonarToggle,
+  emitRearSonarToggle,
+  emitMPU6050Toggle,
   emitCameraToggle,
   emitVisionToggle,
   emitCameraConfigUpdate,

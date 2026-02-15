@@ -1,4 +1,4 @@
-import { Navigation, AlertTriangle, RotateCcw, OctagonX, Compass, Activity, Gauge, Ruler, Play, Square, RefreshCw, Eye, EyeOff } from "lucide-react";
+import { Navigation, AlertTriangle, RotateCcw, OctagonX, Compass, Activity, Gauge, Ruler, Play, Square, RefreshCw, Eye, EyeOff, Crosshair } from "lucide-react";
 
 export type AutopilotStatus = 
   | "CRUISING" 
@@ -23,6 +23,12 @@ interface AutopilotTelemetryProps {
   cameraClosestObject?: string;
   cameraClosestConfidence?: number;
   visionFps?: number;
+  // MPU6050 Gyro telemetry
+  gyroZ?: number;
+  pidCorrection?: number;
+  gyroAvailable?: boolean;
+  gyroCalibrated?: boolean;
+  isMPU6050Enabled?: boolean;
   onEmergencyStop?: () => void;
   onAutopilotToggle?: () => void;
   onStartStop?: () => void;
@@ -117,6 +123,11 @@ export const AutopilotTelemetry = ({
   cameraClosestObject = "",
   cameraClosestConfidence = 0,
   visionFps = 0,
+  gyroZ = 0,
+  pidCorrection = 0,
+  gyroAvailable = false,
+  gyroCalibrated = false,
+  isMPU6050Enabled = true,
   onEmergencyStop,
   onAutopilotToggle,
   onStartStop,
@@ -274,6 +285,69 @@ export const AutopilotTelemetry = ({
         )}
       </div>
       
+      {/* MPU6050 Gyro / PID Heading */}
+      <div className="w-full bg-card/50 rounded border border-border p-1">
+        <div className="flex items-center justify-between mb-0.5">
+          <div className="flex items-center gap-0.5">
+            <Crosshair className={`w-2.5 h-2.5 sm:w-3 sm:h-3 ${isMPU6050Enabled && gyroAvailable ? 'text-emerald-400' : 'text-muted-foreground'}`} />
+            <span className="racing-text text-[6px] sm:text-[8px] text-muted-foreground">GYRO</span>
+          </div>
+          <span className={`racing-text text-[7px] sm:text-[9px] font-bold ${
+            !isMPU6050Enabled ? 'text-muted-foreground'
+            : !gyroAvailable ? 'text-destructive'
+            : gyroCalibrated ? 'text-emerald-400'
+            : 'text-amber-400'
+          }`}>
+            {!isMPU6050Enabled ? 'OFF' : !gyroAvailable ? 'N/A' : gyroCalibrated ? 'CAL' : 'UNCAL'}
+          </span>
+        </div>
+        
+        {isMPU6050Enabled && gyroAvailable && isRunning ? (
+          <>
+            {/* Yaw rate + PID correction */}
+            <div className="flex items-center justify-between mb-0.5">
+              <span className="text-[6px] sm:text-[7px] text-muted-foreground">Yaw</span>
+              <span className={`racing-text text-[7px] sm:text-[9px] font-bold ${
+                Math.abs(gyroZ) > 5 ? 'text-amber-400' : Math.abs(gyroZ) > 15 ? 'text-destructive' : 'text-emerald-400'
+              }`}>
+                {gyroZ > 0 ? '+' : ''}{gyroZ.toFixed(1)}°/s
+              </span>
+            </div>
+            <div className="flex items-center justify-between mb-0.5">
+              <span className="text-[6px] sm:text-[7px] text-muted-foreground">PID</span>
+              <span className={`racing-text text-[7px] sm:text-[9px] font-bold ${
+                Math.abs(pidCorrection) > 15 ? 'text-amber-400' : 'text-emerald-400'
+              }`}>
+                {pidCorrection > 0 ? '+' : ''}{pidCorrection.toFixed(1)}
+              </span>
+            </div>
+            {/* Heading correction bar — center = straight, left/right = drift */}
+            <div className="w-full h-1.5 sm:h-2 bg-muted rounded-full overflow-hidden relative">
+              <div className="absolute left-1/2 top-0 w-px h-full bg-muted-foreground/40" />
+              <div
+                className={`absolute top-0 h-full rounded-full transition-all duration-200 ${
+                  pidCorrection >= 0
+                    ? 'bg-gradient-to-r from-emerald-500/60 to-emerald-500'
+                    : 'bg-gradient-to-l from-emerald-500/60 to-emerald-500'
+                }`}
+                style={{
+                  left: pidCorrection >= 0 ? '50%' : `${50 - Math.min(50, (Math.abs(pidCorrection) / 30) * 50)}%`,
+                  width: `${Math.min(50, (Math.abs(pidCorrection) / 30) * 50)}%`,
+                }}
+              />
+            </div>
+            <div className="flex justify-between mt-0.5">
+              <span className="text-[5px] sm:text-[6px] text-muted-foreground">← L</span>
+              <span className="text-[5px] sm:text-[6px] text-muted-foreground">R →</span>
+            </div>
+          </>
+        ) : (
+          <div className="text-[6px] sm:text-[7px] text-muted-foreground text-center py-0.5">
+            {!isMPU6050Enabled ? 'Gyroscope disabled' : !gyroAvailable ? 'MPU6050 not detected' : 'Active during cruise'}
+          </div>
+        )}
+      </div>
+
       {/* Telemetry Wave - Active indicator */}
       <div className={`w-full overflow-hidden h-3 sm:h-4 border rounded ${isRunning ? 'border-primary/50 bg-primary/10' : 'border-muted-foreground/30 bg-muted/20'}`}>
         {isRunning ? (

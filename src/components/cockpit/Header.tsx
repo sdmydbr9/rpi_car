@@ -17,6 +17,18 @@ interface HeaderProps {
   // TTS Audio Unlock
   ttsUnlocked?: boolean;
   onUnlockAudio?: () => void;
+  // Sensor toggles
+  isIREnabled?: boolean;
+  isSonarEnabled?: boolean;
+  isMPU6050Enabled?: boolean;
+  isRearSonarEnabled?: boolean;
+  isCameraEnabled?: boolean;
+  onIRToggle?: () => void;
+  onSonarToggle?: () => void;
+  onRearSonarToggle?: () => void;
+  onMPU6050Toggle?: () => void;
+  onCameraToggle?: () => void;
+  isAutopilotRunning?: boolean;
 }
 
 export const Header = ({ 
@@ -32,6 +44,17 @@ export const Header = ({
   onImageAnalysisToggle,
   ttsUnlocked = false,
   onUnlockAudio,
+  isIREnabled,
+  isSonarEnabled,
+  isMPU6050Enabled,
+  isRearSonarEnabled,
+  isCameraEnabled,
+  onIRToggle,
+  onSonarToggle,
+  onRearSonarToggle,
+  onMPU6050Toggle,
+  onCameraToggle,
+  isAutopilotRunning,
 }: HeaderProps) => {
   return (
     <header className="flex items-center justify-between px-1.5 sm:px-4 py-0.5 sm:py-1.5 border-b border-primary/30 bg-card/30 backdrop-blur-sm h-[6dvh] min-h-[1.75rem] max-h-10 flex-shrink-0">
@@ -77,7 +100,7 @@ export const Header = ({
             </span>
           </button>
         )}
-        <SettingsDialog tuning={tuning} onTuningChange={onTuningChange} backendDefaults={backendDefaults} cameraSpecs={cameraSpecs} narrationConfig={narrationConfig} imageAnalysisEnabled={imageAnalysisEnabled} onImageAnalysisToggle={onImageAnalysisToggle} />
+        <SettingsDialog tuning={tuning} onTuningChange={onTuningChange} backendDefaults={backendDefaults} cameraSpecs={cameraSpecs} narrationConfig={narrationConfig} imageAnalysisEnabled={imageAnalysisEnabled} onImageAnalysisToggle={onImageAnalysisToggle} isIREnabled={isIREnabled} isSonarEnabled={isSonarEnabled} isMPU6050Enabled={isMPU6050Enabled} isRearSonarEnabled={isRearSonarEnabled} isCameraEnabled={isCameraEnabled} onIRToggle={onIRToggle} onSonarToggle={onSonarToggle} onRearSonarToggle={onRearSonarToggle} onMPU6050Toggle={onMPU6050Toggle} onCameraToggle={onCameraToggle} isAutopilotRunning={isAutopilotRunning} />
       </div>
     </header>
   );

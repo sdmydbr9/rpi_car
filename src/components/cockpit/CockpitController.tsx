@@ -14,6 +14,7 @@ import { useAutoAcceleration } from "../../hooks/useAutoAcceleration";
 import type { SensorStatus } from "./ServiceLight";
 import { DEFAULT_TUNING, type TuningConstants } from "./SettingsDialog";
 import type { CameraSpecs, NarrationConfig } from "../../lib/socketClient";
+import { toast } from "@/components/ui/sonner";
 
 interface ControlState {
   steeringAngle: number;
@@ -36,6 +37,7 @@ const convertSensorStatus = (
     rear_sonar: 'Rear Sonar',
     left_ir: 'Left IR',
     right_ir: 'Right IR',
+    mpu6050: 'MPU6050',
     camera: 'Camera',
   };
 
@@ -69,6 +71,8 @@ export const CockpitController = () => {
   const [isAutoMode, setIsAutoMode] = useState(false);
   const [isIREnabled, setIsIREnabled] = useState(true);
   const [isSonarEnabled, setIsSonarEnabled] = useState(true);
+  const [isMPU6050Enabled, setIsMPU6050Enabled] = useState(true);
+  const [isRearSonarEnabled, setIsRearSonarEnabled] = useState(true);
   const [isCameraEnabled, setIsCameraEnabled] = useState(() => {
     // Load camera state from localStorage, default to false (disabled)
     const saved = localStorage.getItem('cameraEnabled');
@@ -90,6 +94,7 @@ export const CockpitController = () => {
     { name: 'Rear Sonar', status: 'ok' },
     { name: 'Left IR', status: 'ok' },
     { name: 'Right IR', status: 'ok' },
+    { name: 'MPU6050', status: 'ok' },
     { name: 'Camera', status: 'ok' },
   ]);
   const [requiresService, setRequiresService] = useState(false);
@@ -133,6 +138,11 @@ export const CockpitController = () => {
   const [cameraClosestConfidence, setCameraClosestConfidence] = useState(0);
   const [visionFps, setVisionFps] = useState(0);
   const [userWantsVision, setUserWantsVision] = useState(false);
+  // MPU6050 Gyro telemetry state
+  const [gyroZ, setGyroZ] = useState(0);
+  const [pidCorrection, setPidCorrection] = useState(0);
+  const [gyroAvailable, setGyroAvailable] = useState(false);
+  const [gyroCalibrated, setGyroCalibrated] = useState(false);
   const [cameraActualFps, setCameraActualFps] = useState(0);
   // AI Image Analysis state (backend-synced: whether AI is analyzing camera frames)
   // Persisted across sessions — will auto-toggle on backend after connection
@@ -405,6 +415,8 @@ export const CockpitController = () => {
       if (data.sonar_distance !== undefined) setSonarDistance(data.sonar_distance);
       if (data.autonomous_target_speed !== undefined) setAutonomousTargetSpeed(data.autonomous_target_speed);
       if (data.sonar_enabled !== undefined) setIsSonarEnabled(data.sonar_enabled);
+      if (data.mpu6050_enabled !== undefined) setIsMPU6050Enabled(data.mpu6050_enabled);
+      if (data.rear_sonar_enabled !== undefined) setIsRearSonarEnabled(data.rear_sonar_enabled);
       // Update sensor health status
       if (data.sensor_status) {
         const convertedSensors = convertSensorStatus(data.sensor_status);
@@ -421,6 +433,11 @@ export const CockpitController = () => {
       if (data.camera_closest_confidence !== undefined) setCameraClosestConfidence(data.camera_closest_confidence);
       if (data.vision_fps !== undefined) setVisionFps(data.vision_fps);
       if (data.camera_actual_fps !== undefined) setCameraActualFps(data.camera_actual_fps);
+      // Update MPU6050 gyro telemetry
+      if (data.gyro_z !== undefined) setGyroZ(data.gyro_z);
+      if (data.pid_correction !== undefined) setPidCorrection(data.pid_correction);
+      if (data.gyro_available !== undefined) setGyroAvailable(data.gyro_available);
+      if (data.gyro_calibrated !== undefined) setGyroCalibrated(data.gyro_calibrated);
       // Update narration telemetry
       if (data.narration_enabled !== undefined) setImageAnalysisEnabled(data.narration_enabled);
       if (data.narration_speaking !== undefined) setNarrationSpeaking(prev => prev || data.narration_speaking!);
@@ -592,6 +609,26 @@ export const CockpitController = () => {
     socketClient.emitSonarToggle();
   }, [isAutopilotRunning]);
 
+  const handleRearSonarToggle = useCallback(() => {
+    console.log('🎮 REAR SONAR sensor toggle');
+    if (isAutopilotRunning) {
+      console.log('🚫 Rear Sonar cannot be toggled in autonomous mode');
+      return;
+    }
+    setIsRearSonarEnabled(prev => !prev);
+    socketClient.emitRearSonarToggle();
+  }, [isAutopilotRunning]);
+
+  const handleMPU6050Toggle = useCallback(() => {
+    console.log('🎮 MPU6050 sensor toggle');
+    if (isAutopilotRunning) {
+      console.log('🚫 MPU6050 cannot be toggled in autonomous mode');
+      return;
+    }
+    setIsMPU6050Enabled(prev => !prev);
+    socketClient.emitMPU6050Toggle();
+  }, [isAutopilotRunning]);
+
   const handleCameraToggle = useCallback(() => {
     console.log('🎮 CAMERA toggle');
     // Toggle local state immediately for instant feedback
@@ -628,9 +665,25 @@ export const CockpitController = () => {
     if (isAutopilotRunning) {
       socketClient.emitAutopilotDisable();
     } else {
+      // Check required sensors before enabling autopilot
+      const disabledSensors: string[] = [];
+      if (!isSonarEnabled) disabledSensors.push('Front Sonar');
+      if (!isIREnabled) {
+        disabledSensors.push('Left IR');
+        disabledSensors.push('Right IR');
+      }
+      if (!isMPU6050Enabled) disabledSensors.push('MPU6050');
+
+      if (disabledSensors.length > 0) {
+        toast.error(`Cannot activate Autopilot`, {
+          description: `${disabledSensors.join(', ')} ${disabledSensors.length === 1 ? 'is' : 'are'} turned off. Turn ${disabledSensors.length === 1 ? 'it' : 'them'} on first to activate Autopilot.`,
+          duration: 5000,
+        });
+        return;
+      }
       socketClient.emitAutopilotEnable();
     }
-  }, [eBrakeActive, isEmergencyStop, isAutopilotRunning]);
+  }, [eBrakeActive, isEmergencyStop, isAutopilotRunning, isSonarEnabled, isIREnabled, isMPU6050Enabled]);
 
   const handleEngineStart = useCallback(() => {
     console.log('🔧 Engine START button clicked');
@@ -750,6 +803,17 @@ export const CockpitController = () => {
           onImageAnalysisToggle={handleImageAnalysisToggle}
           ttsUnlocked={ttsUnlocked}
           onUnlockAudio={unlockTTS}
+          isIREnabled={isIREnabled}
+          isSonarEnabled={isSonarEnabled}
+          isMPU6050Enabled={isMPU6050Enabled}
+          isRearSonarEnabled={isRearSonarEnabled}
+          isCameraEnabled={isCameraEnabled}
+          onIRToggle={handleIRToggle}
+          onSonarToggle={handleSonarToggle}
+          onRearSonarToggle={handleRearSonarToggle}
+          onMPU6050Toggle={handleMPU6050Toggle}
+          onCameraToggle={handleCameraToggle}
+          isAutopilotRunning={isAutopilotRunning}
         />
         
         {/* Main Content - Fixed Layout (No Responsive Changes) */}
@@ -809,6 +873,11 @@ export const CockpitController = () => {
                 cameraClosestObject={cameraClosestObject}
                 cameraClosestConfidence={cameraClosestConfidence}
                 visionFps={visionFps}
+                gyroZ={gyroZ}
+                pidCorrection={pidCorrection}
+                gyroAvailable={gyroAvailable}
+                gyroCalibrated={gyroCalibrated}
+                isMPU6050Enabled={isMPU6050Enabled}
                 onEmergencyStop={handleAutopilotEBrake}
                 onAutopilotToggle={handleAutopilotToggle}
                 onStartStop={handleAutopilotStartStop}
@@ -834,6 +903,7 @@ export const CockpitController = () => {
                 isEngineRunning={isEngineRunning}
                 onEngineStart={handleEngineStart}
                 onEngineStop={handleEngineStop}
+                speed={controlState.speed}
               />
             )}
           </div>

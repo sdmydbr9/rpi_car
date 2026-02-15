@@ -35,14 +35,10 @@ from kokoro_client import get_kokoro_client
 # The folder where the built website ends up
 DIST_DIR = "dist"
 
-# --- MOTOR PINS (BCM Numbering) ---
-# Check your wiring! 
-IN1 = 17  # Left Motor Direction A
-IN2 = 27  # Left Motor Direction B
-IN3 = 22  # Right Motor Direction A
-IN4 = 23  # Right Motor Direction B
-ENA = 18  # Left Motor Speed (PWM)
-ENB = 19  # Right Motor Speed (PWM)
+# --- MOTOR PINS (BCM Numbering) — Dual L298N, 4WD ---
+# Managed by CarSystem in motor.py — listed here for wiring reference only.
+# Driver 1 (Front): FL_IN1=17, FL_IN2=27, FL_ENA=12, FR_IN3=23, FR_IN4=22, FR_ENB=13
+# Driver 2 (Rear):  RL_IN1=10, RL_IN2=7,  RL_ENA=19, RR_IN3=9,  RR_IN4=11, RR_ENB=18
 
 # --- SONAR SENSOR PINS (BCM Numbering) ---
 # Front Sonar: TRIG → Pin 22 (GPIO 25), ECHO → Pin 18 (GPIO 24)
@@ -62,6 +58,11 @@ COAST_RATE = 0.5    # How slowly it stops when you let go of gas (Coasting)
 BRAKE_RATE = 1.5    # Brake deceleration rate (stops from 100 in ~3-4 seconds)
 EMERGENCY_BRAKE_RATE = 5.0  # Emergency brake deceleration (faster stop on obstacle)
 FREQ = 1000         # PWM Frequency (Hz)
+
+# --- MOTOR PROTECTION ---
+STEER_RATE_LIMIT_PER_TICK = 10   # Max degrees steering change per 20 ms tick (500°/s)
+MIN_SPEED_FOR_GEAR_CHANGE = 5.0  # Max current_pwm to allow forward↔reverse gear switch
+BRAKE_DECEL_RATE = 3.0           # Brake ramp-down rate (%/tick) — ~150 %/s, ~670 ms to stop from 100
 
 # --- SONAR DISTANCE THRESHOLDS (cm) ---
 SONAR_STOP_DISTANCE = 15      # Emergency stop below this distance
@@ -571,6 +572,8 @@ car_state = {
     "left_obstacle": False, # IR sensor: obstacle detected on left
     "right_obstacle": False, # IR sensor: obstacle detected on right
     "ir_enabled": True,    # IR sensor toggle
+    "mpu6050_enabled": True,  # MPU6050 gyroscope toggle
+    "rear_sonar_enabled": True,  # Rear sonar sensor toggle
     "user_steer_angle": 0, # Store user's manual steering (preserved when avoiding)
     "obstacle_avoidance_active": False,  # Track if currently avoiding
     "speed_limit": 100,    # Manual speed limit (5-100), overrides gear speeds
@@ -593,6 +596,7 @@ car_state = {
         "rear_sonar": "OK",
         "left_ir": "OK",
         "right_ir": "OK",
+        "mpu6050": "OK",
         "camera": "OK",
     },
     "service_light_active": False,  # True if any sensor has error/warning
@@ -607,6 +611,11 @@ car_state = {
     "camera_closest_confidence": 0,   # Confidence % of closest detection
     "vision_fps": 0.0,               # DNN inference FPS
     "camera_actual_fps": 0.0,        # Measured streaming FPS (actual frames/sec)
+    # 🧭 MPU6050 Gyro telemetry
+    "gyro_z": 0.0,                     # Current Z-axis yaw rate (°/s)
+    "pid_correction": 0.0,             # Current PID heading correction
+    "gyro_available": False,           # MPU6050 hardware detected
+    "gyro_calibrated": False,          # Gyro has been calibrated
     # Camera configuration settings
     "camera_resolution": CAMERA_DEFAULT_RESOLUTION,  # Current resolution setting (WxH format, e.g. '640x480')
     "camera_jpeg_quality": CAMERA_JPEG_QUALITY,      # JPEG quality (1-100)
@@ -666,6 +675,7 @@ def check_sensor_health():
         "rear_sonar": "OK",
         "left_ir": "OK",
         "right_ir": "OK",
+        "mpu6050": "OK",
         "camera": "OK",
     }
     
@@ -712,6 +722,23 @@ def check_sensor_health():
         sensor_status["right_ir"] = "FAILED"
         has_error = True
     
+    try:
+        # Check MPU6050 Gyroscope
+        if autopilot._gyro.available:
+            # Try a quick read to verify it's still responsive
+            try:
+                autopilot._gyro.read_gyro_z()
+                sensor_status["mpu6050"] = "OK"
+            except Exception:
+                sensor_status["mpu6050"] = "WARNING"
+                has_error = True
+        else:
+            sensor_status["mpu6050"] = "FAILED"
+            has_error = True
+    except Exception as e:
+        sensor_status["mpu6050"] = "FAILED"
+        has_error = True
+
     try:
         # Check Camera
         if not CAMERA_AVAILABLE or picam2 is None:
@@ -769,6 +796,7 @@ def physics_loop():
     last_right_obstacle = False
     target_steer_angle = 0   # Target angle during steering phase
     was_autonomous = False   # Track autonomous → manual transition
+    smoothed_steer = 0.0     # Rate-limited steering angle (motor protection)
     
     while True:
         # --- CHECK IR SENSORS ---
@@ -848,6 +876,18 @@ def physics_loop():
         current = car_state["current_pwm"]
         user_angle = car_state["user_steer_angle"]
         obstacle_state = car_state["obstacle_state"]
+        
+        # --- STEERING SMOOTHING (motor protection) ---
+        # Rate-limit the steering angle change to prevent instant
+        # differential speed swings that stress motors.
+        # user_angle is the raw target from socket; smoothed_steer is
+        # the rate-limited value actually sent to the steering mixer.
+        steer_delta = user_angle - smoothed_steer
+        if abs(steer_delta) > STEER_RATE_LIMIT_PER_TICK:
+            steer_delta = STEER_RATE_LIMIT_PER_TICK if steer_delta > 0 else -STEER_RATE_LIMIT_PER_TICK
+        smoothed_steer += steer_delta
+        # Use the smoothed value for the rest of this tick
+        user_angle = int(smoothed_steer)
         
         # --- OBSTACLE AVOIDANCE STATE MACHINE (Manual Mode Only) ---
         # When autonomous mode is active, drive_autonomous() owns all obstacle logic.
@@ -1017,16 +1057,17 @@ def physics_loop():
                     car_state["gear"] = "N"  # Set gear to Neutral
                 # BRAKE PEDAL PRESSED - Real car braking behavior
                 elif brake:
-                    # When brake is pressed, FORCE speed to 0 immediately and hold it there
-                    # Aggressive braking - reduce speed rapidly until completely stopped
-                    if current > 0.5:  # Still moving
-                        current -= BRAKE_RATE * 5  # Even faster braking
+                    # Ramp speed down smoothly instead of instant zero.
+                    # Magnetic brake engages only once speed reaches near-zero.
+                    if current > 1.0:
+                        current -= BRAKE_DECEL_RATE
+                        current = max(0, current)
+                        car_state["current_pwm"] = current
+                        car_state["is_braking"] = False  # Still decelerating, no magnetic lock yet
                     else:
-                        current = 0  # Force to exactly 0 when almost stopped
-                        
-                    current = max(0, current)  # Ensure zero cannot go negative
-                    car_state["current_pwm"] = 0  # Always set to 0 when braking
-                    car_state["is_braking"] = True  # Apply magnetic braking force to hold
+                        current = 0
+                        car_state["current_pwm"] = 0
+                        car_state["is_braking"] = True  # Stopped — apply magnetic braking to hold
                 else:
                     # Brakes released - normal gas/coast logic
                     car_state["is_braking"] = False
@@ -1065,11 +1106,21 @@ def physics_loop():
         
         # --- OBSTACLE AVOIDANCE PHYSICS ---
         elif obstacle_state == "REVERSING":
-            # Reverse with configurable power to overcome inertia and move away from obstacle
-            current = REVERSE_POWER  # Use configurable reverse power
-            car_state["current_pwm"] = current
-            car_state["gear"] = "R"  # Force reverse gear
-            print(f"🔄 REVERSING: {current}% speed (configurable power)")
+            # Brake-before-reverse: ensure the car is stopped before reversing.
+            # The physics loop's braking logic will have ramped current
+            # toward 0.  Only engage reverse once speed is low enough.
+            if current > MIN_SPEED_FOR_GEAR_CHANGE:
+                # Still decelerating — apply brakes, don't reverse yet
+                current -= BRAKE_DECEL_RATE
+                current = max(0, current)
+                car_state["current_pwm"] = current
+                car_state["is_braking"] = current < 1.0
+            else:
+                # Stopped — safe to reverse with configurable power
+                current = REVERSE_POWER
+                car_state["current_pwm"] = current
+                car_state["gear"] = "R"  # Force reverse gear
+                car_state["is_braking"] = False
         
         elif obstacle_state == "STEERING":
             # Use sonar-reduced speeds during steering
@@ -1212,6 +1263,12 @@ def drive_autonomous():
         # Mirror state into car_state for telemetry & UI
         car_state["autonomous_state"] = autopilot.state.value
         car_state["last_obstacle_side"] = autopilot.turn_direction or "none"
+
+        # Mirror MPU6050 / PID telemetry
+        car_state["gyro_z"] = round(autopilot.gyro_z, 2)
+        car_state["pid_correction"] = round(autopilot.pid_correction, 1)
+        car_state["gyro_available"] = autopilot.gyro_available
+        car_state["gyro_calibrated"] = autopilot.gyro_calibrated
 
         # Activate vision when cruising forward (camera faces front)
         # Only if camera + CV enabled — otherwise autopilot relies on sonar/IR only
@@ -1723,9 +1780,39 @@ def on_steering(data):
 
 @socketio.on('gear_change')
 def on_gear_change(data):
-    """Handle gear selection"""
+    """Handle gear selection with forward↔reverse safety guard.
+
+    If the car is still moving (current_pwm > MIN_SPEED_FOR_GEAR_CHANGE)
+    and the driver requests a forward↔reverse transition, auto-brake to
+    a stop first, then apply the new gear.  This prevents shoot-through
+    current in the H-bridge from an instant direction reversal.
+    """
     gear = data.get('gear', 'N').upper()
     if gear in ["R", "N", "1", "2", "3", "S"]:
+        current_gear = car_state["gear"]
+        current_speed = car_state["current_pwm"]
+        forward_gears = {"1", "2", "3", "S"}
+
+        # Detect forward↔reverse transition while moving
+        switching_direction = (
+            (current_gear in forward_gears and gear == "R") or
+            (current_gear == "R" and gear in forward_gears)
+        )
+
+        if switching_direction and current_speed > MIN_SPEED_FOR_GEAR_CHANGE:
+            # Auto-brake first, then apply gear once stopped
+            car_state["brake_pressed"] = True
+            car_state["gas_pressed"] = False
+            car_state["is_braking"] = True
+            car_state["current_pwm"] = 0
+            car_system.brake()
+            # Small delay to let the motor settle
+            import time as _time
+            _time.sleep(0.15)
+            car_state["is_braking"] = False
+            car_state["brake_pressed"] = False
+            print(f"\n⚙️ [Motor Protection] 🛡️ Auto-braked before {current_gear}→{gear} at PWM={current_speed:.0f}%")
+
         car_state["gear"] = gear
         # If emergency brake is active, update the saved gear state
         if car_state["emergency_brake_active"]:
@@ -1836,6 +1923,28 @@ def on_sonar_toggle(data):
     
     car_state["sonar_enabled"] = not car_state["sonar_enabled"]
     emit('sonar_response', {'status': 'ok', 'sonar_enabled': car_state["sonar_enabled"]})
+
+@socketio.on('rear_sonar_toggle')
+def on_rear_sonar_toggle(data):
+    """Handle rear sonar sensor toggle"""
+    if car_state["autonomous_mode"]:
+        emit('rear_sonar_response', {'status': 'blocked', 'rear_sonar_enabled': car_state["rear_sonar_enabled"], 'message': 'Cannot toggle Rear Sonar in autonomous mode'})
+        return
+    car_state["rear_sonar_enabled"] = not car_state["rear_sonar_enabled"]
+    state = '✅ ON' if car_state["rear_sonar_enabled"] else '❌ OFF'
+    print(f"\n⚙️ [UI Control] 📡 REAR SONAR: {state}")
+    emit('rear_sonar_response', {'status': 'ok', 'rear_sonar_enabled': car_state["rear_sonar_enabled"]})
+
+@socketio.on('mpu6050_toggle')
+def on_mpu6050_toggle(data):
+    """Handle MPU6050 gyroscope toggle"""
+    if car_state["autonomous_mode"]:
+        emit('mpu6050_response', {'status': 'blocked', 'mpu6050_enabled': car_state["mpu6050_enabled"], 'message': 'Cannot toggle MPU6050 in autonomous mode'})
+        return
+    car_state["mpu6050_enabled"] = not car_state["mpu6050_enabled"]
+    state = '✅ ON' if car_state["mpu6050_enabled"] else '❌ OFF'
+    print(f"\n⚙️ [UI Control] 🧭 MPU6050: {state}")
+    emit('mpu6050_response', {'status': 'ok', 'mpu6050_enabled': car_state["mpu6050_enabled"]})
 
 @socketio.on('camera_toggle')
 def on_camera_toggle(data):
@@ -1970,6 +2079,21 @@ def on_camera_config_update(data):
 @socketio.on('autonomous_enable')
 def on_autonomous_enable(data):
     """Handle Smart Driver autonomous mode enable"""
+    # Check required sensors are enabled before starting autopilot
+    disabled_sensors = []
+    if not car_state["sonar_enabled"]:
+        disabled_sensors.append("Front Sonar")
+    if not car_state["ir_enabled"]:
+        disabled_sensors.append("Left IR")
+        disabled_sensors.append("Right IR")
+    if not car_state["mpu6050_enabled"]:
+        disabled_sensors.append("MPU6050")
+    
+    if disabled_sensors:
+        print(f"\n⚙️ [UI Control] 🤖 SMART DRIVER: BLOCKED - Required sensors disabled: {', '.join(disabled_sensors)}")
+        emit('autonomous_response', {'status': 'blocked', 'autonomous_enabled': False, 'disabled_sensors': disabled_sensors})
+        return
+    
     car_state["autonomous_mode"] = True
     car_state["autonomous_state"] = State.FORWARD_CRUISE.value
     car_state["last_obstacle_side"] = "none"
@@ -2354,6 +2478,13 @@ def telemetry_broadcast():
                 "autonomous_target_speed": car_system._current_speed if car_state["autonomous_mode"] else 0,
                 "sonar_distance": car_state["sonar_distance"],
                 "sonar_enabled": car_state["sonar_enabled"],
+                "mpu6050_enabled": car_state["mpu6050_enabled"],
+                "rear_sonar_enabled": car_state["rear_sonar_enabled"],
+                # 🧭 MPU6050 Gyro telemetry
+                "gyro_z": car_state["gyro_z"],
+                "pid_correction": car_state["pid_correction"],
+                "gyro_available": car_state["gyro_available"],
+                "gyro_calibrated": car_state["gyro_calibrated"],
                 # 🚨 Sensor health status
                 "sensor_status": car_state["sensor_status"],
                 "service_light_active": car_state["service_light_active"],

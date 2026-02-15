@@ -417,6 +417,11 @@ class AutoPilot:
         self._last_status_time = 0.0
         self._last_pid_time = 0.0
 
+        # Telemetry (exposed for UI)
+        self._last_gyro_z = 0.0
+        self._last_pid_correction = 0.0
+        self._gyro_calibrated = False
+
     # ── Properties (read-only for main.py) ─────
 
     @property
@@ -430,6 +435,26 @@ class AutoPilot:
     @property
     def turn_direction(self):
         return self._turn_direction
+
+    @property
+    def gyro_z(self):
+        """Last read Z-axis yaw rate in °/s (for telemetry)."""
+        return self._last_gyro_z
+
+    @property
+    def pid_correction(self):
+        """Last PID heading correction output (for telemetry)."""
+        return self._last_pid_correction
+
+    @property
+    def gyro_available(self):
+        """Whether the MPU6050 hardware is connected."""
+        return self._gyro.available
+
+    @property
+    def gyro_calibrated(self):
+        """Whether the gyro has been calibrated."""
+        return self._gyro_calibrated
 
     # ── Tuning API ─────────────────────────────
 
@@ -447,6 +472,7 @@ class AutoPilot:
     def start(self):
         """Calibrate gyro, reset PID, begin FORWARD_CRUISE."""
         self._gyro.calibrate(duration=self.CALIBRATION_TIME)
+        self._gyro_calibrated = self._gyro.available
         self._pid = PIDController(
             kp=self.PID_KP,
             ki=self.PID_KI,
@@ -465,6 +491,8 @@ class AutoPilot:
         self._active = False
         self._motor.brake()
         self._pid.reset()
+        self._last_gyro_z = 0.0
+        self._last_pid_correction = 0.0
         print("🛑 [ROVER] Autonomous navigation STOPPED")
 
     # ── Sensor helpers ─────────────────────────
@@ -550,6 +578,10 @@ class AutoPilot:
                 # Positive gyro_z = drifting right → need positive correction
                 # (boost left wheel, slow right wheel)
                 correction = self._pid.update(gyro_z, dt)
+
+                # Store for telemetry
+                self._last_gyro_z = gyro_z
+                self._last_pid_correction = correction
 
                 # Drive forward with differential correction
                 self._motor.forward(self.BASE_SPEED, correction)

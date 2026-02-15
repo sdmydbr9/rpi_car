@@ -198,6 +198,18 @@ interface SettingsDialogProps {
   narrationConfig?: NarrationConfig;
   imageAnalysisEnabled?: boolean;
   onImageAnalysisToggle?: (enabled: boolean) => void;
+  // Sensor toggle props
+  isIREnabled?: boolean;
+  isSonarEnabled?: boolean;
+  isMPU6050Enabled?: boolean;
+  isRearSonarEnabled?: boolean;
+  isCameraEnabled?: boolean;
+  onIRToggle?: () => void;
+  onSonarToggle?: () => void;
+  onRearSonarToggle?: () => void;
+  onMPU6050Toggle?: () => void;
+  onCameraToggle?: () => void;
+  isAutopilotRunning?: boolean;
 }
 
 /* ------------------------------------------------------------------ */
@@ -452,6 +464,17 @@ export const SettingsDialog = ({
   narrationConfig,
   imageAnalysisEnabled = false,
   onImageAnalysisToggle,
+  isIREnabled = true,
+  isSonarEnabled = true,
+  isMPU6050Enabled = true,
+  isRearSonarEnabled = true,
+  isCameraEnabled = false,
+  onIRToggle,
+  onSonarToggle,
+  onRearSonarToggle,
+  onMPU6050Toggle,
+  onCameraToggle,
+  isAutopilotRunning = false,
 }: SettingsDialogProps) => {
   const [isOpen, setIsOpen] = useState(false);
   const [synced, setSynced] = useState(false);
@@ -804,6 +827,45 @@ export const SettingsDialog = ({
 
               {/* Scrollable Content */}
               <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 min-h-0" data-scrollable="true" style={{ touchAction: "pan-y" }}>
+                {/* ───────── SENSORS ───────── */}
+                <CollapsibleGroup title="📡 SENSORS" defaultOpen={false}>
+                  {[
+                    { label: 'Front Sonar', enabled: isSonarEnabled, onToggle: onSonarToggle, required: true },
+                    { label: 'Rear Sonar', enabled: isRearSonarEnabled, onToggle: onRearSonarToggle, required: false },
+                    { label: 'Left IR', enabled: isIREnabled, onToggle: onIRToggle, required: true },
+                    { label: 'Right IR', enabled: isIREnabled, onToggle: onIRToggle, required: true },
+                    { label: 'MPU6050', enabled: isMPU6050Enabled, onToggle: onMPU6050Toggle, required: true },
+                    { label: 'Camera', enabled: isCameraEnabled, onToggle: onCameraToggle, required: false },
+                  ].map((sensor) => (
+                    <div key={sensor.label} className="py-0.5">
+                      <div className="flex items-center justify-between gap-1">
+                        <div className="flex items-center gap-1 flex-1 min-w-0">
+                          <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${sensor.enabled ? 'bg-emerald-400' : 'bg-gray-500'}`} />
+                          <span className="text-[9px] sm:text-[11px] text-muted-foreground racing-text min-w-0 truncate">
+                            {sensor.label}
+                            {sensor.required && <span className="text-amber-400 ml-0.5">*</span>}
+                          </span>
+                        </div>
+                        <button
+                          onClick={sensor.onToggle}
+                          disabled={isAutopilotRunning || (sensor.label === 'Left IR' || sensor.label === 'Right IR' ? false : false)}
+                          className={`px-3 py-0.5 rounded border text-[10px] sm:text-xs racing-text transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                            sensor.enabled
+                              ? "border-primary bg-primary/20 text-primary hover:bg-primary/30"
+                              : "border-border bg-muted/30 text-muted-foreground hover:bg-muted/50"
+                          }`}
+                        >
+                          {sensor.enabled ? "ON" : "OFF"}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  <div className="mt-1 px-1 py-0.5 text-[7px] sm:text-[8px] text-muted-foreground/60 racing-text">
+                    <span className="text-amber-400">*</span> Required for Autopilot. Disabled sensors are ignored. Sensors cannot be toggled during autonomous driving.
+                  </div>
+                  {/* Note: Left IR and Right IR share a single toggle */}
+                </CollapsibleGroup>
+
                 {/* ───────── AI NARRATION ───────── */}
                 <CollapsibleGroup title="🎙️ AI NARRATION" defaultOpen={false}>
                   {/* Provider */}
