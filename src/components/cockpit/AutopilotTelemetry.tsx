@@ -108,16 +108,18 @@ export const AutopilotTelemetry = ({
       : "text-primary";
 
   return (
-    <div className="flex flex-col items-center h-full py-1 px-1 overflow-hidden gap-1">
-      {/* Header */}
-      <div className="flex items-center gap-1">
-        <Navigation className={`w-3 h-3 sm:w-4 sm:h-4 ${isRunning ? 'text-primary animate-pulse' : 'text-muted-foreground'}`} />
-        <span className={`racing-text text-[8px] sm:text-xs font-bold ${isRunning ? 'text-primary' : 'text-muted-foreground'}`}>AUTOPILOT</span>
-      </div>
+    <div className="flex flex-col items-center h-full py-0.5 px-1 gap-0.5">
+      {/* Scrollable Content Area */}
+      <div className="flex flex-col items-center flex-1 w-full overflow-y-auto gap-0.5 min-h-0">
+        {/* Header */}
+        <div className="flex items-center gap-1 flex-shrink-0">
+          <Navigation className={`w-3 h-3 sm:w-4 sm:h-4 ${isRunning ? 'text-primary animate-pulse' : 'text-muted-foreground'}`} />
+          <span className={`racing-text text-[8px] sm:text-xs font-bold ${isRunning ? 'text-primary' : 'text-muted-foreground'}`}>AUTOPILOT</span>
+        </div>
       
       {/* Status Display */}
       <div className={`
-        w-full p-1.5 rounded border-2 transition-all duration-300
+        w-full p-1 rounded border-2 transition-all duration-300 flex-shrink-0
         flex flex-col items-center gap-0.5
         ${isRunning 
           ? `${config.borderColor} ${config.bgColor}` 
@@ -133,23 +135,23 @@ export const AutopilotTelemetry = ({
         }`}>
           {isRunning ? config.label : 'STANDBY'}
         </span>
-        <span className="text-[6px] sm:text-[8px] text-muted-foreground text-center leading-tight">
+        <span className="text-[6px] sm:text-[7px] text-muted-foreground text-center leading-tight">
           {isRunning ? config.description : 'Press start to begin'}
         </span>
       </div>
       
       {/* Acceleration Gauge */}
-      <div className="w-full bg-card/50 rounded border border-border p-1">
+      <div className="w-full bg-card/50 rounded border border-border p-0.5 flex-shrink-0">
         <div className="flex items-center justify-between mb-0.5">
           <div className="flex items-center gap-0.5">
-            <Gauge className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-primary" />
-            <span className="racing-text text-[6px] sm:text-[8px] text-muted-foreground">ACCEL</span>
+            <Gauge className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-primary flex-shrink-0" />
+            <span className="racing-text text-[6px] sm:text-[7px] text-muted-foreground whitespace-nowrap">ACCEL</span>
           </div>
-          <span className={`racing-text text-[8px] sm:text-[10px] font-bold ${accelerationPercent > 80 ? "text-primary text-glow-teal" : "text-foreground"}`}>
+          <span className={`racing-text text-[7px] sm:text-[8px] font-bold flex-shrink-0 ${accelerationPercent > 80 ? "text-primary text-glow-teal" : "text-foreground"}`}>
             {accelerationPercent.toFixed(0)}%
           </span>
         </div>
-        <div className="w-full h-1.5 sm:h-2 bg-muted rounded-full overflow-hidden">
+        <div className="w-full h-1 sm:h-1.5 bg-muted rounded-full overflow-hidden flex-shrink-0">
           <div 
             className="h-full bg-gradient-to-r from-primary/60 to-primary transition-all duration-200 rounded-full"
             style={{ width: `${accelerationPercent}%` }}
@@ -158,18 +160,18 @@ export const AutopilotTelemetry = ({
       </div>
       
       {/* Distance to Obstacle */}
-      <div className="w-full bg-card/50 rounded border border-border p-1">
+      <div className="w-full bg-card/50 rounded border border-border p-0.5 flex-shrink-0">
         <div className="flex items-center justify-between mb-0.5">
           <div className="flex items-center gap-0.5">
-            <Ruler className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-cyan-500" />
-            <span className="racing-text text-[6px] sm:text-[8px] text-muted-foreground">OBSTACLE</span>
+            <Ruler className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-cyan-500 flex-shrink-0" />
+            <span className="racing-text text-[6px] sm:text-[7px] text-muted-foreground whitespace-nowrap">OBSTACLE</span>
           </div>
-          <span className={`racing-text text-[8px] sm:text-[10px] font-bold ${distanceWarning}`}>
+          <span className={`racing-text text-[7px] sm:text-[8px] font-bold flex-shrink-0 ${distanceWarning}`}>
             {distanceToObstacle}cm
           </span>
         </div>
         {/* Visual distance indicator */}
-        <div className="w-full h-1.5 sm:h-2 bg-muted rounded-full overflow-hidden">
+        <div className="w-full h-1 sm:h-1.5 bg-muted rounded-full overflow-hidden flex-shrink-0">
           <div 
             className={`h-full transition-all duration-200 rounded-full ${
               distanceToObstacle < 20 
@@ -188,13 +190,13 @@ export const AutopilotTelemetry = ({
       </div>
       
       {/* Slalom Yaw Heading */}
-      <div className="w-full bg-card/50 rounded border border-border p-1">
+      <div className="w-full bg-card/50 rounded border border-border p-0.5 flex-shrink-0">
         <div className="flex items-center justify-between mb-0.5">
           <div className="flex items-center gap-0.5">
-            <Compass className={`w-2.5 h-2.5 sm:w-3 sm:h-3 ${isRunning ? 'text-cyan-400' : 'text-muted-foreground'}`} />
-            <span className="racing-text text-[6px] sm:text-[8px] text-muted-foreground">YAW</span>
+            <Compass className={`w-2.5 h-2.5 sm:w-3 sm:h-3 flex-shrink-0 ${isRunning ? 'text-cyan-400' : 'text-muted-foreground'}`} />
+            <span className="racing-text text-[6px] sm:text-[7px] text-muted-foreground whitespace-nowrap">YAW</span>
           </div>
-          <span className={`racing-text text-[7px] sm:text-[9px] font-bold ${isRunning ? 'text-cyan-400' : 'text-muted-foreground'}`}>
+          <span className={`racing-text text-[7px] sm:text-[8px] font-bold flex-shrink-0 ${isRunning ? 'text-cyan-400' : 'text-muted-foreground'}`}>
             {isRunning ? `${currentHeading > 0 ? '+' : ''}${currentHeading.toFixed(0)}°` : 'OFF'}
           </span>
         </div>
@@ -203,23 +205,23 @@ export const AutopilotTelemetry = ({
           <>
             {/* Target vs Current heading */}
             <div className="flex items-center justify-between mb-0.5">
-              <span className="text-[6px] sm:text-[7px] text-muted-foreground">Target</span>
-              <span className={`racing-text text-[7px] sm:text-[9px] font-bold ${
+              <span className="text-[6px] sm:text-[7px] text-muted-foreground whitespace-nowrap">Target</span>
+              <span className={`racing-text text-[7px] sm:text-[8px] font-bold flex-shrink-0 ${
                 Math.abs(targetYaw) > 30 ? 'text-amber-400' : 'text-cyan-400'
               }`}>
                 {targetYaw > 0 ? '+' : ''}{targetYaw.toFixed(0)}°
               </span>
             </div>
             <div className="flex items-center justify-between mb-0.5">
-              <span className="text-[6px] sm:text-[7px] text-muted-foreground">Dodge</span>
-              <span className={`racing-text text-[7px] sm:text-[9px] font-bold ${
+              <span className="text-[6px] sm:text-[7px] text-muted-foreground whitespace-nowrap">Dodge</span>
+              <span className={`racing-text text-[7px] sm:text-[8px] font-bold flex-shrink-0 ${
                 slalomSign > 0 ? 'text-cyan-400' : slalomSign < 0 ? 'text-amber-400' : 'text-muted-foreground'
               }`}>
                 {slalomSign > 0 ? '→ RIGHT' : slalomSign < 0 ? '← LEFT' : '— NONE'}
               </span>
             </div>
             {/* Yaw heading bar — center = 0°, left/right = drift */}
-            <div className="w-full h-1.5 sm:h-2 bg-muted rounded-full overflow-hidden relative">
+            <div className="w-full h-1 sm:h-1.5 bg-muted rounded-full overflow-hidden relative flex-shrink-0">
               <div className="absolute left-1/2 top-0 w-px h-full bg-muted-foreground/40" />
               <div
                 className={`absolute top-0 h-full rounded-full transition-all duration-200 ${
@@ -246,13 +248,13 @@ export const AutopilotTelemetry = ({
       </div>
       
       {/* MPU6050 Gyro / PID Heading */}
-      <div className="w-full bg-card/50 rounded border border-border p-1">
+      <div className="w-full bg-card/50 rounded border border-border p-0.5 flex-shrink-0">
         <div className="flex items-center justify-between mb-0.5">
           <div className="flex items-center gap-0.5">
-            <Crosshair className={`w-2.5 h-2.5 sm:w-3 sm:h-3 ${isMPU6050Enabled && gyroAvailable ? 'text-emerald-400' : 'text-muted-foreground'}`} />
-            <span className="racing-text text-[6px] sm:text-[8px] text-muted-foreground">GYRO</span>
+            <Crosshair className={`w-2.5 h-2.5 sm:w-3 sm:h-3 flex-shrink-0 ${isMPU6050Enabled && gyroAvailable ? 'text-emerald-400' : 'text-muted-foreground'}`} />
+            <span className="racing-text text-[6px] sm:text-[7px] text-muted-foreground whitespace-nowrap">GYRO</span>
           </div>
-          <span className={`racing-text text-[7px] sm:text-[9px] font-bold ${
+          <span className={`racing-text text-[7px] sm:text-[8px] font-bold flex-shrink-0 ${
             !isMPU6050Enabled ? 'text-muted-foreground'
             : !gyroAvailable ? 'text-destructive'
             : gyroCalibrated ? 'text-emerald-400'
@@ -266,23 +268,23 @@ export const AutopilotTelemetry = ({
           <>
             {/* Yaw rate + PID correction */}
             <div className="flex items-center justify-between mb-0.5">
-              <span className="text-[6px] sm:text-[7px] text-muted-foreground">Yaw</span>
-              <span className={`racing-text text-[7px] sm:text-[9px] font-bold ${
+              <span className="text-[6px] sm:text-[7px] text-muted-foreground whitespace-nowrap">Yaw</span>
+              <span className={`racing-text text-[7px] sm:text-[8px] font-bold flex-shrink-0 ${
                 Math.abs(gyroZ) > 5 ? 'text-amber-400' : Math.abs(gyroZ) > 15 ? 'text-destructive' : 'text-emerald-400'
               }`}>
                 {gyroZ > 0 ? '+' : ''}{gyroZ.toFixed(1)}°/s
               </span>
             </div>
             <div className="flex items-center justify-between mb-0.5">
-              <span className="text-[6px] sm:text-[7px] text-muted-foreground">PID</span>
-              <span className={`racing-text text-[7px] sm:text-[9px] font-bold ${
+              <span className="text-[6px] sm:text-[7px] text-muted-foreground whitespace-nowrap">PID</span>
+              <span className={`racing-text text-[7px] sm:text-[8px] font-bold flex-shrink-0 ${
                 Math.abs(pidCorrection) > 15 ? 'text-amber-400' : 'text-emerald-400'
               }`}>
                 {pidCorrection > 0 ? '+' : ''}{pidCorrection.toFixed(1)}
               </span>
             </div>
             {/* Heading correction bar — center = straight, left/right = drift */}
-            <div className="w-full h-1.5 sm:h-2 bg-muted rounded-full overflow-hidden relative">
+            <div className="w-full h-1 sm:h-1.5 bg-muted rounded-full overflow-hidden relative flex-shrink-0">
               <div className="absolute left-1/2 top-0 w-px h-full bg-muted-foreground/40" />
               <div
                 className={`absolute top-0 h-full rounded-full transition-all duration-200 ${
@@ -309,7 +311,7 @@ export const AutopilotTelemetry = ({
       </div>
 
       {/* Telemetry Wave - Active indicator */}
-      <div className={`w-full overflow-hidden h-3 sm:h-4 border rounded ${isRunning ? 'border-primary/50 bg-primary/10' : 'border-muted-foreground/30 bg-muted/20'}`}>
+      <div className={`w-full overflow-hidden h-2 sm:h-3 border rounded flex-shrink-0 ${isRunning ? 'border-primary/50 bg-primary/10' : 'border-muted-foreground/30 bg-muted/20'}`}>
         {isRunning ? (
           <svg className="w-[200%] h-full animate-telemetry" viewBox="0 0 200 30" preserveAspectRatio="none">
             <path
@@ -333,19 +335,20 @@ export const AutopilotTelemetry = ({
           </svg>
         )}
       </div>
-      <div className={`text-[5px] sm:text-[7px] racing-text font-bold ${
+      <div className={`text-[5px] sm:text-[6px] racing-text font-bold flex-shrink-0 ${
         isRunning ? 'text-primary' : 'text-muted-foreground'
       }`}>
         {isRunning ? 'AUTOPILOT ACTIVE' : 'AUTOPILOT STANDBY'}
       </div>
+      </div>
       
-      {/* Control Buttons: E-BRAKE | EXIT | START/STOP */}
-      <div className="flex gap-1 w-full mt-1">
+      {/* Control Buttons: E-BRAKE | EXIT | START/STOP - Always visible at bottom */}
+      <div className="flex gap-1 w-full flex-shrink-0">
         {/* E-BRAKE Button */}
         <button
           onClick={onEmergencyStop}
           className={`
-            flex-1 rounded-full border-2 flex items-center justify-center
+            flex-1 rounded-full border-2 flex items-center justify-center min-h-fit
             transition-all duration-100 touch-feedback font-bold racing-text
             ${eBrakeActive 
               ? 'bg-destructive border-destructive text-destructive-foreground hover:bg-destructive/90 shadow-lg shadow-destructive/50 animate-pulse' 
@@ -353,7 +356,7 @@ export const AutopilotTelemetry = ({
           `}
         >
           <svg 
-            className="w-10 h-10" 
+            className="w-8 h-8 sm:w-9 sm:h-9" 
             style={{ color: 'currentColor' }}
             xmlns="http://www.w3.org/2000/svg" 
             version="1.1" 
@@ -367,14 +370,14 @@ export const AutopilotTelemetry = ({
         <button
           onClick={onAutopilotToggle}
           className={`
-            flex-1 rounded-full border-2 flex items-center justify-center
+            flex-1 rounded-full border-2 flex items-center justify-center min-h-fit
             transition-all duration-100 touch-feedback font-bold racing-text
             bg-card border-gold/60 text-gold hover:bg-gold/20 hover:border-gold
           `}
           title="Exit Autopilot Mode"
         >
           <svg
-            className="w-10 h-10"
+            className="w-8 h-8 sm:w-9 sm:h-9"
             style={{ color: 'currentColor' }}
             xmlns="http://www.w3.org/2000/svg"
             version="1.1"
@@ -392,7 +395,7 @@ export const AutopilotTelemetry = ({
           onClick={onStartStop}
           disabled={eBrakeActive}
           className={`
-            flex-1 rounded-full border-2 flex items-center justify-center
+            flex-1 rounded-full border-2 flex items-center justify-center min-h-fit
             transition-all duration-100 touch-feedback font-bold racing-text
             ${eBrakeActive
               ? 'bg-card border-muted-foreground/30 text-muted-foreground cursor-not-allowed opacity-50'
@@ -404,9 +407,9 @@ export const AutopilotTelemetry = ({
           title={isRunning ? 'Stop Autopilot' : 'Start Autopilot'}
         >
           {isRunning ? (
-            <Square className="w-7 h-7" />
+            <Square className="w-7 h-7 sm:w-8 sm:h-8" />
           ) : (
-            <Play className="w-7 h-7" />
+            <Play className="w-7 h-7 sm:w-8 sm:h-8" />
           )}
         </button>
       </div>
