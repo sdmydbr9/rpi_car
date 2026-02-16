@@ -62,6 +62,9 @@ export interface TelemetryData {
   narration_speaking?: boolean;
   // Camera actual FPS
   camera_actual_fps?: number;
+  // Speed Encoder telemetry
+  speed_mpm?: number;
+  encoder_available?: boolean;
 }
 
 /**

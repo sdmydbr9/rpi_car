@@ -2,12 +2,31 @@ import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { X, Wifi, Zap, Power, VideoOff, Camera, Mic } from "lucide-react";
 import { useGameFeedback } from "@/hooks/useGameFeedback";
 import { useTouchTracking } from "@/hooks/useTouchTracking";
+import type { SpeedUnit } from "@/components/cockpit/Speedometer";
+
+const SPEED_UNIT_LABELS: Record<SpeedUnit, string> = {
+  "m/min": "M/MIN",
+  "cm/s": "CM/S",
+  "km/h": "KM/H",
+  "mph": "MPH",
+};
+
+const convertMpm = (mpm: number, unit: SpeedUnit): number => {
+  switch (unit) {
+    case "cm/s":  return mpm * 100 / 60;
+    case "km/h":  return mpm * 60 / 1000;
+    case "mph":   return mpm * 60 / 1609.344;
+    default:      return mpm; // m/min
+  }
+};
 
 interface ImmersiveHUDProps {
   isOpen: boolean;
   onClose: () => void;
   streamUrl?: string;
   speed: number;
+  speedMpm?: number;
+  speedUnit?: SpeedUnit;
   gear: string;
   throttle: boolean;
   brake: boolean;
@@ -43,6 +62,8 @@ export const ImmersiveHUD = ({
   onClose,
   streamUrl,
   speed,
+  speedMpm = 0,
+  speedUnit = "m/min",
   gear,
   throttle,
   brake,
@@ -88,6 +109,10 @@ export const ImmersiveHUD = ({
   // RPM simulation based on speed and throttle
   const rpm = Math.min(100, (speed / 100) * 80 + (throttle ? 20 : 0));
   const isRedline = rpm > 85;
+
+  // Converted speed for HUD display
+  const hudDisplaySpeed = useMemo(() => convertMpm(speedMpm, speedUnit), [speedMpm, speedUnit]);
+  const hudSpeedLabel = SPEED_UNIT_LABELS[speedUnit] || "M/MIN";
 
   // Narration auto-fade: show text while speaking, fade out after speech ends
   const [narrationVisible, setNarrationVisible] = useState(false);
@@ -500,9 +525,9 @@ export const ImmersiveHUD = ({
           <div className="flex items-center gap-2 px-4 py-3 rounded-lg bg-background/40 backdrop-blur-md border border-border/50">
             <div className="text-right">
               <div className="text-3xl racing-number font-bold text-foreground text-glow-teal">
-                {Math.round(speed)}
+                {hudDisplaySpeed < 10 ? hudDisplaySpeed.toFixed(1) : Math.round(hudDisplaySpeed)}
               </div>
-              <div className="text-[8px] racing-text text-muted-foreground">KM/H</div>
+              <div className="text-[8px] racing-text text-muted-foreground">{hudSpeedLabel}</div>
             </div>
             <div className={`w-12 h-12 rounded-lg flex items-center justify-center text-xl font-bold racing-text ${
               gear === 'R' 

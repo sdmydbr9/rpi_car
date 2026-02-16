@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Rocket, RotateCcw } from "lucide-react";
 import { ServiceLight, type SensorStatus } from "./ServiceLight";
-import { Speedometer } from "./Speedometer";
+import { Speedometer, type SpeedUnit } from "./Speedometer";
 import { Gauge } from "./Gauge";
 
 interface CarTelemetryProps {
@@ -10,6 +10,8 @@ interface CarTelemetryProps {
   brake: boolean;
   gear: string;
   speed: number;
+  speedMpm: number;         // Real speed in meters per minute
+  speedUnit?: SpeedUnit;    // Display unit for speedometer
   temperature: number;
   cpuClock: number;
   gpuClock: number;
@@ -27,6 +29,8 @@ export const CarTelemetry = ({
   brake,
   gear,
   speed,
+  speedMpm,
+  speedUnit = "m/min",
   temperature,
   cpuClock,
   gpuClock,
@@ -94,7 +98,7 @@ export const CarTelemetry = ({
       <div className="flex gap-1 items-start justify-center flex-wrap">
         {/* Left: Speedometer */}
         <div className="flex flex-col items-center">
-          <Speedometer speed={speed} maxSpeed={100} isEngineRunning={isEngineRunning} />
+          <Speedometer speedMpm={speedMpm} speedUnit={speedUnit} isEngineRunning={isEngineRunning} />
         </div>
 
         {/* Center: Car Diagram with Action Buttons */}
@@ -247,11 +251,11 @@ export const CarTelemetry = ({
           <Gauge 
             value={rpm}
             min={0}
-            max={8000}
+            max={300}
             label="RPM"
-            unit="×100"
+            unit=""
             isEngineRunning={isEngineRunning}
-            warningThreshold={7500}
+            warningThreshold={250}
             size="medium"
           />
         </div>

@@ -1,12 +1,28 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
+
+export type SpeedUnit = "m/min" | "cm/s" | "km/h" | "mph";
+
+interface SpeedUnitConfig {
+  label: string;
+  fromMpm: (mpm: number) => number; // convert meters-per-minute → display unit
+  maxSpeed: number;                 // gauge full-scale in display unit
+  decimals: number;                 // digits after decimal point
+}
+
+const SPEED_UNIT_MAP: Record<SpeedUnit, SpeedUnitConfig> = {
+  "m/min": { label: "M/MIN", fromMpm: (v) => v,                  maxSpeed: 50,  decimals: 1 },
+  "cm/s":  { label: "CM/S",  fromMpm: (v) => v * 100 / 60,      maxSpeed: 80,  decimals: 1 },
+  "km/h":  { label: "KM/H",  fromMpm: (v) => v * 60 / 1000,     maxSpeed: 3,   decimals: 2 },
+  "mph":   { label: "MPH",   fromMpm: (v) => v * 60 / 1609.344, maxSpeed: 2,   decimals: 2 },
+};
 
 interface SpeedometerProps {
-  speed: number; // 0-100
-  maxSpeed?: number;
+  speedMpm: number;          // raw speed in meters per minute (canonical unit)
+  speedUnit?: SpeedUnit;     // display unit (default: m/min)
   isEngineRunning?: boolean;
 }
 
-export const Speedometer = ({ speed, maxSpeed = 100, isEngineRunning = false }: SpeedometerProps) => {
+export const Speedometer = ({ speedMpm, speedUnit = "m/min", isEngineRunning = false }: SpeedometerProps) => {
   const [performSweep, setPerformSweep] = useState(false);
   const [wasEngineRunning, setWasEngineRunning] = useState(false);
 
@@ -15,17 +31,29 @@ export const Speedometer = ({ speed, maxSpeed = 100, isEngineRunning = false }: 
     if (isEngineRunning && !wasEngineRunning) {
       setPerformSweep(true);
       setWasEngineRunning(true);
-      // Stop the animation after it completes
       setTimeout(() => setPerformSweep(false), 800);
     } else if (!isEngineRunning) {
       setWasEngineRunning(false);
     }
   }, [isEngineRunning, wasEngineRunning]);
 
-  const percentage = Math.min(100, Math.max(0, (speed / maxSpeed) * 100));
-  // Needle rotates from -135deg (0) to +135deg (max) - total 270deg sweep
+  const cfg = SPEED_UNIT_MAP[speedUnit] || SPEED_UNIT_MAP["m/min"];
+  const displaySpeed = cfg.fromMpm(speedMpm);
+  const maxSpeed = cfg.maxSpeed;
+
+  const percentage = Math.min(100, Math.max(0, (displaySpeed / maxSpeed) * 100));
   const needleRotation = -135 + (percentage / 100) * 270;
   const isHighSpeed = percentage > 80;
+
+  // Scale labels: 0, mid, max
+  const midLabel = useMemo(() => {
+    const mid = maxSpeed / 2;
+    return cfg.decimals > 0 && mid < 10 ? mid.toFixed(1) : String(Math.round(mid));
+  }, [maxSpeed, cfg.decimals]);
+
+  const maxLabel = useMemo(() => {
+    return cfg.decimals > 0 && maxSpeed < 10 ? maxSpeed.toFixed(1) : String(Math.round(maxSpeed));
+  }, [maxSpeed, cfg.decimals]);
 
   // Generate tick marks
   const ticks = [];
@@ -46,39 +74,19 @@ export const Speedometer = ({ speed, maxSpeed = 100, isEngineRunning = false }: 
     );
   }
 
+  // Format the digital readout
+  const readout = displaySpeed < 10 ? displaySpeed.toFixed(Math.min(cfg.decimals, 1)) : Math.round(displaySpeed).toString();
+
   return (
     <div className="flex flex-col items-center">
       <div className="relative w-[min(18vw,5rem)] aspect-square">
         <svg className="w-full h-full" viewBox="0 0 100 100">
           {/* Outer bezel */}
-          <circle
-            cx="50"
-            cy="50"
-            r="48"
-            fill="hsl(var(--card))"
-            stroke="hsl(var(--border))"
-            strokeWidth="2"
-          />
-          
+          <circle cx="50" cy="50" r="48" fill="hsl(var(--card))" stroke="hsl(var(--border))" strokeWidth="2" />
           {/* Inner dial face */}
-          <circle
-            cx="50"
-            cy="50"
-            r="44"
-            fill="hsl(var(--secondary))"
-            stroke="hsl(var(--muted))"
-            strokeWidth="1"
-          />
-          
+          <circle cx="50" cy="50" r="44" fill="hsl(var(--secondary))" stroke="hsl(var(--muted))" strokeWidth="1" />
           {/* Speed arc background */}
-          <path
-            d="M 15 72 A 40 40 0 1 1 85 72"
-            fill="none"
-            stroke="hsl(var(--muted))"
-            strokeWidth="4"
-            strokeLinecap="round"
-          />
-          
+          <path d="M 15 72 A 40 40 0 1 1 85 72" fill="none" stroke="hsl(var(--muted))" strokeWidth="4" strokeLinecap="round" />
           {/* Speed arc active */}
           <path
             d="M 15 72 A 40 40 0 1 1 85 72"
@@ -93,50 +101,35 @@ export const Speedometer = ({ speed, maxSpeed = 100, isEngineRunning = false }: 
               transition: 'stroke-dashoffset 0.15s ease-out'
             }}
           />
-          
           {/* Tick marks */}
           {ticks}
-          
           {/* Needle */}
-          <g transform={`rotate(${performSweep ? -135 : needleRotation} 50 50)`} style={{ 
+          <g transform={`rotate(${performSweep ? -135 : needleRotation} 50 50)`} style={{
             transition: performSweep ? 'none' : 'transform 0.1s ease-out',
             animation: performSweep ? 'needleSweep 0.8s ease-in-out' : 'none'
           }}>
             <polygon
               points="50,15 48,50 52,50"
               fill={isHighSpeed ? "hsl(var(--destructive))" : "hsl(var(--primary))"}
-              style={{
-                filter: `drop-shadow(0 0 3px ${isHighSpeed ? 'hsl(var(--destructive))' : 'hsl(var(--primary))'})`
-              }}
+              style={{ filter: `drop-shadow(0 0 3px ${isHighSpeed ? 'hsl(var(--destructive))' : 'hsl(var(--primary))'})` }}
             />
           </g>
-          
           {/* Center cap */}
-          <circle
-            cx="50"
-            cy="50"
-            r="6"
-            fill="hsl(var(--muted))"
-            stroke="hsl(var(--border))"
-            strokeWidth="1"
-          />
-          
-          {/* Speed numbers - simplified */}
+          <circle cx="50" cy="50" r="6" fill="hsl(var(--muted))" stroke="hsl(var(--border))" strokeWidth="1" />
+          {/* Scale numbers */}
           <text x="18" y="68" fill="hsl(var(--muted-foreground))" fontSize="5" textAnchor="middle">0</text>
-          <text x="50" y="18" fill="hsl(var(--muted-foreground))" fontSize="5" textAnchor="middle">50</text>
-          <text x="82" y="68" fill="hsl(var(--destructive))" fontSize="5" textAnchor="middle">100</text>
+          <text x="50" y="18" fill="hsl(var(--muted-foreground))" fontSize="5" textAnchor="middle">{midLabel}</text>
+          <text x="82" y="68" fill="hsl(var(--destructive))" fontSize="5" textAnchor="middle">{maxLabel}</text>
         </svg>
-        
         {/* Digital readout */}
         <div className="absolute bottom-[18%] left-1/2 -translate-x-1/2">
           <span className={`text-[8px] sm:text-xs racing-number font-bold ${isHighSpeed ? 'text-destructive text-glow-red' : 'text-foreground'}`}>
-            {Math.round(speed)}
+            {readout}
           </span>
         </div>
       </div>
-      
-      {/* Label */}
-      <div className="text-[5px] sm:text-[7px] text-muted-foreground racing-text">KM/H</div>
+      {/* Unit label */}
+      <div className="text-[5px] sm:text-[7px] text-muted-foreground racing-text">{cfg.label}</div>
     </div>
   );
 };

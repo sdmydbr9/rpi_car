@@ -22,6 +22,7 @@ interface ControlState {
   brake: boolean;
   gear: string;
   speed: number;
+  speedMpm: number;     // Real speed in meters per minute (from encoder)
   temperature: number; // CPU temperature in Celsius
   cpuClock: number; // CPU clock speed in MHz
   gpuClock: number; // GPU clock speed in MHz
@@ -60,6 +61,7 @@ export const CockpitController = () => {
     brake: false,
     gear: "N",
     speed: 0,
+    speedMpm: 0,
     temperature: 0,
     cpuClock: 0,
     gpuClock: 0,
@@ -429,6 +431,7 @@ export const CockpitController = () => {
           ...prev,
           gear: gearOverride ?? data.gear ?? prev.gear,
           speed: data.current_pwm || prev.speed,
+          speedMpm: data.speed_mpm !== undefined ? data.speed_mpm : prev.speedMpm,
           // Only show system metrics when engine is running
           temperature: isEngineRunning ? (data.temperature || prev.temperature) : 0,
           cpuClock: isEngineRunning ? (data.cpu_clock || prev.cpuClock) : 0,
@@ -581,7 +584,7 @@ export const CockpitController = () => {
       setIsAutoMode(false);
       setIsAutopilotEnabled(false);
       setIsAutopilotRunning(false);
-      setControlState(prev => ({ ...prev, speed: 0, throttle: false, brake: false, gear: 'N' }));
+      setControlState(prev => ({ ...prev, speed: 0, speedMpm: 0, throttle: false, brake: false, gear: 'N' }));
       socketClient.emitEmergencyStop();
       socketClient.emitAutoAccelDisable();
     } else {
@@ -601,7 +604,7 @@ export const CockpitController = () => {
     if (newEBrakeState) {
       // Activating e-brake while in autopilot - stop car but remain in autopilot mode
       console.log('🛑 Autopilot E-brake ACTIVE - car stopped, autopilot paused');
-      setControlState(prev => ({ ...prev, speed: 0, throttle: false, brake: false }));
+      setControlState(prev => ({ ...prev, speed: 0, speedMpm: 0, throttle: false, brake: false }));
       socketClient.emitEmergencyStop();
     } else {
       // Deactivating e-brake while in autopilot - resume autopilot
@@ -621,7 +624,7 @@ export const CockpitController = () => {
       setIsEmergencyStop(true);
       setIsAutopilotEnabled(false);
       setIsAutopilotRunning(false);
-      setControlState(prev => ({ ...prev, speed: 0, throttle: false, brake: false, gear: 'N' }));
+      setControlState(prev => ({ ...prev, speed: 0, speedMpm: 0, throttle: false, brake: false, gear: 'N' }));
       socketClient.emitEmergencyStop();
       if (isAutopilotRunning) {
         socketClient.emitAutopilotDisable();
@@ -764,7 +767,7 @@ export const CockpitController = () => {
     socketClient.emitAutoAccelDisable();
     socketClient.emitThrottle(false);
     socketClient.emitBrake(true);
-    setControlState(prev => ({ ...prev, throttle: false, brake: false, speed: 0, temperature: 0, cpuClock: 0, gpuClock: 0, rpm: 0 }));
+    setControlState(prev => ({ ...prev, throttle: false, brake: false, speed: 0, speedMpm: 0, temperature: 0, cpuClock: 0, gpuClock: 0, rpm: 0 }));
     console.log('✅ Engine stopped');
   }, []);
 
@@ -828,6 +831,8 @@ export const CockpitController = () => {
         onClose={handleImmersiveViewToggle}
         streamUrl={streamUrl}
         speed={controlState.speed}
+        speedMpm={controlState.speedMpm}
+        speedUnit={(tuning.SPEED_UNIT || "m/min") as import("./Speedometer").SpeedUnit}
         gear={controlState.gear}
         throttle={controlState.throttle}
         brake={controlState.brake}
@@ -911,6 +916,8 @@ export const CockpitController = () => {
               brake={controlState.brake}
               gear={controlState.gear}
               speed={controlState.speed}
+              speedMpm={controlState.speedMpm}
+              speedUnit={(tuning.SPEED_UNIT || "m/min") as import("./Speedometer").SpeedUnit}
               temperature={controlState.temperature}
               cpuClock={controlState.cpuClock}
               gpuClock={controlState.gpuClock}

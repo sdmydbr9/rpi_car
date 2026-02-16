@@ -41,6 +41,8 @@ export interface TuningConstants {
   CAMERA_JPEG_QUALITY: number;
   CAMERA_FRAMERATE: number;
   VISION_ENABLED: boolean;
+  // Speedometer display unit
+  SPEED_UNIT: string;
 }
 
 export const DEFAULT_TUNING: TuningConstants = {
@@ -79,6 +81,8 @@ export const DEFAULT_TUNING: TuningConstants = {
   CAMERA_JPEG_QUALITY: 70,
   CAMERA_FRAMERATE: 30,
   VISION_ENABLED: false,
+  // Speedometer
+  SPEED_UNIT: "m/min",
 };
 
 interface ParamConfig {
@@ -187,6 +191,24 @@ const TUNING_GROUPS: { title: string; params: ParamConfig[] }[] = [
     params: [
       { key: "CALIBRATION_TIME", label: "Calibration", min: 0.5, max: 5.0, step: 0.5, unit: "s", info: "Gyro calibration duration at autopilot start. More time = better drift offset. ↑ Increase: more accurate. ↓ Decrease: faster startup." },
       { key: "STATUS_INTERVAL", label: "Status Log", min: 0.1, max: 5.0, step: 0.1, unit: "s", info: "Interval between console status prints. ↑ Increase: less log spam. ↓ Decrease: more detailed logging." },
+    ],
+  },
+  {
+    title: "SPEEDOMETER",
+    params: [
+      {
+        key: "SPEED_UNIT",
+        label: "Speed Unit",
+        unit: "",
+        type: "select",
+        options: [
+          { value: "m/min", label: "m/min (meters per minute)" },
+          { value: "cm/s", label: "cm/s (centimeters per second)" },
+          { value: "km/h", label: "km/h (kilometers per hour)" },
+          { value: "mph", label: "mph (miles per hour)" },
+        ],
+        info: "Display unit for the speedometer gauge. Speed is measured from the rear-right wheel encoder (20-hole disc, 65mm wheel).",
+      },
     ],
   },
 ];

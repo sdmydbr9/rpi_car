@@ -52,6 +52,14 @@ LEFT_IR = 5   # GPIO 5 - Left Front Obstacle Detection
 RIGHT_IR = 6  # GPIO 6 - Right Front Obstacle Detection
 AVOID_SWERVE_ANGLE = 85  # Degrees to swerve when obstacle detected (increased for aggressive steering)
 
+# --- SPEED ENCODER (Rear-Right Wheel) ---
+# Optical encoder on rear-right wheel: Signal → Pin 37 (GPIO 26)
+ENCODER_PIN = 26        # BCM GPIO 26 (Physical Pin 37)
+ENCODER_HOLES = 20      # Holes per revolution on encoder disc
+WHEEL_DIAMETER_M = 0.065  # Wheel diameter in meters (65mm)
+import math
+WHEEL_CIRCUMFERENCE_M = math.pi * WHEEL_DIAMETER_M  # ~0.2042m per revolution
+
 # --- PHYSICS TUNING ---
 ACCEL_RATE = 2.0    # How snappy the car speeds up (Higher = Faster)
 COAST_RATE = 0.5    # How slowly it stops when you let go of gas (Coasting)
@@ -635,6 +643,11 @@ car_state = {
     "pid_correction": 0.0,             # Current PID heading correction
     "gyro_available": False,           # MPU6050 hardware detected
     "gyro_calibrated": False,          # Gyro has been calibrated
+    # 🔄 Speed Encoder (Rear-Right Wheel)
+    "encoder_rpm": 0.0,                  # Real RPM from encoder
+    "encoder_speed_mpm": 0.0,            # Speed in meters per minute
+    "encoder_pulse_count": 0,            # Running pulse count (reset each calc)
+    "encoder_available": False,          # True if encoder GPIO setup succeeded
     # Camera configuration settings
     "camera_resolution": CAMERA_DEFAULT_RESOLUTION,  # Current resolution setting (WxH format, e.g. '640x480')
     "camera_jpeg_quality": CAMERA_JPEG_QUALITY,      # JPEG quality (1-100)
@@ -2441,18 +2454,79 @@ heartbeat_thread = threading.Thread(target=heartbeat_monitor, daemon=True)
 heartbeat_thread.start()
 print("💗 [Heartbeat] ✅ Heartbeat monitor started (interval: {:.1f}s, timeout: {:.1f}s)".format(HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT))
 
+# ==========================================
+# 🔄 SPEED ENCODER (Rear-Right Wheel)
+# ==========================================
+_encoder_pulse_count = 0
+_encoder_lock = threading.Lock()
+
+def _encoder_isr(channel):
+    """Interrupt Service Routine — called on each rising edge from encoder."""
+    global _encoder_pulse_count
+    _encoder_pulse_count += 1
+
+# Set up encoder GPIO
+try:
+    GPIO.setup(ENCODER_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.add_event_detect(ENCODER_PIN, GPIO.RISING, callback=_encoder_isr, bouncetime=1)
+    car_state["encoder_available"] = True
+    print(f"🔄 [Encoder] ✅ Speed encoder initialized on GPIO {ENCODER_PIN} ({ENCODER_HOLES} holes/rev, {WHEEL_DIAMETER_M*1000:.0f}mm wheel)")
+except Exception as e:
+    car_state["encoder_available"] = False
+    print(f"⚠️  [Encoder] Failed to initialize speed encoder on GPIO {ENCODER_PIN}: {e}")
+    print("⚠️  [Encoder] Falling back to PWM-estimated speed values")
+
+def encoder_calculation_thread():
+    """Compute RPM and speed from encoder pulses every 200ms."""
+    global _encoder_pulse_count
+    interval = 0.2  # 200ms calculation interval
+    while True:
+        try:
+            time.sleep(interval)
+            # Atomically grab and reset pulse count
+            with _encoder_lock:
+                pulses = _encoder_pulse_count
+                _encoder_pulse_count = 0
+            
+            # Calculate RPM: (pulses / holes_per_rev) * (60 / interval)
+            revolutions = pulses / ENCODER_HOLES
+            rpm = revolutions * (60.0 / interval)
+            
+            # Calculate speed in meters per minute: RPM × circumference
+            speed_mpm = rpm * WHEEL_CIRCUMFERENCE_M
+            
+            car_state["encoder_rpm"] = round(rpm, 1)
+            car_state["encoder_speed_mpm"] = round(speed_mpm, 2)
+            car_state["encoder_pulse_count"] = pulses  # For debugging
+        except Exception as e:
+            print(f"❌ [Encoder] Calculation error: {e}")
+            time.sleep(interval)
+
+# Start encoder calculation thread
+encoder_thread = threading.Thread(target=encoder_calculation_thread, daemon=True)
+encoder_thread.start()
+print("🔄 [Encoder] ✅ Encoder calculation thread started (200ms interval)")
+
 # Telemetry broadcast thread
 def telemetry_broadcast():
     """Broadcast telemetry data to all connected clients at 20Hz"""
     while True:
         try:
             pwm = car_state["current_pwm"]
-            fake_rpm = int(pwm * 2.2)
-            fake_speed = round(pwm * 0.025, 1)
+            
+            # Use real encoder data when available, fall back to PWM estimates
+            if car_state["encoder_available"]:
+                real_rpm = car_state["encoder_rpm"]
+                real_speed_mpm = car_state["encoder_speed_mpm"]
+            else:
+                # Fallback: estimate from PWM duty cycle
+                real_rpm = round(pwm * 2.2, 1)
+                real_speed_mpm = round(pwm * 2.2 * WHEEL_CIRCUMFERENCE_M, 2)
             
             telemetry_data = {
-                "rpm": fake_rpm,
-                "speed": fake_speed,
+                "rpm": real_rpm,
+                "speed_mpm": real_speed_mpm,
+                "encoder_available": car_state["encoder_available"],
                 "current_pwm": pwm,
                 "gear": car_state["gear"],
                 "steer_angle": car_state["steer_angle"],
@@ -2527,13 +2601,18 @@ def telemetry():
     """Returns current car state for the dashboard"""
     pwm = car_state["current_pwm"]
     
-    # Math to fake RPM and KM/H based on power
-    fake_rpm = int(pwm * 2.2)      # Max ~220 RPM
-    fake_speed = round(pwm * 0.025, 1) # Max ~2.5 km/h
+    # Use real encoder data when available, fall back to PWM estimates
+    if car_state["encoder_available"]:
+        real_rpm = car_state["encoder_rpm"]
+        real_speed_mpm = car_state["encoder_speed_mpm"]
+    else:
+        real_rpm = round(pwm * 2.2, 1)
+        real_speed_mpm = round(pwm * 2.2 * WHEEL_CIRCUMFERENCE_M, 2)
     
     return jsonify({
-        "rpm": fake_rpm,
-        "speed": fake_speed,
+        "rpm": real_rpm,
+        "speed_mpm": real_speed_mpm,
+        "encoder_available": car_state["encoder_available"],
         "current_pwm": pwm,
         "gear": car_state["gear"],
         "steer_angle": car_state["steer_angle"],
