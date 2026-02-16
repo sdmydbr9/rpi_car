@@ -862,6 +862,7 @@ export const CockpitController = () => {
         narrationEnabled={imageAnalysisEnabled}
         narrationSpeaking={narrationSpeaking}
         narrationLastText={narrationLastText}
+        steeringAngle={controlState.steeringAngle}
       />
       
       <div className="h-[100dvh] w-full flex flex-col overflow-hidden">

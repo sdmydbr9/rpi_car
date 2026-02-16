@@ -41,6 +41,7 @@ interface ImmersiveHUDProps {
   onAutoModeToggle: () => void;
   onSteeringChange?: (angle: number) => void;
   onGearChange?: (gear: string) => void;
+  steeringAngle?: number;
   // Camera config for HUD badge
   cameraResolution?: string;
   cameraJpegQuality?: number;
@@ -78,6 +79,7 @@ export const ImmersiveHUD = ({
   onAutoModeToggle,
   onSteeringChange,
   onGearChange,
+  steeringAngle = 0,
   cameraResolution,
   cameraJpegQuality,
   cameraFramerate,
@@ -94,6 +96,24 @@ export const ImmersiveHUD = ({
   const { triggerHaptic, playSound } = useGameFeedback();
   const [steeringDirection, setSteeringDirection] = useState<'left' | 'right' | null>(null);
   
+  // Progressive steering constants
+  const STEER_INCREMENT = 5;       // degrees per tick
+  const STEER_INTERVAL_MS = 100;   // ms between ticks (50°/s ramp)
+  const steerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const internalAngleRef = useRef<number>(0);
+
+  // Sync internal angle ref with prop so release always resets properly
+  useEffect(() => {
+    internalAngleRef.current = steeringAngle;
+  }, [steeringAngle]);
+
+  // Cleanup interval on unmount
+  useEffect(() => {
+    return () => {
+      if (steerIntervalRef.current) clearInterval(steerIntervalRef.current);
+    };
+  }, []);
+
   // Refs for multitouch-tracked interactive zones
   const steerLeftRef = useRef<HTMLButtonElement>(null);
   const steerRightRef = useRef<HTMLButtonElement>(null);
@@ -162,22 +182,50 @@ export const ImmersiveHUD = ({
     onEBrakeToggle();
   }, [triggerHaptic, playSound, onEBrakeToggle]);
 
-  const handleSteerLeft = useCallback(() => {
-    setSteeringDirection('left');
+  const startProgressiveSteer = useCallback((direction: 'left' | 'right') => {
+    // Clear any existing interval
+    if (steerIntervalRef.current) clearInterval(steerIntervalRef.current);
+    setSteeringDirection(direction);
     triggerHaptic('light');
-    onSteeringChange?.(-45);
+
+    const sign = direction === 'left' ? -1 : 1;
+    // Immediate first step
+    const firstAngle = Math.max(-90, Math.min(90, internalAngleRef.current + sign * STEER_INCREMENT));
+    internalAngleRef.current = firstAngle;
+    onSteeringChange?.(firstAngle);
+
+    // Continue ramping while held
+    steerIntervalRef.current = setInterval(() => {
+      const next = Math.max(-90, Math.min(90, internalAngleRef.current + sign * STEER_INCREMENT));
+      if (next !== internalAngleRef.current) {
+        internalAngleRef.current = next;
+        onSteeringChange?.(next);
+        triggerHaptic('light');
+      }
+    }, STEER_INTERVAL_MS);
   }, [triggerHaptic, onSteeringChange]);
 
-  const handleSteerRight = useCallback(() => {
-    setSteeringDirection('right');
-    triggerHaptic('light');
-    onSteeringChange?.(45);
-  }, [triggerHaptic, onSteeringChange]);
-
-  const handleSteerEnd = useCallback(() => {
+  const stopProgressiveSteer = useCallback(() => {
+    if (steerIntervalRef.current) {
+      clearInterval(steerIntervalRef.current);
+      steerIntervalRef.current = null;
+    }
     setSteeringDirection(null);
+    internalAngleRef.current = 0;
     onSteeringChange?.(0);
   }, [onSteeringChange]);
+
+  const handleSteerLeft = useCallback(() => {
+    startProgressiveSteer('left');
+  }, [startProgressiveSteer]);
+
+  const handleSteerRight = useCallback(() => {
+    startProgressiveSteer('right');
+  }, [startProgressiveSteer]);
+
+  const handleSteerEnd = useCallback(() => {
+    stopProgressiveSteer();
+  }, [stopProgressiveSteer]);
 
   const handleGearChange = useCallback((newGear: string) => {
     triggerHaptic('light');
@@ -190,25 +238,19 @@ export const ImmersiveHUD = ({
 
   useTouchTracking(steerLeftRef, {
     onTouchStart: () => {
-      setSteeringDirection('left');
-      triggerHaptic('light');
-      onSteeringChange?.(-45);
+      startProgressiveSteer('left');
     },
     onTouchEnd: () => {
-      setSteeringDirection(null);
-      onSteeringChange?.(0);
+      stopProgressiveSteer();
     },
   });
 
   useTouchTracking(steerRightRef, {
     onTouchStart: () => {
-      setSteeringDirection('right');
-      triggerHaptic('light');
-      onSteeringChange?.(45);
+      startProgressiveSteer('right');
     },
     onTouchEnd: () => {
-      setSteeringDirection(null);
-      onSteeringChange?.(0);
+      stopProgressiveSteer();
     },
   });
 
@@ -305,13 +347,18 @@ export const ImmersiveHUD = ({
              }`}
            >
              {/* Left indicator */}
-             <div className={`flex items-center gap-2 transition-all ${
+             <div className={`flex flex-col items-center gap-1 transition-all ${
                steeringDirection === 'left' ? 'opacity-100 scale-110' : 'opacity-30'
              }`}>
-               <svg className="w-8 h-8 text-primary" viewBox="0 0 24 24" fill="currentColor">
-                 <path d="M15 19l-7-7 7-7" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
-               </svg>
-               <span className="text-xs racing-text text-primary">LEFT</span>
+               <div className="flex items-center gap-2">
+                 <svg className="w-8 h-8 text-primary" viewBox="0 0 24 24" fill="currentColor">
+                   <path d="M15 19l-7-7 7-7" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+                 </svg>
+                 <span className="text-xs racing-text text-primary">LEFT</span>
+               </div>
+               {steeringAngle < 0 && (
+                 <span className="text-[10px] racing-number text-primary font-bold">{Math.abs(steeringAngle)}°</span>
+               )}
              </div>
            </button>
            
@@ -329,13 +376,18 @@ export const ImmersiveHUD = ({
              }`}
            >
              {/* Right indicator */}
-             <div className={`flex items-center gap-2 transition-all ${
+             <div className={`flex flex-col items-center gap-1 transition-all ${
                steeringDirection === 'right' ? 'opacity-100 scale-110' : 'opacity-30'
              }`}>
-               <span className="text-xs racing-text text-primary">RIGHT</span>
-               <svg className="w-8 h-8 text-primary" viewBox="0 0 24 24" fill="currentColor">
-                 <path d="M9 5l7 7-7 7" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
-               </svg>
+               <div className="flex items-center gap-2">
+                 <span className="text-xs racing-text text-primary">RIGHT</span>
+                 <svg className="w-8 h-8 text-primary" viewBox="0 0 24 24" fill="currentColor">
+                   <path d="M9 5l7 7-7 7" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+                 </svg>
+               </div>
+               {steeringAngle > 0 && (
+                 <span className="text-[10px] racing-number text-primary font-bold">{Math.abs(steeringAngle)}°</span>
+               )}
              </div>
            </button>
          </div>
