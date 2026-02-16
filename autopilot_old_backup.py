@@ -1,31 +1,25 @@
 """
-autopilot.py — Slalom-Style Autonomous Rover (Gyro-Based Yaw Tracking).
+autopilot.py — Slalom-Style Autonomous Rover.
 
-Ported from slalom.py's 3-priority gyro-based navigation algorithm,
+Exact replica of slalom.py's 4-priority obstacle avoidance logic,
 wrapped in the AutoPilot class interface expected by main.py.
-Uses ONLY sonar, IR, and MPU6050 — no camera.
+All distances and speeds are tunable via the web UI tuning panel.
 
 Priority System (from slalom.py)
 ────────────────────────────────
-  P1  ESCAPE        IR stuck OR sonar < CRITICAL_DIST
-                    → stop → reverse → random spin → reset yaw
-  P2  SLALOM DODGE  sonar < WARN_DIST
-                    → accumulate target_yaw with alternating slalom_sign
-                      using dynamic increments based on proximity
-  P3  CRUISE        Clear path → straight, slowly return target_yaw to center
-
-Execution (PID-like)
-────────────────────
-  error = target_yaw - heading
-  correction = error * GYRO_KP
-  l_speed = BASE_SPEED - correction
-  r_speed = BASE_SPEED + correction
-  → forward differential drive with per-wheel trims
+  P1  TRAP ESCAPE      Both IRs triggered OR sonar < TRAP_ESCAPE_CM
+                        → stop → reverse → random spin → resume
+  P2  SIDE OBSTACLE    Single IR triggered
+                        → hard swerve (IR_SWERVE_FAST / IR_SWERVE_SLOW)
+  P3  PROPORTIONAL     Sonar < DODGE_DETECT_CM
+      DODGE            → avoid_strength = (DODGE_DETECT_CM - dist) * TURN_AGGRESSION
+                          applied as left/right speed differential
+  P4  CRUISE           Clear path → straight at BASE_SPEED
 
 Hardware
 ────────
   Motors (L298N)    Controlled via CarSystem (motor.py)
-  MPU6050           I2C Bus 1, Address 0x68 — Gyro Z-axis yaw tracking
+  MPU6050           I2C Bus 1, Address 0x68 — Gyro Z-axis (telemetry only)
   Front Sonar       Via SensorSystem
   Rear Sonar        Via SensorSystem (checked before reversing)
   IR Edge           Left=GPIO5, Right=GPIO6  (Active LOW = obstacle)
@@ -41,18 +35,50 @@ from enum import Enum
 # ── FSM States ─────────────────────────────────────────
 
 class State(Enum):
-    CRUISING        = "CRUISING"
-    DODGING         = "DODGING"
-    ESCAPING        = "ESCAPING"
-    EMERGENCY_STOP  = "EMERGENCY_STOP"
+    FORWARD_CRUISE      = "FORWARD_CRUISE"
+    OBSTACLE_STEERING   = "OBSTACLE_STEERING"
+    OBSTACLE_FALLBACK   = "OBSTACLE_FALLBACK"
+    EMERGENCY_STOP      = "EMERGENCY_STOP"
+
+
+# ── PID Controller (kept for interface compatibility) ──
+
+class PIDController:
+    """Discrete PID controller with anti-windup clamping."""
+
+    def __init__(self, kp=2.0, ki=0.0, kd=0.5, output_limit=30.0):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.output_limit = output_limit
+        self._integral = 0.0
+        self._prev_error = 0.0
+
+    def update(self, error, dt):
+        if dt <= 0:
+            return 0.0
+        p = self.kp * error
+        self._integral += error * dt
+        max_integral = self.output_limit / max(self.ki, 0.001)
+        self._integral = max(-max_integral, min(max_integral, self._integral))
+        i = self.ki * self._integral
+        d = self.kd * (error - self._prev_error) / dt
+        self._prev_error = error
+        output = p + i + d
+        return max(-self.output_limit, min(self.output_limit, output))
+
+    def reset(self):
+        self._integral = 0.0
+        self._prev_error = 0.0
 
 
 # ── MPU6050 Sensor ─────────────────────────────────────
 
 class MPU6050Sensor:
     """
-    Reads Gyro Z-axis from the MPU6050 over I2C for yaw tracking.
-    Integrates gyro Z rate into a heading angle (degrees).
+    Reads Gyro Z-axis yaw rate from the MPU6050 over I2C.
+    Used for telemetry display; the slalom driving logic does not
+    depend on it.
     """
 
     _GYRO_SCALE = 131.0  # LSB per °/s (±250 °/s range)
@@ -65,10 +91,6 @@ class MPU6050Sensor:
         self._use_lib = False
         self._sensor = None
         self._bus = None
-
-        # Yaw integration state
-        self._current_yaw = 0.0
-        self._last_time = time.time()
 
         # Try high-level library first
         try:
@@ -117,7 +139,6 @@ class MPU6050Sensor:
         return self._available
 
     def read_gyro_z(self):
-        """Read raw gyro Z rate (deg/s), offset-corrected."""
         if not self._available:
             return 0.0
         try:
@@ -129,27 +150,6 @@ class MPU6050Sensor:
             return raw - self._offset_z
         except Exception:
             return 0.0
-
-    def get_yaw(self):
-        """Integrate gyro Z into cumulative yaw heading (degrees).
-        Must be called frequently (~50Hz) for accurate tracking."""
-        if not self._available:
-            return 0.0
-        gyro_z = self.read_gyro_z()
-        now = time.time()
-        dt = now - self._last_time
-        self._last_time = now
-        self._current_yaw += gyro_z * dt
-        return self._current_yaw
-
-    def reset_yaw(self):
-        """Reset integrated yaw to zero."""
-        self._current_yaw = 0.0
-        self._last_time = time.time()
-
-    @property
-    def current_yaw(self):
-        return self._current_yaw
 
     def calibrate(self, duration=2.0):
         if not self._available:
@@ -174,8 +174,6 @@ class MPU6050Sensor:
         else:
             self._offset_z = 0.0
             print("🧭 [CALIBRATED] No samples — offset = 0.0")
-        # Reset yaw after calibration
-        self.reset_yaw()
 
 
 # ── Sonar Wrapper ──────────────────────────────────────
@@ -216,49 +214,18 @@ class Sonar:
 class MotorDriver:
     """
     High-level motor commands wrapping CarSystem.
-    Maps slalom.py's set_motors() calls to the CarSystem abstraction
-    with per-wheel trim factors.
+    Maps slalom.py's set_motors() calls to the CarSystem abstraction.
     """
 
     def __init__(self, car):
         self._car = car
 
-    def forward_differential(self, left_speed, right_speed,
-                             fl_trim=1.0, fr_trim=1.0,
-                             rl_trim=1.0, rr_trim=1.0):
-        """Drive forward with explicit left/right wheel speeds (0-100 %)
-        and per-wheel trim factors applied."""
-        left_speed = max(0, min(100, abs(left_speed)))
-        right_speed = max(0, min(100, abs(right_speed)))
-
-        # Apply trims: front wheels get their trim, rear wheels get theirs
-        fl = left_speed * fl_trim
-        fr = right_speed * fr_trim
-        rl = left_speed * rl_trim
-        rr = right_speed * rr_trim
-
-        # Clamp after trim
-        fl = max(0, min(100, fl))
-        fr = max(0, min(100, fr))
-        rl = max(0, min(100, rl))
-        rr = max(0, min(100, rr))
-
-        # Direct per-wheel PWM for trim support
-        self._car.pwm_fl.ChangeDutyCycle(int(fl))
-        self._car.pwm_fr.ChangeDutyCycle(int(fr))
-        self._car.pwm_rl.ChangeDutyCycle(int(rl))
-        self._car.pwm_rr.ChangeDutyCycle(int(rr))
-
-        # Set direction pins: all forward
-        from motor import GPIO
-        GPIO.output([self._car.FL_IN1, self._car.RL_IN1,
-                     self._car.FR_IN3, self._car.RR_IN3], True)
-        GPIO.output([self._car.FL_IN2, self._car.RL_IN2,
-                     self._car.FR_IN4, self._car.RR_IN4], False)
-
+    def forward_differential(self, left_speed, right_speed):
+        """Drive forward with explicit left/right wheel speeds (0-100 %)."""
+        left_speed = max(0, min(100, left_speed))
+        right_speed = max(0, min(100, right_speed))
+        self._car._set_raw_motors(left_speed, right_speed, True, True)
         self._car._current_speed = (left_speed + right_speed) / 2.0
-        self._car._last_l_fwd = True
-        self._car._last_r_fwd = True
 
     def reverse(self, speed, duration=0.8):
         """Reverse at *speed* for *duration* seconds, then stop."""
@@ -295,96 +262,82 @@ class MotorDriver:
 
 class AutoPilot:
     """
-    Slalom-style autonomous rover — gyro-based yaw-tracking navigation.
-    Ported from slalom.py's 3-priority algorithm.
+    Slalom-style autonomous rover — exact replica of slalom.py's
+    4-priority logic, with tunable distances and speeds.
 
-    Priority 1: ESCAPE       (IR stuck OR dist < CRITICAL_DIST)
-                              → stop → reverse → random spin → reset yaw
-    Priority 2: SLALOM DODGE (dist < WARN_DIST)
-                              → accumulate target_yaw with slalom memory
-    Priority 3: CRUISE       (clear path → straight, center yaw)
-
-    Uses ONLY sonar, IR, and MPU6050 — no camera.
+    Priority 1: TRAP ESCAPE     (both IRs OR dist < TRAP_ESCAPE_CM)
+    Priority 2: SIDE OBSTACLE   (single IR → hard swerve)
+    Priority 3: PROPORTIONAL    (dist < DODGE_DETECT_CM → differential dodge)
+    Priority 4: CRUISE          (clear path → straight ahead)
     """
 
-    # ── Navigation tuning (from slalom.py) ──
+    # ── Speed tuning ──
     BASE_SPEED       = 50     # Cruising PWM %
-    ESCAPE_SPEED     = 65     # Reverse / spin PWM % during escape
-    GYRO_KP          = 1.5    # Gyro proportional gain for yaw correction
+    ESCAPE_SPEED     = 70     # Reverse / spin PWM % during trap escape
+    TURN_AGGRESSION  = 1.8    # Proportional dodge multiplier
 
-    # ── Distance thresholds ──
-    CRITICAL_DIST    = 20     # P1: IR stuck or sonar < this → escape (cm)
-    WARN_DIST        = 100    # P2: sonar < this → slalom dodge (cm)
+    # ── IR swerve speeds ──
+    IR_SWERVE_FAST   = 60     # Fast-side PWM % for IR hard swerve
+    IR_SWERVE_SLOW   = 20     # Slow-side PWM % for IR hard swerve
 
-    # ── Slalom dodge parameters ──
-    SLALOM_BASE_DEG  = 15     # Base dodge increment (degrees)
-    SLALOM_PROXIMITY = 0.30   # Proximity multiplier for dynamic increment
-    SLALOM_COOLDOWN  = 0.5    # Min time between dodge increments (seconds)
-    SLALOM_HEADING_THRESH = 10  # Heading error below which new dodge is added (degrees)
-    SLALOM_CLEAR_TIME = 1.0   # Time after last dodge before resetting direction (seconds)
-    YAW_CENTER_RATE  = 0.2    # Rate at which target_yaw returns to center (deg/tick)
-    YAW_CENTER_DEAD  = 2.0    # Dead zone for yaw centering (degrees)
-
-    # ── Per-wheel trim factors ──
-    FL_TRIM          = 0.6    # Front-Left motor trim
-    FR_TRIM          = 0.6    # Front-Right motor trim
-    RL_TRIM          = 1.0    # Rear-Left motor trim
-    RR_TRIM          = 1.0    # Rear-Right motor trim
+    # ── Distance thresholds (tunable) ──
+    TRAP_ESCAPE_CM   = 15     # P1: both IRs OR sonar < this → trap escape
+    DODGE_DETECT_CM  = 50     # P3: sonar < this → proportional dodge
 
     # ── Escape timing ──
-    ESCAPE_STOP_TIME     = 0.1    # Pause before reversing (seconds)
+    ESCAPE_STOP_TIME     = 0.2    # Pause before reversing (seconds)
     ESCAPE_REVERSE_TIME  = 0.8    # Reverse duration (seconds)
     ESCAPE_SPIN_TIME     = 0.5    # Spin duration (seconds)
     ESCAPE_RESUME_TIME   = 0.2    # Pause after spin before resuming (seconds)
 
+    # ── IR swerve timing ──
+    IR_SWERVE_TIME   = 0.2    # Duration of IR hard swerve (seconds)
+
     # ── Rear sonar ──
     REAR_CLEAR_CM    = 20     # Rear must be > this to reverse (cm)
 
-    # ── Gyro calibration ──
+    # ── Gyro / PID (telemetry & calibration) ──
     CALIBRATION_TIME = 2.0    # Gyro calibration duration (seconds)
     STATUS_INTERVAL  = 0.5    # Status print interval (seconds)
 
     TUNING_KEYS = [
-        # Navigation
-        "BASE_SPEED", "ESCAPE_SPEED", "GYRO_KP",
+        # Speeds
+        "BASE_SPEED", "ESCAPE_SPEED", "TURN_AGGRESSION",
+        # IR swerve
+        "IR_SWERVE_FAST", "IR_SWERVE_SLOW",
         # Distances
-        "CRITICAL_DIST", "WARN_DIST",
-        # Slalom
-        "SLALOM_BASE_DEG", "SLALOM_PROXIMITY", "SLALOM_COOLDOWN",
-        "SLALOM_HEADING_THRESH", "SLALOM_CLEAR_TIME",
-        "YAW_CENTER_RATE", "YAW_CENTER_DEAD",
-        # Motor trims
-        "FL_TRIM", "FR_TRIM", "RL_TRIM", "RR_TRIM",
+        "TRAP_ESCAPE_CM", "DODGE_DETECT_CM",
         # Escape timing
         "ESCAPE_STOP_TIME", "ESCAPE_REVERSE_TIME",
         "ESCAPE_SPIN_TIME", "ESCAPE_RESUME_TIME",
+        # IR swerve timing
+        "IR_SWERVE_TIME",
         # Rear sonar
         "REAR_CLEAR_CM",
         # Gyro
         "CALIBRATION_TIME", "STATUS_INTERVAL",
     ]
 
-    def __init__(self, car, get_sonar, get_ir, get_rear_sonar=None):
+    def __init__(self, car, get_sonar, get_ir,
+                 get_rear_sonar=None, get_camera_distance=None):
         self._motor = MotorDriver(car)
         self._car = car
 
         self._front_sonar = Sonar(get_sonar, "front")
         self._rear_sonar = Sonar(get_rear_sonar, "rear")
         self._get_ir = get_ir
+        self._get_camera_distance = get_camera_distance  # stored for API compat
 
-        # Gyro — central to navigation (yaw tracking)
+        # Gyro (telemetry only — slalom logic doesn't depend on it)
         self._gyro = MPU6050Sensor()
+        self._pid = PIDController()
 
         # State
-        self._state = State.CRUISING
+        self._state = State.FORWARD_CRUISE
         self._active = False
         self._turn_direction = ""
+        self._last_turn_dir = 1     # 1 = right, -1 = left (matches slalom.py)
         self._last_status_time = 0.0
-
-        # Slalom state (from slalom.py)
-        self._target_yaw = 0.0
-        self._dodge_direction = 0    # 0=none, 1=right, -1=left
-        self._last_dodge_time = 0.0
 
         # Telemetry
         self._last_gyro_z = 0.0
@@ -421,18 +374,6 @@ class AutoPilot:
     def gyro_calibrated(self):
         return self._gyro_calibrated
 
-    @property
-    def target_yaw(self):
-        return self._target_yaw
-
-    @property
-    def current_heading(self):
-        return self._gyro.current_yaw
-
-    @property
-    def slalom_sign(self):
-        return self._dodge_direction
-
     # ── Tuning API ─────────────────────────────
 
     @classmethod
@@ -448,14 +389,12 @@ class AutoPilot:
         """Calibrate gyro and begin autonomous driving."""
         self._gyro.calibrate(duration=self.CALIBRATION_TIME)
         self._gyro_calibrated = self._gyro.available
-        self._state = State.CRUISING
+        self._state = State.FORWARD_CRUISE
         self._turn_direction = ""
-        self._target_yaw = 0.0
-        self._dodge_direction = 0
-        self._last_dodge_time = 0.0
+        self._last_turn_dir = 1
         self._last_status_time = time.time()
         self._active = True
-        print("🚀 [ROVER] Autonomous navigation STARTED (slalom yaw-tracking mode)")
+        print("🚀 [ROVER] Autonomous navigation STARTED (slalom mode)")
 
     def stop(self):
         """Halt all motors and deactivate."""
@@ -481,19 +420,17 @@ class AutoPilot:
         if now - self._last_status_time >= self.STATUS_INTERVAL:
             self._last_status_time = now
             state_name = self._state.value
-            heading = self._gyro.current_yaw
-            target = self._target_yaw
-            gyro_str = f" | Yaw: {heading:+.1f}° → {target:+.1f}°" if self._gyro.available else ""
+            gyro_str = f" | Gyro_Z: {self._last_gyro_z:+.2f}°/s" if self._gyro.available else ""
             print(f"📡 [{state_name}] Front: {dist:.0f}cm{gyro_str} | {msg}")
 
-    # ── Escape (slalom.py P1) ──────────────────
+    # ── Trap Escape (slalom.py escape_trap) ────
 
-    def _escape(self, left_stuck, right_stuck):
+    def _escape_trap(self):
         """
-        P1 escape from slalom.py:
-        stop → reverse → spin (IR-directed or random) → reset yaw.
+        Exact replica of slalom.py escape_trap():
+        stop → reverse → random spin → resume.
         """
-        self._state = State.ESCAPING
+        self._state = State.OBSTACLE_FALLBACK
         self._turn_direction = "escaping"
 
         # 1. STOP
@@ -514,34 +451,24 @@ class AutoPilot:
         if not self._active:
             return
 
-        # 3. SPIN (IR-directed or Random — exactly like slalom.py)
-        if left_stuck:
-            spin_mode = "right"
-        elif right_stuck:
-            spin_mode = "left"
-        else:
-            spin_mode = "right" if random.choice([True, False]) else "left"
-
-        if spin_mode == "right":
-            print(f"    🔄 Spin RIGHT {self.ESCAPE_SPIN_TIME:.1f}s")
+        # 3. SPIN (Random Direction — exactly like slalom.py)
+        if random.choice([True, False]):
+            print(f"    🔄 Random spin RIGHT {self.ESCAPE_SPIN_TIME:.1f}s")
             self._motor.spin_right(self.ESCAPE_SPEED, self.ESCAPE_SPIN_TIME)
         else:
-            print(f"    🔄 Spin LEFT {self.ESCAPE_SPIN_TIME:.1f}s")
+            print(f"    🔄 Random spin LEFT {self.ESCAPE_SPIN_TIME:.1f}s")
             self._motor.spin_left(self.ESCAPE_SPEED, self.ESCAPE_SPIN_TIME)
 
         if not self._active:
             return
 
-        # 4. Reset headings (exactly like slalom.py)
+        # 4. Resume
         self._motor.stop()
         time.sleep(self.ESCAPE_RESUME_TIME)
-        self._gyro.reset_yaw()
-        self._target_yaw = 0.0
-        self._dodge_direction = 0
 
         self._turn_direction = ""
-        self._state = State.CRUISING
-        print("    ✅ Escape complete — yaw reset, resuming cruise\n")
+        self._state = State.FORWARD_CRUISE
+        print("    ✅ Trap escape complete — resuming cruise\n")
 
     # ── FSM Core ───────────────────────────────
 
@@ -550,11 +477,10 @@ class AutoPilot:
         Single tick of the slalom autopilot.
 
         Mirrors slalom.py's auto_pilot_thread() priorities exactly:
-          P1: Escape       (IR stuck OR dist < CRITICAL_DIST)
-          P2: Slalom dodge (dist < WARN_DIST → accumulate target_yaw)
-          P3: Cruise       (clear path → center yaw)
-
-        Then executes PID-like yaw correction for motor output.
+          P1: Trap escape  (both IRs OR dist < TRAP_ESCAPE_CM)
+          P2: IR swerve    (single IR → hard swerve)
+          P3: Prop. dodge  (dist < DODGE_DETECT_CM → differential)
+          P4: Cruise       (clear path → straight)
         """
         if not self._active:
             return
@@ -563,102 +489,102 @@ class AutoPilot:
             self._motor.brake()
             return
 
-        # ── 1. READ SENSORS ──
-        dist = self._front_sonar.read()
-        left_stuck, right_stuck = self._read_ir()
-
-        # Read gyro Z rate for telemetry
+        # ── Read gyro for telemetry ──
         self._last_gyro_z = self._gyro.read_gyro_z()
 
+        # ── 1. READ SENSORS (exactly like slalom.py) ──
+        dist = self._front_sonar.read()
+        left_obs, right_obs = self._read_ir()
+
         # ─────────────────────────────────────────────
-        # 🚨 PRIORITY 1: ESCAPE
-        #    IR stuck OR sonar < CRITICAL_DIST
-        #    (slalom.py: left_stuck or right_stuck or dist < CRITICAL_DIST)
+        # 🚨 PRIORITY 1: TRAP ESCAPE
+        #    Both IRs OR Sonar < TRAP_ESCAPE_CM
+        #    (slalom.py: both IRs or dist < 15)
         # ─────────────────────────────────────────────
-        if left_stuck or right_stuck or (0 < dist < self.CRITICAL_DIST):
-            reason = ("IR stuck" if (left_stuck or right_stuck)
-                      else f"{dist:.0f}cm < {self.CRITICAL_DIST}cm")
-            print(f"\n🚨 ESCAPE ({reason})")
-            self._escape(left_stuck, right_stuck)
+        if (left_obs and right_obs) or (0 < dist < self.TRAP_ESCAPE_CM):
+            reason = "both IRs" if (left_obs and right_obs) else f"{dist:.0f}cm < {self.TRAP_ESCAPE_CM}cm"
+            print(f"\n🚨 TRAP ESCAPE ({reason})")
+            self._escape_trap()
+            return  # Restart loop after escaping
+
+        # ─────────────────────────────────────────────
+        # ⚠️ PRIORITY 2: SIDE OBSTACLE (One IR Triggered)
+        #    (slalom.py: left_obs → swerve right 60/20,
+        #                right_obs → swerve left 20/60)
+        # ─────────────────────────────────────────────
+        elif left_obs:
+            self._state = State.OBSTACLE_STEERING
+            self._turn_direction = "right"
+            self._last_turn_dir = 1
+            self._motor.forward_differential(
+                self.IR_SWERVE_FAST, self.IR_SWERVE_SLOW)
+            self._last_pid_correction = (self.IR_SWERVE_FAST - self.IR_SWERVE_SLOW) / 2.0
+            self._maybe_print_status(
+                dist if dist >= 0 else 300, "SWERVE RIGHT (IR)")
+            time.sleep(self.IR_SWERVE_TIME)
+            return
+
+        elif right_obs:
+            self._state = State.OBSTACLE_STEERING
+            self._turn_direction = "left"
+            self._last_turn_dir = -1
+            self._motor.forward_differential(
+                self.IR_SWERVE_SLOW, self.IR_SWERVE_FAST)
+            self._last_pid_correction = -(self.IR_SWERVE_FAST - self.IR_SWERVE_SLOW) / 2.0
+            self._maybe_print_status(
+                dist if dist >= 0 else 300, "SWERVE LEFT (IR)")
+            time.sleep(self.IR_SWERVE_TIME)
             return
 
         # ─────────────────────────────────────────────
-        # 🧠 PRIORITY 2: SLALOM DODGE
-        #    sonar < WARN_DIST
-        #    → accumulate target_yaw with slalom memory
+        # 👀 PRIORITY 3: PROPORTIONAL DODGE
+        #    Sonar < DODGE_DETECT_CM
+        #    (slalom.py: dist < 50 → TURN_AGGRESSION differential)
         # ─────────────────────────────────────────────
-        elif 0 < dist < self.WARN_DIST:
-            self._state = State.DODGING
+        elif 0 < dist < self.DODGE_DETECT_CM:
+            self._state = State.OBSTACLE_STEERING
 
-            # Initialize dodge direction if not set
-            if self._dodge_direction == 0:
-                self._dodge_direction = 1  # Default right
+            # The closer → the sharper the turn
+            avoid_strength = (self.DODGE_DETECT_CM - dist) * self.TURN_AGGRESSION
 
-            # Dynamic increment: base + proximity factor
-            dynamic_increment = self.SLALOM_BASE_DEG + int(
-                (self.WARN_DIST - dist) * self.SLALOM_PROXIMITY)
+            # Base speed + turn factor (exactly like slalom.py)
+            if self._last_turn_dir == 1:  # Turn Right
+                l_speed = self.BASE_SPEED + avoid_strength
+                r_speed = self.BASE_SPEED - avoid_strength
+                self._turn_direction = "right"
+            else:  # Turn Left
+                l_speed = self.BASE_SPEED - avoid_strength
+                r_speed = self.BASE_SPEED + avoid_strength
+                self._turn_direction = "left"
 
-            heading_error = abs(self._target_yaw - self._gyro.current_yaw)
-
-            if heading_error < self.SLALOM_HEADING_THRESH:
-                # Car has achieved current target — add more dodge
-                if time.time() - self._last_dodge_time > self.SLALOM_COOLDOWN:
-                    self._target_yaw += (dynamic_increment * self._dodge_direction)
-                    self._last_dodge_time = time.time()
-                    self._turn_direction = "right" if self._dodge_direction > 0 else "left"
-                    self._maybe_print_status(
-                        dist, f"SLALOM +{dynamic_increment}° "
-                              f"(target: {self._target_yaw:.0f}°)")
-            else:
-                self._turn_direction = "right" if self._dodge_direction > 0 else "left"
-                self._maybe_print_status(
-                    dist, f"TURNING {dynamic_increment}° "
-                          f"(err: {heading_error:.0f}°)")
-
-        # ─────────────────────────────────────────────
-        # 🚀 PRIORITY 3: CRUISE (Clear Path)
-        # ─────────────────────────────────────────────
-        else:
-            self._state = State.CRUISING
-            self._turn_direction = ""
-
-            # Reset dodge direction after clear time
-            if time.time() - self._last_dodge_time > self.SLALOM_CLEAR_TIME:
-                self._dodge_direction = 0
-
-            # Slowly return target_yaw to center
-            if self._target_yaw > self.YAW_CENTER_DEAD:
-                self._target_yaw -= self.YAW_CENTER_RATE
-            elif self._target_yaw < -self.YAW_CENTER_DEAD:
-                self._target_yaw += self.YAW_CENTER_RATE
+            self._motor.forward_differential(l_speed, r_speed)
+            self._last_pid_correction = avoid_strength if self._last_turn_dir == 1 else -avoid_strength
 
             self._maybe_print_status(
+                dist,
+                f"DODGING ({dist:.0f}cm) | Avoid: {avoid_strength:.0f} | "
+                f"L:{l_speed:.0f}/R:{r_speed:.0f}")
+            return
+
+        # ─────────────────────────────────────────────
+        # 🚀 PRIORITY 4: CRUISE (Clear Path)
+        #    (slalom.py: set_motors(BASE_SPEED, BASE_SPEED, 1))
+        # ─────────────────────────────────────────────
+        else:
+            self._state = State.FORWARD_CRUISE
+            self._turn_direction = ""
+            self._last_pid_correction = 0.0
+            self._motor.forward_differential(self.BASE_SPEED, self.BASE_SPEED)
+            self._maybe_print_status(
                 dist if dist >= 0 else 300, "CRUISING")
-
-        # ─────────────────────────────────────────────
-        # 🏎️ EXECUTION (PID-like yaw correction)
-        #    Exactly like slalom.py's execution block
-        # ─────────────────────────────────────────────
-        heading = self._gyro.get_yaw()
-        error = self._target_yaw - heading
-        correction = error * self.GYRO_KP
-
-        l_speed = self.BASE_SPEED - correction
-        r_speed = self.BASE_SPEED + correction
-
-        self._last_pid_correction = correction
-
-        self._motor.forward_differential(
-            l_speed, r_speed,
-            self.FL_TRIM, self.FR_TRIM,
-            self.RL_TRIM, self.RR_TRIM)
+            return
 
 
 # ── Standalone test ────────────────────────────────────
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("  AUTONOMOUS ROVER — Slalom Yaw-Tracking Autopilot")
+    print("  AUTONOMOUS ROVER — Slalom Autopilot")
     print("=" * 60)
 
     gyro = MPU6050Sensor()
@@ -667,8 +593,7 @@ if __name__ == "__main__":
         print("\nReading Gyro Z for 5 seconds:")
         for _ in range(50):
             z = gyro.read_gyro_z()
-            yaw = gyro.get_yaw()
-            print(f"  Gyro_Z: {z:+.2f} °/s | Yaw: {yaw:+.2f}°")
+            print(f"  Gyro_Z: {z:+.2f} °/s")
             time.sleep(0.1)
     else:
         print("\nMPU6050 not available — skipping gyro test")

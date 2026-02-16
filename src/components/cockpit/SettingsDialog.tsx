@@ -6,34 +6,37 @@ import type { CameraSpecs, NarrationConfig, NarrationModel, NarrationKeyResult, 
 import { toast } from "@/components/ui/sonner";
 
 export interface TuningConstants {
-  // Tuning constants
-  FRONT_CRITICAL_CM: number;
-  REAR_BLOCKED_CM: number;
-  REAR_CRITICAL_CM: number;
-  DANGER_CM: number;
-  FULL_SPEED_CM: number;
-  MAX_SPEED: number;
-  MIN_SPEED: number;
-  REVERSE_SPEED: number;
-  PIVOT_SPEED: number;
-  REVERSE_DURATION: number;
-  REVERSE_STEP: number;
-  PIVOT_DURATION: number;
-  RECOVERY_DURATION: number;
-  STUCK_RECHECK_INTERVAL: number;
-  SONAR_HISTORY_LEN: number;
-  // Smart Power Management
-  STUCK_DISTANCE_THRESH: number;
-  STUCK_TIME_THRESH: number;
-  STUCK_BOOST_STEP: number;
-  STUCK_BOOST_MAX: number;
-  STUCK_MOVE_RESET: number;
-  // Escalating Escape
-  MAX_NORMAL_ESCAPES: number;
-  UTURN_SPEED: number;
-  UTURN_DURATION: number;
-  ESCAPE_CLEAR_CM: number;
-  // Camera & Vision Settings
+  // Navigation
+  BASE_SPEED: number;
+  ESCAPE_SPEED: number;
+  GYRO_KP: number;
+  // Distances
+  CRITICAL_DIST: number;
+  WARN_DIST: number;
+  // Slalom dodge
+  SLALOM_BASE_DEG: number;
+  SLALOM_PROXIMITY: number;
+  SLALOM_COOLDOWN: number;
+  SLALOM_HEADING_THRESH: number;
+  SLALOM_CLEAR_TIME: number;
+  YAW_CENTER_RATE: number;
+  YAW_CENTER_DEAD: number;
+  // Motor trims
+  FL_TRIM: number;
+  FR_TRIM: number;
+  RL_TRIM: number;
+  RR_TRIM: number;
+  // Escape timing
+  ESCAPE_STOP_TIME: number;
+  ESCAPE_REVERSE_TIME: number;
+  ESCAPE_SPIN_TIME: number;
+  ESCAPE_RESUME_TIME: number;
+  // Rear sonar
+  REAR_CLEAR_CM: number;
+  // Gyro
+  CALIBRATION_TIME: number;
+  STATUS_INTERVAL: number;
+  // Camera & Vision Settings (non-autopilot, kept for camera config)
   CAMERA_RESOLUTION: string;
   CAMERA_JPEG_QUALITY: number;
   CAMERA_FRAMERATE: number;
@@ -41,30 +44,37 @@ export interface TuningConstants {
 }
 
 export const DEFAULT_TUNING: TuningConstants = {
-  FRONT_CRITICAL_CM: 5,
-  REAR_BLOCKED_CM: 3,
-  REAR_CRITICAL_CM: 5,
-  DANGER_CM: 40,
-  FULL_SPEED_CM: 100,
-  MAX_SPEED: 80,
-  MIN_SPEED: 30,
-  REVERSE_SPEED: 40,
-  PIVOT_SPEED: 50,
-  REVERSE_DURATION: 1,
-  REVERSE_STEP: 1.0,
-  PIVOT_DURATION: 1.0,
-  RECOVERY_DURATION: 1.0,
-  STUCK_RECHECK_INTERVAL: 1.0,
-  SONAR_HISTORY_LEN: 3,
-  STUCK_DISTANCE_THRESH: 2,
-  STUCK_TIME_THRESH: 1.0,
-  STUCK_BOOST_STEP: 5,
-  STUCK_BOOST_MAX: 80,
-  STUCK_MOVE_RESET: 5,
-  MAX_NORMAL_ESCAPES: 2,
-  UTURN_SPEED: 70,
-  UTURN_DURATION: 0.8,
-  ESCAPE_CLEAR_CM: 20,
+  // Navigation
+  BASE_SPEED: 50,
+  ESCAPE_SPEED: 65,
+  GYRO_KP: 1.5,
+  // Distances
+  CRITICAL_DIST: 20,
+  WARN_DIST: 100,
+  // Slalom dodge
+  SLALOM_BASE_DEG: 15,
+  SLALOM_PROXIMITY: 0.30,
+  SLALOM_COOLDOWN: 0.5,
+  SLALOM_HEADING_THRESH: 10,
+  SLALOM_CLEAR_TIME: 1.0,
+  YAW_CENTER_RATE: 0.2,
+  YAW_CENTER_DEAD: 2.0,
+  // Motor trims
+  FL_TRIM: 0.6,
+  FR_TRIM: 0.6,
+  RL_TRIM: 1.0,
+  RR_TRIM: 1.0,
+  // Escape timing
+  ESCAPE_STOP_TIME: 0.1,
+  ESCAPE_REVERSE_TIME: 0.8,
+  ESCAPE_SPIN_TIME: 0.5,
+  ESCAPE_RESUME_TIME: 0.2,
+  // Rear sonar
+  REAR_CLEAR_CM: 20,
+  // Gyro
+  CALIBRATION_TIME: 2.0,
+  STATUS_INTERVAL: 0.5,
+  // Camera (non-autopilot)
   CAMERA_RESOLUTION: "640x480",
   CAMERA_JPEG_QUALITY: 70,
   CAMERA_FRAMERATE: 30,
@@ -127,57 +137,56 @@ const TUNING_GROUPS: { title: string; params: ParamConfig[] }[] = [
     ],
   },
   {
+    title: "NAVIGATION",
+    params: [
+      { key: "BASE_SPEED", label: "Base Speed", min: 10, max: 100, step: 5, unit: "%", info: "Cruising PWM duty cycle. ↑ Increase: faster driving. ↓ Decrease: slower, more cautious." },
+      { key: "ESCAPE_SPEED", label: "Escape Speed", min: 20, max: 100, step: 5, unit: "%", info: "PWM during reverse/spin escape maneuvers. ↑ Increase: faster escapes. ↓ Decrease: gentler escape." },
+      { key: "GYRO_KP", label: "Gyro Kp", min: 0.1, max: 5.0, step: 0.1, unit: "", info: "Proportional gain for gyro yaw correction. Higher = snappier turns. ↑ Increase: more aggressive steering. ↓ Decrease: smoother but slower correction." },
+    ],
+  },
+  {
     title: "DISTANCE THRESHOLDS",
     params: [
-      { key: "FRONT_CRITICAL_CM", label: "Front Critical", min: 2, max: 100, step: 1, unit: "cm", info: "Front sonar distance that triggers an emergency escape maneuver. ↑ Increase: reacts earlier, more cautious. ↓ Decrease: gets closer before braking, riskier." },
-      { key: "REAR_BLOCKED_CM", label: "Rear Blocked", min: 2, max: 100, step: 1, unit: "cm", info: "Minimum rear clearance required to reverse. Below this the car refuses to back up. ↑ Increase: needs more space behind to reverse. ↓ Decrease: allows reversing in tighter spaces." },
-      { key: "REAR_CRITICAL_CM", label: "Rear Critical", min: 2, max: 100, step: 1, unit: "cm", info: "Rear sonar distance that interrupts an in-progress reverse. ↑ Increase: stops reversing sooner. ↓ Decrease: reverses closer to rear obstacles." },
-      { key: "DANGER_CM", label: "Danger Zone", min: 2, max: 100, step: 1, unit: "cm", info: "Distance threshold that triggers deceleration and escape logic. ↑ Increase: begins slowing from further away. ↓ Decrease: higher speed closer to obstacles." },
-      { key: "FULL_SPEED_CM", label: "Full Speed", min: 100, max: 500, step: 5, unit: "cm", info: "Distance above which the car cruises at maximum speed. ↑ Increase: needs more open space for full throttle. ↓ Decrease: reaches max speed sooner." },
+      { key: "CRITICAL_DIST", label: "Critical Distance", min: 5, max: 50, step: 1, unit: "cm", info: "Sonar distance that triggers P1 escape maneuver. ↑ Increase: reacts earlier. ↓ Decrease: gets closer before escaping." },
+      { key: "WARN_DIST", label: "Warning Distance", min: 30, max: 200, step: 5, unit: "cm", info: "Sonar distance that triggers P2 slalom dodge. ↑ Increase: starts dodging earlier. ↓ Decrease: approaches closer before dodging." },
+      { key: "REAR_CLEAR_CM", label: "Rear Clearance", min: 5, max: 50, step: 1, unit: "cm", info: "Minimum rear clearance to allow reversing during escape. ↑ Increase: needs more space. ↓ Decrease: reverses in tighter spaces." },
     ],
   },
   {
-    title: "SPEED PROFILES",
+    title: "SLALOM DODGE",
     params: [
-      { key: "MAX_SPEED", label: "Max Cruise", min: 10, max: 100, step: 5, unit: "%", info: "Maximum PWM duty cycle during open-road cruising. ↑ Increase: faster top speed. ↓ Decrease: slower, more controlled driving." },
-      { key: "MIN_SPEED", label: "Min Cruise", min: 10, max: 100, step: 5, unit: "%", info: "Minimum PWM at the danger zone boundary. The car never goes slower than this while moving. ↑ Increase: faster in tight spaces. ↓ Decrease: creeps more carefully near walls." },
-      { key: "REVERSE_SPEED", label: "Reverse", min: 10, max: 100, step: 5, unit: "%", info: "PWM duty cycle while reversing during escape maneuvers. ↑ Increase: reverses faster. ↓ Decrease: slower, more controlled reverse." },
-      { key: "PIVOT_SPEED", label: "Pivot", min: 10, max: 100, step: 5, unit: "%", info: "PWM duty cycle during pivot/tank turns. ↑ Increase: snappier turns. ↓ Decrease: gentler rotation." },
+      { key: "SLALOM_BASE_DEG", label: "Base Angle", min: 5, max: 45, step: 1, unit: "°", info: "Base yaw dodge increment per trigger. ↑ Increase: sharper initial dodge. ↓ Decrease: gentler initial dodge." },
+      { key: "SLALOM_PROXIMITY", label: "Proximity Factor", min: 0.05, max: 1.0, step: 0.05, unit: "", info: "Multiplier for distance-based dynamic increment. Closer = bigger dodge. ↑ Increase: more aggressive close-range. ↓ Decrease: more uniform dodging." },
+      { key: "SLALOM_COOLDOWN", label: "Cooldown", min: 0.1, max: 2.0, step: 0.1, unit: "s", info: "Minimum time between successive dodge increments. ↑ Increase: calmer dodging. ↓ Decrease: more rapid yaw accumulation." },
+      { key: "SLALOM_HEADING_THRESH", label: "Heading Threshold", min: 2, max: 30, step: 1, unit: "°", info: "Heading error below which a new dodge increment is added. ↑ Increase: adds dodge sooner. ↓ Decrease: waits for more accuracy." },
+      { key: "SLALOM_CLEAR_TIME", label: "Clear Time", min: 0.5, max: 5.0, step: 0.5, unit: "s", info: "Time after last dodge before resetting dodge direction. ↑ Increase: remembers dodge longer. ↓ Decrease: resets sooner." },
+      { key: "YAW_CENTER_RATE", label: "Center Rate", min: 0.05, max: 1.0, step: 0.05, unit: "°/tick", info: "Rate at which target yaw returns to center when clear. ↑ Increase: snaps to center faster. ↓ Decrease: gradual centering." },
+      { key: "YAW_CENTER_DEAD", label: "Center Deadzone", min: 0.5, max: 10.0, step: 0.5, unit: "°", info: "Yaw deadzone — no centering correction within this range. ↑ Increase: wider tolerance. ↓ Decrease: tighter tracking." },
     ],
   },
   {
-    title: "TIMING",
+    title: "MOTOR TRIMS",
     params: [
-      { key: "REVERSE_DURATION", label: "Reverse Duration", min: 0.1, max: 5.0, step: 0.1, unit: "s", info: "Total time allowed for reverse maneuver. ↑ Increase: reverses further back. ↓ Decrease: shorter reverse distance." },
-      { key: "REVERSE_STEP", label: "Reverse Step", min: 0.1, max: 5.0, step: 0.1, unit: "s", info: "Duration of each reverse micro-step before re-checking rear sensors. ↑ Increase: longer bursts between checks. ↓ Decrease: more frequent safety checks." },
-      { key: "PIVOT_DURATION", label: "Pivot Duration", min: 0.1, max: 5.0, step: 0.1, unit: "s", info: "How long the car pivots to change direction. ↑ Increase: larger turn angle. ↓ Decrease: smaller adjustments." },
-      { key: "RECOVERY_DURATION", label: "Recovery Duration", min: 0.1, max: 5.0, step: 0.1, unit: "s", info: "Pause after maneuvers to let sensors stabilize. ↑ Increase: more stable but slower recovery. ↓ Decrease: faster resumption, may get noisy readings." },
-      { key: "STUCK_RECHECK_INTERVAL", label: "Stuck Recheck", min: 0.1, max: 5.0, step: 0.1, unit: "s", info: "Time between checks while stuck. ↑ Increase: waits longer between attempts. ↓ Decrease: retries more frequently." },
+      { key: "FL_TRIM", label: "Front-Left", min: 0.1, max: 1.5, step: 0.05, unit: "×", info: "PWM multiplier for front-left motor. Compensates for motor differences. ↑ Increase: more power. ↓ Decrease: less power." },
+      { key: "FR_TRIM", label: "Front-Right", min: 0.1, max: 1.5, step: 0.05, unit: "×", info: "PWM multiplier for front-right motor. ↑ Increase: more power. ↓ Decrease: less power." },
+      { key: "RL_TRIM", label: "Rear-Left", min: 0.1, max: 1.5, step: 0.05, unit: "×", info: "PWM multiplier for rear-left motor. ↑ Increase: more power. ↓ Decrease: less power." },
+      { key: "RR_TRIM", label: "Rear-Right", min: 0.1, max: 1.5, step: 0.05, unit: "×", info: "PWM multiplier for rear-right motor. ↑ Increase: more power. ↓ Decrease: less power." },
     ],
   },
   {
-    title: "FILTER",
+    title: "ESCAPE TIMING",
     params: [
-      { key: "SONAR_HISTORY_LEN", label: "Sonar Filter Window", min: 1, max: 5, step: 1, unit: "", info: "Median filter window size for sonar readings. ↑ Increase: smoother but slower response. ↓ Decrease: more responsive but noisier." },
+      { key: "ESCAPE_STOP_TIME", label: "Stop Pause", min: 0.0, max: 1.0, step: 0.05, unit: "s", info: "Pause before reversing during escape. ↑ Increase: longer pause. ↓ Decrease: faster reaction." },
+      { key: "ESCAPE_REVERSE_TIME", label: "Reverse Duration", min: 0.2, max: 3.0, step: 0.1, unit: "s", info: "How long the car reverses during escape. ↑ Increase: reverses further. ↓ Decrease: shorter reverse." },
+      { key: "ESCAPE_SPIN_TIME", label: "Spin Duration", min: 0.2, max: 2.0, step: 0.1, unit: "s", info: "How long the car spins during escape. ↑ Increase: wider turn. ↓ Decrease: smaller rotation." },
+      { key: "ESCAPE_RESUME_TIME", label: "Resume Pause", min: 0.0, max: 1.0, step: 0.05, unit: "s", info: "Pause after spin before resuming cruise. ↑ Increase: more settling time. ↓ Decrease: faster resumption." },
     ],
   },
   {
-    title: "SMART POWER",
+    title: "GYRO",
     params: [
-      { key: "STUCK_DISTANCE_THRESH", label: "Stuck Distance", min: 1, max: 20, step: 1, unit: "cm", info: "Distance change below which the car is considered 'not moving'. ↑ Increase: harder to detect as stuck. ↓ Decrease: triggers stuck detection more easily." },
-      { key: "STUCK_TIME_THRESH", label: "Stuck Time", min: 0.1, max: 5.0, step: 0.1, unit: "s", info: "Seconds of no movement before power boost kicks in. ↑ Increase: waits longer before boosting. ↓ Decrease: boosts sooner when stuck." },
-      { key: "STUCK_BOOST_STEP", label: "Boost Step", min: 1, max: 20, step: 1, unit: "%", info: "PWM percentage added each stuck interval. ↑ Increase: more aggressive power ramp. ↓ Decrease: gentler power increases." },
-      { key: "STUCK_BOOST_MAX", label: "Boost Max", min: 30, max: 100, step: 5, unit: "%", info: "Absolute maximum PWM cap with boost applied. ↑ Increase: allows higher max power. ↓ Decrease: limits boost ceiling." },
-      { key: "STUCK_MOVE_RESET", label: "Move Reset", min: 1, max: 20, step: 1, unit: "cm", info: "Distance change that confirms the car is moving again, resetting boost. ↑ Increase: needs more movement to clear stuck state. ↓ Decrease: resets boost sooner." },
-    ],
-  },
-  {
-    title: "ESCALATING ESCAPE",
-    params: [
-      { key: "MAX_NORMAL_ESCAPES", label: "Max Escapes", min: 1, max: 10, step: 1, unit: "", info: "Normal escape attempts before triggering a U-turn. ↑ Increase: tries more before escalating. ↓ Decrease: escalates to U-turn sooner." },
-      { key: "UTURN_SPEED", label: "U-Turn Speed", min: 20, max: 100, step: 5, unit: "%", info: "PWM during 180° spin escape. ↑ Increase: faster spin. ↓ Decrease: slower, more controlled U-turn." },
-      { key: "UTURN_DURATION", label: "U-Turn Duration", min: 0.1, max: 5.0, step: 0.1, unit: "s", info: "How long the U-turn spin lasts. ↑ Increase: wider turn arc. ↓ Decrease: smaller rotation." },
-      { key: "ESCAPE_CLEAR_CM", label: "Escape Clear", min: 5, max: 100, step: 5, unit: "cm", info: "Distance that confirms a clear path, resetting the escape counter. ↑ Increase: needs more space to reset. ↓ Decrease: resets counter sooner." },
+      { key: "CALIBRATION_TIME", label: "Calibration", min: 0.5, max: 5.0, step: 0.5, unit: "s", info: "Gyro calibration duration at autopilot start. More time = better drift offset. ↑ Increase: more accurate. ↓ Decrease: faster startup." },
+      { key: "STATUS_INTERVAL", label: "Status Log", min: 0.1, max: 5.0, step: 0.1, unit: "s", info: "Interval between console status prints. ↑ Increase: less log spam. ↓ Decrease: more detailed logging." },
     ],
   },
 ];

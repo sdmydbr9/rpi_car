@@ -37,6 +37,10 @@ export interface TelemetryData {
   pid_correction?: number;
   gyro_available?: boolean;
   gyro_calibrated?: boolean;
+  // Slalom yaw-tracking telemetry
+  target_yaw?: number;
+  current_heading?: number;
+  slalom_sign?: number;
   // Sensor health
   sensor_status?: Record<string, string>;
   service_light_active?: boolean;
@@ -189,6 +193,34 @@ export function onCameraConfigResponse(callback: (data: { status: string; curren
     socket.on('camera_config_response', (data) => {
       console.log(`[Socket] 📷 Camera config response:`, data);
       if (cameraConfigResponseCallback) cameraConfigResponseCallback(data);
+    });
+  }
+}
+
+// ==========================================
+// 📡 SENSOR CONFIG SYNC
+// ==========================================
+
+export interface SensorConfig {
+  ir_enabled: boolean;
+  sonar_enabled: boolean;
+  mpu6050_enabled: boolean;
+  rear_sonar_enabled: boolean;
+}
+
+let sensorConfigSyncCallback: ((data: SensorConfig) => void) | null = null;
+
+/**
+ * Subscribe to sensor config sync events from the backend.
+ * Called automatically on connect to provide persisted sensor toggle states.
+ */
+export function onSensorConfigSync(callback: (data: SensorConfig) => void): void {
+  sensorConfigSyncCallback = callback;
+  if (socket) {
+    socket.off('sensor_config_sync');  // avoid duplicate listeners
+    socket.on('sensor_config_sync', (data: SensorConfig) => {
+      console.log(`[Socket] 📡 Sensor config sync received from backend:`, data);
+      if (sensorConfigSyncCallback) sensorConfigSyncCallback(data);
     });
   }
 }

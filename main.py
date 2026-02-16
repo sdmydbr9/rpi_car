@@ -173,6 +173,41 @@ def _save_narration_config(config):
 
 _narration_config = _load_narration_config()
 
+# --- SENSOR CONFIG PERSISTENCE ---
+SENSOR_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.sensor_config.json')
+
+_SENSOR_CONFIG_DEFAULTS = {
+    'ir_enabled': True,
+    'sonar_enabled': True,
+    'mpu6050_enabled': True,
+    'rear_sonar_enabled': True,
+}
+
+def _load_sensor_config():
+    """Load persisted sensor toggle states from JSON file."""
+    try:
+        if os.path.exists(SENSOR_CONFIG_FILE):
+            with open(SENSOR_CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+            # Merge with defaults so new keys get a value
+            merged = {**_SENSOR_CONFIG_DEFAULTS, **config}
+            print(f"✅ [Sensor Config] Loaded persisted config: {merged}")
+            return merged
+    except Exception as e:
+        print(f"⚠️  [Sensor Config] Failed to load: {e}")
+    return dict(_SENSOR_CONFIG_DEFAULTS)
+
+def _save_sensor_config(config):
+    """Save sensor toggle states to JSON file for persistence."""
+    try:
+        with open(SENSOR_CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=2)
+        print(f"💾 [Sensor Config] Saved to {SENSOR_CONFIG_FILE}")
+    except Exception as e:
+        print(f"⚠️  [Sensor Config] Failed to save: {e}")
+
+_sensor_config = _load_sensor_config()
+
 # Load persisted camera config (overrides defaults)
 _persisted_camera_config = _load_camera_config()
 if _persisted_camera_config:
@@ -523,31 +558,11 @@ def _get_ir_for_autopilot():
         right = False
     return left, right
 
-def _get_camera_for_autopilot():
-    """Read camera obstacle distance for autopilot fusion.
-    
-    Returns 999.0 (no obstacle) when camera is disabled or when the user
-    has disabled CV, to ensure autopilot relies solely on sonar and IR
-    sensors in those modes. Camera feed is visual-only when CV is off.
-    """
-    if not car_state["camera_enabled"]:
-        return 999.0
-    if not car_state["user_wants_vision"]:
-        return 999.0
-    if VISION_AVAILABLE and vision_system is not None:
-        return vision_system.get_camera_obstacle_distance()
-    return 999.0
-
-def _is_vision_available():
-    """Check if vision system can be activated (camera enabled and system available)."""
-    return car_state["camera_enabled"] and VISION_AVAILABLE and vision_system is not None
-
 autopilot = AutoPilot(
     car_system,
     _get_sonar_for_autopilot,
     _get_ir_for_autopilot,
     _get_rear_sonar_for_autopilot,
-    _get_camera_for_autopilot,
 )
 
 # Store a copy of the original class-level defaults (immutable reference for reset)
@@ -571,9 +586,9 @@ car_state = {
     "steer_angle": 0,      # Current steering angle
     "left_obstacle": False, # IR sensor: obstacle detected on left
     "right_obstacle": False, # IR sensor: obstacle detected on right
-    "ir_enabled": True,    # IR sensor toggle
-    "mpu6050_enabled": True,  # MPU6050 gyroscope toggle
-    "rear_sonar_enabled": True,  # Rear sonar sensor toggle
+    "ir_enabled": _sensor_config.get('ir_enabled', True),    # IR sensor toggle
+    "mpu6050_enabled": _sensor_config.get('mpu6050_enabled', True),  # MPU6050 gyroscope toggle
+    "rear_sonar_enabled": _sensor_config.get('rear_sonar_enabled', True),  # Rear sonar sensor toggle
     "user_steer_angle": 0, # Store user's manual steering (preserved when avoiding)
     "obstacle_avoidance_active": False,  # Track if currently avoiding
     "speed_limit": 100,    # Manual speed limit (5-100), overrides gear speeds
@@ -585,11 +600,15 @@ car_state = {
     "is_braking": False,  # Flag to indicate normal brake is applied for motor control
     "heartbeat_active": True,  # Heartbeat status: True = client responding, False = lost connection
     "sonar_distance": 100,  # Distance from front sonar sensor in cm
-    "sonar_enabled": True,   # Sonar sensor toggle
+    "sonar_enabled": _sensor_config.get('sonar_enabled', True),   # Sonar sensor toggle
     # 🤖 AUTONOMOUS DRIVING MODE
     "autonomous_mode": False,  # Smart Driver autonomous mode toggle
-    "autonomous_state": State.FORWARD_CRUISE.value,  # Current autonomous driving state (read from AutoPilot)
+    "autonomous_state": State.CRUISING.value,  # Current autonomous driving state (read from AutoPilot)
     "last_obstacle_side": "none",  # Track which side detected obstacle for escape logic
+    # 🧭 Slalom yaw-tracking telemetry
+    "target_yaw": 0.0,              # Target yaw heading (degrees)
+    "current_heading": 0.0,         # Current integrated yaw heading (degrees)
+    "slalom_sign": 0,               # Dodge direction: -1=left, 0=none, 1=right
     # 🚨 SENSOR HEALTH STATUS
     "sensor_status": {
         "front_sonar": "OK",  # OK, WARNING, FAILED
@@ -837,7 +856,7 @@ def physics_loop():
         
         # --- VISION ACTIVATION FOR MANUAL MODE ---
         # Activate vision DNN when driving forward in manual mode (only if camera + CV enabled)
-        if _is_vision_available() and not car_state["autonomous_mode"]:
+        if VISION_AVAILABLE and vision_system is not None and not car_state["autonomous_mode"]:
             gear_val = car_state["gear"]
             is_forward_gear = gear_val in ("1", "2", "3", "S")
             is_moving = car_state["gas_pressed"] and car_state["current_pwm"] > 0
@@ -1270,32 +1289,10 @@ def drive_autonomous():
         car_state["gyro_available"] = autopilot.gyro_available
         car_state["gyro_calibrated"] = autopilot.gyro_calibrated
 
-        # Activate vision when driving forward (camera faces front)
-        # Only if camera + CV enabled — otherwise autopilot relies on sonar/IR only
-        if _is_vision_available():
-            # Vision should be active whenever autopilot is driving forward AND user wants CV
-            is_forward = autopilot.state in (State.FORWARD_CRUISE, State.OBSTACLE_STEERING)
-            vision_system.active = car_state["user_wants_vision"] and is_forward
-            # Mirror vision telemetry
-            summary = vision_system.get_detections_summary()
-            car_state["vision_active"] = summary["vision_active"]
-            car_state["camera_obstacle_distance"] = summary["camera_obstacle_distance"]
-            car_state["camera_detections_count"] = summary["count"]
-            car_state["camera_in_path_count"] = summary["in_path_count"]
-            car_state["camera_closest_object"] = summary["closest_class"]
-            car_state["camera_closest_confidence"] = summary["closest_confidence"]
-            car_state["vision_fps"] = summary["vision_fps"]
-        else:
-            # Camera off or vision unavailable — deactivate vision and clear telemetry
-            if VISION_AVAILABLE and vision_system is not None:
-                vision_system.active = False
-            car_state["vision_active"] = False
-            car_state["camera_obstacle_distance"] = 999.0
-            car_state["camera_detections_count"] = 0
-            car_state["camera_in_path_count"] = 0
-            car_state["camera_closest_object"] = "none"
-            car_state["camera_closest_confidence"] = 0.0
-            car_state["vision_fps"] = 0.0
+        # Mirror slalom yaw-tracking telemetry
+        car_state["target_yaw"] = round(autopilot.target_yaw, 1)
+        car_state["current_heading"] = round(autopilot.current_heading, 1)
+        car_state["slalom_sign"] = autopilot.slalom_sign
 
         time.sleep(0.05)  # 20 Hz
 
@@ -1502,16 +1499,13 @@ def emergency_stop():
 def enable_autonomous():
     """Enable Smart Driver autonomous mode"""
     car_state["autonomous_mode"] = True
-    car_state["autonomous_state"] = State.FORWARD_CRUISE.value
+    car_state["autonomous_state"] = State.CRUISING.value
     car_state["last_obstacle_side"] = "none"
     # Force IR and Sonar sensors enabled in autonomous mode for safety
     car_state["ir_enabled"] = True
     car_state["sonar_enabled"] = True
     autopilot.start()
-    # Enable vision system for forward object detection (only if camera is enabled)
-    if _is_vision_available():
-        vision_system.active = True
-    print(f"🤖 SMART DRIVER: ENABLED - Autonomous driving active")
+    print(f"🤖 SMART DRIVER: ENABLED - Autonomous driving active (slalom mode)")
     return "AUTONOMOUS_ENABLED"
 
 @app.route("/autonomous_disable")
@@ -1528,9 +1522,6 @@ def disable_autonomous():
     car_state["gear"] = "N"
     car_state["steer_angle"] = 0
     car_state["user_steer_angle"] = 0
-    # Deactivate vision on autonomous disable
-    if VISION_AVAILABLE and vision_system is not None:
-        vision_system.active = False
     print(f"🤖 SMART DRIVER: DISABLED - Returned to manual control")
     return "AUTONOMOUS_DISABLED"
 
@@ -1682,6 +1673,13 @@ def on_connect():
         'kokoro_voices': _narration_config.get('kokoro_voices', []),
     }
     emit('narration_config_sync', _masked_narration)
+    # Send persisted sensor toggle states so client syncs immediately
+    emit('sensor_config_sync', {
+        'ir_enabled': car_state['ir_enabled'],
+        'sonar_enabled': car_state['sonar_enabled'],
+        'mpu6050_enabled': car_state['mpu6050_enabled'],
+        'rear_sonar_enabled': car_state['rear_sonar_enabled'],
+    })
     # Refresh models list in background if key is set
     _client_sid = request.sid
     if _narration_config.get('api_key'):
@@ -1909,6 +1907,8 @@ def on_ir_toggle(data):
         return
     
     car_state["ir_enabled"] = not car_state["ir_enabled"]
+    _sensor_config['ir_enabled'] = car_state["ir_enabled"]
+    _save_sensor_config(_sensor_config)
     state = '✅ ON' if car_state["ir_enabled"] else '❌ OFF'
     print(f"\n⚙️ [UI Control] 📡 IR SENSORS: {state}")
     emit('ir_response', {'status': 'ok', 'ir_enabled': car_state["ir_enabled"]})
@@ -1922,6 +1922,8 @@ def on_sonar_toggle(data):
         return
     
     car_state["sonar_enabled"] = not car_state["sonar_enabled"]
+    _sensor_config['sonar_enabled'] = car_state["sonar_enabled"]
+    _save_sensor_config(_sensor_config)
     emit('sonar_response', {'status': 'ok', 'sonar_enabled': car_state["sonar_enabled"]})
 
 @socketio.on('rear_sonar_toggle')
@@ -1931,6 +1933,8 @@ def on_rear_sonar_toggle(data):
         emit('rear_sonar_response', {'status': 'blocked', 'rear_sonar_enabled': car_state["rear_sonar_enabled"], 'message': 'Cannot toggle Rear Sonar in autonomous mode'})
         return
     car_state["rear_sonar_enabled"] = not car_state["rear_sonar_enabled"]
+    _sensor_config['rear_sonar_enabled'] = car_state["rear_sonar_enabled"]
+    _save_sensor_config(_sensor_config)
     state = '✅ ON' if car_state["rear_sonar_enabled"] else '❌ OFF'
     print(f"\n⚙️ [UI Control] 📡 REAR SONAR: {state}")
     emit('rear_sonar_response', {'status': 'ok', 'rear_sonar_enabled': car_state["rear_sonar_enabled"]})
@@ -1942,6 +1946,8 @@ def on_mpu6050_toggle(data):
         emit('mpu6050_response', {'status': 'blocked', 'mpu6050_enabled': car_state["mpu6050_enabled"], 'message': 'Cannot toggle MPU6050 in autonomous mode'})
         return
     car_state["mpu6050_enabled"] = not car_state["mpu6050_enabled"]
+    _sensor_config['mpu6050_enabled'] = car_state["mpu6050_enabled"]
+    _save_sensor_config(_sensor_config)
     state = '✅ ON' if car_state["mpu6050_enabled"] else '❌ OFF'
     print(f"\n⚙️ [UI Control] 🧭 MPU6050: {state}")
     emit('mpu6050_response', {'status': 'ok', 'mpu6050_enabled': car_state["mpu6050_enabled"]})
@@ -2095,21 +2101,14 @@ def on_autonomous_enable(data):
         return
     
     car_state["autonomous_mode"] = True
-    car_state["autonomous_state"] = State.FORWARD_CRUISE.value
+    car_state["autonomous_state"] = State.CRUISING.value
     car_state["last_obstacle_side"] = "none"
     # Force IR and Sonar sensors enabled in autonomous mode for safety
     car_state["ir_enabled"] = True
     car_state["sonar_enabled"] = True
     autopilot.start()
-    # Enable vision system for forward object detection (only if camera is enabled)
-    if _is_vision_available():
-        vision_system.active = True
-    print(f"\n⚙️ [UI Control] 🤖 SMART DRIVER: ENABLED - Autonomous driving active")
+    print(f"\n⚙️ [UI Control] 🤖 SMART DRIVER: ENABLED - Slalom yaw-tracking active")
     print(f"📡 SAFETY: IR and Sonar sensors force-enabled in autonomous mode")
-    if car_state["camera_enabled"] and VISION_AVAILABLE:
-        print(f"📷 VISION: Object detection active for forward driving")
-    elif not car_state["camera_enabled"]:
-        print(f"📷 VISION: Disabled (camera off - using sonar/IR only)")
     emit('autonomous_response', {'status': 'ok', 'autonomous_enabled': True})
 
 @socketio.on('autonomous_disable')
@@ -2129,9 +2128,6 @@ def on_autonomous_disable(data):
     car_state["gear"] = "N"
     car_state["steer_angle"] = 0
     car_state["user_steer_angle"] = 0
-    # Deactivate vision on autonomous disable
-    if VISION_AVAILABLE and vision_system is not None:
-        vision_system.active = False
     print(f"\n⚙️ [UI Control] 🤖 SMART DRIVER: DISABLED - Returned to manual control")
     emit('autonomous_response', {'status': 'ok', 'autonomous_enabled': False})
 
@@ -2485,6 +2481,10 @@ def telemetry_broadcast():
                 "pid_correction": car_state["pid_correction"],
                 "gyro_available": car_state["gyro_available"],
                 "gyro_calibrated": car_state["gyro_calibrated"],
+                # 🧭 Slalom yaw-tracking telemetry
+                "target_yaw": car_state.get("target_yaw", 0.0),
+                "current_heading": car_state.get("current_heading", 0.0),
+                "slalom_sign": car_state.get("slalom_sign", 0),
                 # 🚨 Sensor health status
                 "sensor_status": car_state["sensor_status"],
                 "service_light_active": car_state["service_light_active"],

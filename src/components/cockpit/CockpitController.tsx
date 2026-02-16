@@ -69,10 +69,22 @@ export const CockpitController = () => {
   const [serverIp, setServerIp] = useState("");
   const [isEmergencyStop, setIsEmergencyStop] = useState(false);
   const [isAutoMode, setIsAutoMode] = useState(false);
-  const [isIREnabled, setIsIREnabled] = useState(true);
-  const [isSonarEnabled, setIsSonarEnabled] = useState(true);
-  const [isMPU6050Enabled, setIsMPU6050Enabled] = useState(true);
-  const [isRearSonarEnabled, setIsRearSonarEnabled] = useState(true);
+  const [isIREnabled, setIsIREnabled] = useState(() => {
+    const saved = localStorage.getItem('irEnabled');
+    return saved !== null ? saved === 'true' : true;
+  });
+  const [isSonarEnabled, setIsSonarEnabled] = useState(() => {
+    const saved = localStorage.getItem('sonarEnabled');
+    return saved !== null ? saved === 'true' : true;
+  });
+  const [isMPU6050Enabled, setIsMPU6050Enabled] = useState(() => {
+    const saved = localStorage.getItem('mpu6050Enabled');
+    return saved !== null ? saved === 'true' : true;
+  });
+  const [isRearSonarEnabled, setIsRearSonarEnabled] = useState(() => {
+    const saved = localStorage.getItem('rearSonarEnabled');
+    return saved !== null ? saved === 'true' : true;
+  });
   const [isCameraEnabled, setIsCameraEnabled] = useState(() => {
     // Load camera state from localStorage, default to false (disabled)
     const saved = localStorage.getItem('cameraEnabled');
@@ -143,6 +155,10 @@ export const CockpitController = () => {
   const [pidCorrection, setPidCorrection] = useState(0);
   const [gyroAvailable, setGyroAvailable] = useState(false);
   const [gyroCalibrated, setGyroCalibrated] = useState(false);
+  // Slalom autopilot telemetry
+  const [targetYaw, setTargetYaw] = useState(0);
+  const [currentHeading, setCurrentHeading] = useState(0);
+  const [slalomSign, setSlalomSign] = useState(0);
   const [cameraActualFps, setCameraActualFps] = useState(0);
   // AI Image Analysis state (backend-synced: whether AI is analyzing camera frames)
   // Persisted across sessions — will auto-toggle on backend after connection
@@ -281,6 +297,28 @@ export const CockpitController = () => {
       setCameraSpecs(data);
     });
 
+    // Subscribe to sensor config sync from backend (fires on connect)
+    // Server is authoritative — update both React state and localStorage
+    socketClient.onSensorConfigSync((data) => {
+      console.log('📡 Sensor config sync from backend:', data);
+      if (data.ir_enabled !== undefined) {
+        setIsIREnabled(data.ir_enabled);
+        localStorage.setItem('irEnabled', String(data.ir_enabled));
+      }
+      if (data.sonar_enabled !== undefined) {
+        setIsSonarEnabled(data.sonar_enabled);
+        localStorage.setItem('sonarEnabled', String(data.sonar_enabled));
+      }
+      if (data.mpu6050_enabled !== undefined) {
+        setIsMPU6050Enabled(data.mpu6050_enabled);
+        localStorage.setItem('mpu6050Enabled', String(data.mpu6050_enabled));
+      }
+      if (data.rear_sonar_enabled !== undefined) {
+        setIsRearSonarEnabled(data.rear_sonar_enabled);
+        localStorage.setItem('rearSonarEnabled', String(data.rear_sonar_enabled));
+      }
+    });
+
     // Subscribe to camera config response (confirms applied settings)
     socketClient.onCameraConfigResponse((data) => {
       console.log('📷 Camera config response:', data);
@@ -400,8 +438,11 @@ export const CockpitController = () => {
           // that must maintain their state while held
         };
       });
-      // Update IR enabled state from telemetry
-      setIsIREnabled(data.ir_enabled ?? true);
+      // Update IR enabled state from telemetry (server is authoritative)
+      if (data.ir_enabled !== undefined) {
+        setIsIREnabled(data.ir_enabled);
+        localStorage.setItem('irEnabled', String(data.ir_enabled));
+      }
       
       // Update camera enabled state from telemetry
       if (data.camera_enabled !== undefined) {
@@ -414,9 +455,18 @@ export const CockpitController = () => {
       if (data.autonomous_state) setAutonomousState(data.autonomous_state);
       if (data.sonar_distance !== undefined) setSonarDistance(data.sonar_distance);
       if (data.autonomous_target_speed !== undefined) setAutonomousTargetSpeed(data.autonomous_target_speed);
-      if (data.sonar_enabled !== undefined) setIsSonarEnabled(data.sonar_enabled);
-      if (data.mpu6050_enabled !== undefined) setIsMPU6050Enabled(data.mpu6050_enabled);
-      if (data.rear_sonar_enabled !== undefined) setIsRearSonarEnabled(data.rear_sonar_enabled);
+      if (data.sonar_enabled !== undefined) {
+        setIsSonarEnabled(data.sonar_enabled);
+        localStorage.setItem('sonarEnabled', String(data.sonar_enabled));
+      }
+      if (data.mpu6050_enabled !== undefined) {
+        setIsMPU6050Enabled(data.mpu6050_enabled);
+        localStorage.setItem('mpu6050Enabled', String(data.mpu6050_enabled));
+      }
+      if (data.rear_sonar_enabled !== undefined) {
+        setIsRearSonarEnabled(data.rear_sonar_enabled);
+        localStorage.setItem('rearSonarEnabled', String(data.rear_sonar_enabled));
+      }
       // Update sensor health status
       if (data.sensor_status) {
         const convertedSensors = convertSensorStatus(data.sensor_status);
@@ -438,6 +488,10 @@ export const CockpitController = () => {
       if (data.pid_correction !== undefined) setPidCorrection(data.pid_correction);
       if (data.gyro_available !== undefined) setGyroAvailable(data.gyro_available);
       if (data.gyro_calibrated !== undefined) setGyroCalibrated(data.gyro_calibrated);
+      // Update slalom autopilot telemetry
+      if (data.target_yaw !== undefined) setTargetYaw(data.target_yaw);
+      if (data.current_heading !== undefined) setCurrentHeading(data.current_heading);
+      if (data.slalom_sign !== undefined) setSlalomSign(data.slalom_sign);
       // Update narration telemetry
       if (data.narration_enabled !== undefined) setImageAnalysisEnabled(data.narration_enabled);
       if (data.narration_speaking !== undefined) setNarrationSpeaking(prev => prev || data.narration_speaking!);
@@ -605,7 +659,11 @@ export const CockpitController = () => {
       console.log('🚫 Sonar sensor cannot be toggled in autonomous mode');
       return;
     }
-    setIsSonarEnabled(prev => !prev);
+    setIsSonarEnabled(prev => {
+      const newState = !prev;
+      localStorage.setItem('sonarEnabled', String(newState));
+      return newState;
+    });
     socketClient.emitSonarToggle();
   }, [isAutopilotRunning]);
 
@@ -615,7 +673,11 @@ export const CockpitController = () => {
       console.log('🚫 Rear Sonar cannot be toggled in autonomous mode');
       return;
     }
-    setIsRearSonarEnabled(prev => !prev);
+    setIsRearSonarEnabled(prev => {
+      const newState = !prev;
+      localStorage.setItem('rearSonarEnabled', String(newState));
+      return newState;
+    });
     socketClient.emitRearSonarToggle();
   }, [isAutopilotRunning]);
 
@@ -625,7 +687,11 @@ export const CockpitController = () => {
       console.log('🚫 MPU6050 cannot be toggled in autonomous mode');
       return;
     }
-    setIsMPU6050Enabled(prev => !prev);
+    setIsMPU6050Enabled(prev => {
+      const newState = !prev;
+      localStorage.setItem('mpu6050Enabled', String(newState));
+      return newState;
+    });
     socketClient.emitMPU6050Toggle();
   }, [isAutopilotRunning]);
 
@@ -866,13 +932,9 @@ export const CockpitController = () => {
                 distanceToObstacle={sonarDistance}
                 eBrakeActive={eBrakeActive}
                 isRunning={isAutopilotRunning}
-                visionActive={visionActive}
-                cameraObstacleDistance={cameraObstacleDistance}
-                cameraDetectionsCount={cameraDetectionsCount}
-                cameraInPathCount={cameraInPathCount}
-                cameraClosestObject={cameraClosestObject}
-                cameraClosestConfidence={cameraClosestConfidence}
-                visionFps={visionFps}
+                targetYaw={targetYaw}
+                currentHeading={currentHeading}
+                slalomSign={slalomSign}
                 gyroZ={gyroZ}
                 pidCorrection={pidCorrection}
                 gyroAvailable={gyroAvailable}

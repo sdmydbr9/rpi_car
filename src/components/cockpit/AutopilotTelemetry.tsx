@@ -1,18 +1,10 @@
-import { Navigation, AlertTriangle, RotateCcw, OctagonX, Compass, Activity, Gauge, Ruler, Play, Square, RefreshCw, Eye, EyeOff, Crosshair, ArrowRightLeft } from "lucide-react";
+import { Navigation, AlertTriangle, RotateCcw, OctagonX, Compass, Activity, Gauge, Ruler, Play, Square, RefreshCw, Crosshair, ArrowRightLeft } from "lucide-react";
 
 export type AutopilotStatus = 
-  | "FORWARD_CRUISE"
-  | "OBSTACLE_STEERING"
-  | "OBSTACLE_FALLBACK"
-  | "EMERGENCY_STOP"
-  // Legacy states (kept for backward compat with old autopilot)
-  | "CRUISING" 
-  | "PANIC_BRAKE" 
-  | "REVERSING" 
-  | "STUCK" 
-  | "PIVOTING" 
-  | "RECOVERY"
-  | "UTURN";
+  | "CRUISING"
+  | "DODGING"
+  | "ESCAPING"
+  | "EMERGENCY_STOP";
 
 interface AutopilotTelemetryProps {
   status: AutopilotStatus;
@@ -20,14 +12,10 @@ interface AutopilotTelemetryProps {
   distanceToObstacle: number; // in cm
   eBrakeActive?: boolean;
   isRunning?: boolean;
-  // Vision / Object Detection
-  visionActive?: boolean;
-  cameraObstacleDistance?: number;
-  cameraDetectionsCount?: number;
-  cameraInPathCount?: number;
-  cameraClosestObject?: string;
-  cameraClosestConfidence?: number;
-  visionFps?: number;
+  // Slalom yaw-tracking telemetry
+  targetYaw?: number;
+  currentHeading?: number;
+  slalomSign?: number;
   // MPU6050 Gyro telemetry
   gyroZ?: number;
   pidCorrection?: number;
@@ -47,26 +35,25 @@ const STATUS_CONFIG: Record<AutopilotStatus, {
   borderColor: string;
   description: string;
 }> = {
-  // ── Current autopilot states ──
-  FORWARD_CRUISE: {
+  CRUISING: {
     icon: Navigation,
     label: "CRUISING",
     color: "text-primary",
     bgColor: "bg-primary/20",
     borderColor: "border-primary",
-    description: "PID heading correction active",
+    description: "Gyro yaw-tracking active",
   },
-  OBSTACLE_STEERING: {
+  DODGING: {
     icon: ArrowRightLeft,
-    label: "STEERING",
+    label: "DODGING",
     color: "text-cyan-400",
     bgColor: "bg-cyan-400/20",
     borderColor: "border-cyan-400",
-    description: "Steering around obstacle",
+    description: "Slalom dodge — accumulating yaw",
   },
-  OBSTACLE_FALLBACK: {
+  ESCAPING: {
     icon: RotateCcw,
-    label: "FALLBACK",
+    label: "ESCAPING",
     color: "text-amber-500",
     bgColor: "bg-amber-500/20",
     borderColor: "border-amber-500",
@@ -78,64 +65,7 @@ const STATUS_CONFIG: Record<AutopilotStatus, {
     color: "text-destructive",
     bgColor: "bg-destructive/20",
     borderColor: "border-destructive",
-    description: "Cliff detected — motors locked",
-  },
-  // ── Legacy states (old autopilot compat) ──
-  CRUISING: {
-    icon: Navigation,
-    label: "CRUISING",
-    color: "text-primary",
-    bgColor: "bg-primary/20",
-    borderColor: "border-primary",
-    description: "Moving forward, adjusting speed",
-  },
-  PANIC_BRAKE: {
-    icon: AlertTriangle,
-    label: "PANIC BRAKE",
-    color: "text-destructive",
-    bgColor: "bg-destructive/20",
-    borderColor: "border-destructive",
-    description: "Obstacle detected, braking",
-  },
-  REVERSING: {
-    icon: RotateCcw,
-    label: "REVERSING",
-    color: "text-amber-500",
-    bgColor: "bg-amber-500/20",
-    borderColor: "border-amber-500",
-    description: "Creating escape space",
-  },
-  STUCK: {
-    icon: OctagonX,
-    label: "STUCK",
-    color: "text-destructive",
-    bgColor: "bg-destructive/20",
-    borderColor: "border-destructive",
-    description: "Blocked, waiting for clearance",
-  },
-  PIVOTING: {
-    icon: Compass,
-    label: "PIVOTING",
-    color: "text-cyan-500",
-    bgColor: "bg-cyan-500/20",
-    borderColor: "border-cyan-500",
-    description: "Changing direction",
-  },
-  RECOVERY: {
-    icon: Activity,
-    label: "RECOVERY",
-    color: "text-success",
-    bgColor: "bg-success/20",
-    borderColor: "border-success",
-    description: "Stabilizing sensors",
-  },
-  UTURN: {
-    icon: RefreshCw,
-    label: "U-TURN",
-    color: "text-orange-500",
-    bgColor: "bg-orange-500/20",
-    borderColor: "border-orange-500",
-    description: "180° spin escape maneuver",
+    description: "Emergency — motors locked",
   },
 };
 
@@ -155,13 +85,9 @@ export const AutopilotTelemetry = ({
   distanceToObstacle,
   eBrakeActive = false,
   isRunning = false,
-  visionActive = false,
-  cameraObstacleDistance = 999,
-  cameraDetectionsCount = 0,
-  cameraInPathCount = 0,
-  cameraClosestObject = "",
-  cameraClosestConfidence = 0,
-  visionFps = 0,
+  targetYaw = 0,
+  currentHeading = 0,
+  slalomSign = 0,
   gyroZ = 0,
   pidCorrection = 0,
   gyroAvailable = false,
@@ -181,13 +107,6 @@ export const AutopilotTelemetry = ({
       ? "text-warning" 
       : "text-primary";
 
-  // Camera distance warning level
-  const cameraDistanceWarning = cameraObstacleDistance < 30
-    ? "text-destructive"
-    : cameraObstacleDistance < 80
-      ? "text-warning"
-      : "text-violet-400";
-
   return (
     <div className="flex flex-col items-center h-full py-1 px-1 overflow-hidden gap-1">
       {/* Header */}
@@ -206,7 +125,7 @@ export const AutopilotTelemetry = ({
       `}>
         <StatusIcon className={`w-5 h-5 sm:w-6 sm:h-6 ${
           isRunning 
-            ? `${config.color} ${status === "PANIC_BRAKE" || status === "STUCK" ? "animate-pulse" : ""}` 
+            ? `${config.color} ${status === "ESCAPING" || status === "EMERGENCY_STOP" ? "animate-pulse" : ""}` 
             : 'text-muted-foreground'
         }`} />
         <span className={`racing-text text-[10px] sm:text-xs font-bold ${
@@ -268,58 +187,60 @@ export const AutopilotTelemetry = ({
         </div>
       </div>
       
-      {/* Vision / Object Detection */}
+      {/* Slalom Yaw Heading */}
       <div className="w-full bg-card/50 rounded border border-border p-1">
         <div className="flex items-center justify-between mb-0.5">
           <div className="flex items-center gap-0.5">
-            {visionActive ? (
-              <Eye className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-violet-400" />
-            ) : (
-              <EyeOff className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-muted-foreground" />
-            )}
-            <span className="racing-text text-[6px] sm:text-[8px] text-muted-foreground">VISION</span>
+            <Compass className={`w-2.5 h-2.5 sm:w-3 sm:h-3 ${isRunning ? 'text-cyan-400' : 'text-muted-foreground'}`} />
+            <span className="racing-text text-[6px] sm:text-[8px] text-muted-foreground">YAW</span>
           </div>
-          <span className={`racing-text text-[7px] sm:text-[9px] font-bold ${visionActive ? 'text-violet-400' : 'text-muted-foreground'}`}>
-            {visionActive ? `${visionFps}FPS` : 'OFF'}
+          <span className={`racing-text text-[7px] sm:text-[9px] font-bold ${isRunning ? 'text-cyan-400' : 'text-muted-foreground'}`}>
+            {isRunning ? `${currentHeading > 0 ? '+' : ''}${currentHeading.toFixed(0)}°` : 'OFF'}
           </span>
         </div>
         
-        {visionActive && cameraDetectionsCount > 0 ? (
+        {isRunning ? (
           <>
-            {/* Detected objects count */}
+            {/* Target vs Current heading */}
             <div className="flex items-center justify-between mb-0.5">
-              <span className="text-[6px] sm:text-[7px] text-muted-foreground">
-                {cameraDetectionsCount} detected{cameraInPathCount > 0 ? ` · ${cameraInPathCount} in path` : ''}
+              <span className="text-[6px] sm:text-[7px] text-muted-foreground">Target</span>
+              <span className={`racing-text text-[7px] sm:text-[9px] font-bold ${
+                Math.abs(targetYaw) > 30 ? 'text-amber-400' : 'text-cyan-400'
+              }`}>
+                {targetYaw > 0 ? '+' : ''}{targetYaw.toFixed(0)}°
               </span>
-              {cameraClosestObject && (
-                <span className={`racing-text text-[7px] sm:text-[9px] font-bold ${cameraDistanceWarning}`}>
-                  {cameraClosestObject} {cameraClosestConfidence}%
-                </span>
-              )}
             </div>
-            {/* Camera distance bar */}
-            <div className="w-full h-1 sm:h-1.5 bg-muted rounded-full overflow-hidden">
+            <div className="flex items-center justify-between mb-0.5">
+              <span className="text-[6px] sm:text-[7px] text-muted-foreground">Dodge</span>
+              <span className={`racing-text text-[7px] sm:text-[9px] font-bold ${
+                slalomSign > 0 ? 'text-cyan-400' : slalomSign < 0 ? 'text-amber-400' : 'text-muted-foreground'
+              }`}>
+                {slalomSign > 0 ? '→ RIGHT' : slalomSign < 0 ? '← LEFT' : '— NONE'}
+              </span>
+            </div>
+            {/* Yaw heading bar — center = 0°, left/right = drift */}
+            <div className="w-full h-1.5 sm:h-2 bg-muted rounded-full overflow-hidden relative">
+              <div className="absolute left-1/2 top-0 w-px h-full bg-muted-foreground/40" />
               <div
-                className={`h-full transition-all duration-200 rounded-full ${
-                  cameraObstacleDistance < 30
-                    ? "bg-gradient-to-r from-destructive/60 to-destructive"
-                    : cameraObstacleDistance < 80
-                      ? "bg-gradient-to-r from-warning/60 to-warning"
-                      : "bg-gradient-to-r from-violet-500/60 to-violet-500"
+                className={`absolute top-0 h-full rounded-full transition-all duration-200 ${
+                  currentHeading >= 0
+                    ? 'bg-gradient-to-r from-cyan-500/60 to-cyan-500'
+                    : 'bg-gradient-to-l from-cyan-500/60 to-cyan-500'
                 }`}
-                style={{ width: `${Math.min(100, (cameraObstacleDistance / 200) * 100)}%` }}
+                style={{
+                  left: currentHeading >= 0 ? '50%' : `${50 - Math.min(50, (Math.abs(currentHeading) / 60) * 50)}%`,
+                  width: `${Math.min(50, (Math.abs(currentHeading) / 60) * 50)}%`,
+                }}
               />
             </div>
             <div className="flex justify-between mt-0.5">
-              <span className={`text-[5px] sm:text-[6px] ${cameraDistanceWarning}`}>
-                {cameraObstacleDistance < 999 ? `${cameraObstacleDistance}cm` : '---'}
-              </span>
-              <span className="text-[5px] sm:text-[6px] text-muted-foreground">CAM DIST</span>
+              <span className="text-[5px] sm:text-[6px] text-muted-foreground">← L</span>
+              <span className="text-[5px] sm:text-[6px] text-muted-foreground">R →</span>
             </div>
           </>
         ) : (
           <div className="text-[6px] sm:text-[7px] text-muted-foreground text-center py-0.5">
-            {visionActive ? 'No objects detected' : 'Activates when driving forward'}
+            Yaw tracking activates on start
           </div>
         )}
       </div>
