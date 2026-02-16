@@ -16,6 +16,7 @@ interface CarTelemetryProps {
   cpuClock: number;
   gpuClock: number;
   rpm: number;
+  encoderAvailable?: boolean; // Whether real wheel encoder is providing RPM
   onLaunch: () => void;
   onDonut: () => void;
   isEngineRunning?: boolean;
@@ -35,6 +36,7 @@ export const CarTelemetry = ({
   cpuClock,
   gpuClock,
   rpm,
+  encoderAvailable = false,
   onLaunch,
   onDonut,
   isEngineRunning = false,
@@ -252,7 +254,7 @@ export const CarTelemetry = ({
             value={rpm}
             min={0}
             max={300}
-            label="RPM"
+            label={encoderAvailable ? "RPM" : "RPM (est.)"}
             unit=""
             isEngineRunning={isEngineRunning}
             warningThreshold={250}

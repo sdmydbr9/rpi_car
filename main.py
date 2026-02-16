@@ -440,65 +440,126 @@ def _reconfigure_camera(resolution_str, framerate):
     finally:
         _camera_restarting = False
 
+class CameraFrameBroadcaster:
+    """Shared camera frame broadcaster — one producer thread encodes frames,
+    all /video_feed clients consume from a shared buffer.
+    This prevents per-client encoding overhead and ensures all clients get frames."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+        self._frame = None          # Latest JPEG bytes
+        self._frame_id = 0          # Monotonic frame counter
+        self._running = False
+        self._thread = None
+        self._fps_frame_count = 0
+        self._fps_last_time = time.time()
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._producer_loop, daemon=True)
+        self._thread.start()
+        print("📷 [CameraBroadcaster] ✅ Producer thread started")
+
+    def stop(self):
+        self._running = False
+
+    def _producer_loop(self):
+        """Continuously capture, encode, and store the latest JPEG frame."""
+        while self._running:
+            try:
+                if not CAMERA_AVAILABLE or picam2 is None:
+                    car_state["camera_actual_fps"] = 0.0
+                    time.sleep(1)
+                    continue
+
+                # Wait during camera reconfiguration
+                if _camera_restarting:
+                    time.sleep(0.05)
+                    continue
+
+                # Check if camera is enabled
+                if not car_state["camera_enabled"]:
+                    car_state["camera_actual_fps"] = 0.0
+                    self._fps_frame_count = 0
+                    self._fps_last_time = time.time()
+                    time.sleep(0.1)
+                    continue
+
+                # Get annotated frame from vision system if available
+                frame = None
+                if VISION_AVAILABLE and vision_system is not None:
+                    frame = vision_system.get_frame()
+
+                # Fallback to raw capture if vision not ready
+                if frame is None:
+                    frame = picam2.capture_array()
+
+                # Convert BGR to RGB for standard color representation
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+                # Get current JPEG quality from car_state
+                jpeg_quality = car_state.get("camera_jpeg_quality", CAMERA_JPEG_QUALITY)
+                ret, buffer = cv2.imencode('.jpg', frame_rgb, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+                if not ret:
+                    continue
+                frame_bytes = buffer.tobytes()
+
+                # Measure actual streaming FPS
+                self._fps_frame_count += 1
+                now = time.time()
+                elapsed = now - self._fps_last_time
+                if elapsed >= 1.0:
+                    car_state["camera_actual_fps"] = round(self._fps_frame_count / elapsed, 1)
+                    self._fps_frame_count = 0
+                    self._fps_last_time = now
+
+                # Publish frame to all waiting consumers
+                with self._condition:
+                    self._frame = frame_bytes
+                    self._frame_id += 1
+                    self._condition.notify_all()
+
+            except Exception as e:
+                print(f"❌ [CameraBroadcaster] Frame error: {e}")
+                time.sleep(0.1)
+
+    def get_frame(self, timeout=2.0):
+        """Block until a new frame is available. Returns JPEG bytes or None on timeout."""
+        with self._condition:
+            current_id = self._frame_id
+            # Wait for a new frame (frame_id to change)
+            self._condition.wait_for(
+                lambda: self._frame_id != current_id or not self._running,
+                timeout=timeout
+            )
+            if not self._running:
+                return None
+            return self._frame
+
+
+# Create global broadcaster instance
+_camera_broadcaster = CameraFrameBroadcaster()
+
+
 def generate_camera_frames():
-    """Generator that yields MJPEG frames from the Pi camera.
-    Uses vision system's annotated frames (with detection overlays)
-    when available, otherwise falls back to raw camera capture.
-    Only streams frames when camera_enabled is True.
-    Applies cv2.cvtColor for standard color conversion."""
-    _fps_frame_count = 0
-    _fps_last_time = time.time()
+    """Generator that yields MJPEG frames from the shared broadcaster.
+    Each client gets its own generator but all consume from the same
+    pre-encoded frame — no per-client capture or JPEG encoding."""
     while True:
         try:
-            if not CAMERA_AVAILABLE or picam2 is None:
-                car_state["camera_actual_fps"] = 0.0
-                time.sleep(1)
-                continue
-            
-            # Wait during camera reconfiguration
-            if _camera_restarting:
-                time.sleep(0.05)
-                continue
-            
-            # Check if camera is enabled - if not, wait and continue
-            if not car_state["camera_enabled"]:
-                car_state["camera_actual_fps"] = 0.0
-                _fps_frame_count = 0
-                _fps_last_time = time.time()
+            frame_bytes = _camera_broadcaster.get_frame(timeout=2.0)
+            if frame_bytes is None:
+                # Timeout or stopped — yield nothing, keep connection alive
                 time.sleep(0.1)
                 continue
 
-            # Get annotated frame from vision system if available
-            frame = None
-            if VISION_AVAILABLE and vision_system is not None:
-                frame = vision_system.get_frame()
-
-            # Fallback to raw capture if vision not ready
-            if frame is None:
-                frame = picam2.capture_array()
-            
-            # Convert BGR to RGB for standard color representation
-            # Picamera2 captures in BGR888 format, convert to RGB for proper color display
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-            # Get current JPEG quality from car_state
-            jpeg_quality = car_state.get("camera_jpeg_quality", CAMERA_JPEG_QUALITY)
-            ret, buffer = cv2.imencode('.jpg', frame_rgb, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
-            if not ret:
-                continue
-            frame_bytes = buffer.tobytes()
-
-            # Measure actual streaming FPS
-            _fps_frame_count += 1
-            now = time.time()
-            elapsed = now - _fps_last_time
-            if elapsed >= 1.0:
-                car_state["camera_actual_fps"] = round(_fps_frame_count / elapsed, 1)
-                _fps_frame_count = 0
-                _fps_last_time = now
-
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        except GeneratorExit:
+            return
         except Exception as e:
             print(f"❌ Camera frame error: {e}")
             time.sleep(0.1)
@@ -2507,6 +2568,10 @@ encoder_thread = threading.Thread(target=encoder_calculation_thread, daemon=True
 encoder_thread.start()
 print("🔄 [Encoder] ✅ Encoder calculation thread started (200ms interval)")
 
+# Start camera frame broadcaster (single producer, multi-consumer)
+if CAMERA_AVAILABLE:
+    _camera_broadcaster.start()
+
 # Telemetry broadcast thread
 def telemetry_broadcast():
     """Broadcast telemetry data to all connected clients at 20Hz"""
@@ -2779,6 +2844,7 @@ if __name__ == "__main__":
         socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
     finally:
         # Safety cleanup — car_system.cleanup() stops PWMs + releases GPIO
+        _camera_broadcaster.stop()
         narration_engine.stop()
         autopilot.stop()
         car_system.cleanup()

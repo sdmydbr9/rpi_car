@@ -27,6 +27,7 @@ interface ControlState {
   cpuClock: number; // CPU clock speed in MHz
   gpuClock: number; // GPU clock speed in MHz
   rpm: number; // RPM
+  encoderAvailable: boolean; // Whether real encoder is available
 }
 
 // Helper function to convert old sensor format to new format
@@ -66,6 +67,7 @@ export const CockpitController = () => {
     cpuClock: 0,
     gpuClock: 0,
     rpm: 0,
+    encoderAvailable: false,
   });
   const [isConnected, setIsConnected] = useState(false);
   const [serverIp, setServerIp] = useState("");
@@ -227,7 +229,7 @@ export const CockpitController = () => {
             await socketClient.connectToServer(ip, 5000);
             setServerIp(ip);
             setIsConnected(true);
-            setStreamUrl(`http://${ip}:5000/video_feed`);
+            setStreamUrl(`http://${ip}:5000/video_feed?t=${Date.now()}`);
             console.log(`✅ [Startup] Successfully connected to ${ip}`);
             return true;
           } catch (error) {
@@ -430,13 +432,14 @@ export const CockpitController = () => {
         return {
           ...prev,
           gear: gearOverride ?? data.gear ?? prev.gear,
-          speed: data.current_pwm || prev.speed,
+          speed: data.current_pwm ?? prev.speed,
           speedMpm: data.speed_mpm !== undefined ? data.speed_mpm : prev.speedMpm,
           // Only show system metrics when engine is running
-          temperature: isEngineRunning ? (data.temperature || prev.temperature) : 0,
-          cpuClock: isEngineRunning ? (data.cpu_clock || prev.cpuClock) : 0,
-          gpuClock: isEngineRunning ? (data.gpu_clock || prev.gpuClock) : 0,
-          rpm: isEngineRunning ? (data.rpm || prev.rpm) : 0,
+          temperature: isEngineRunning ? (data.temperature ?? prev.temperature) : 0,
+          cpuClock: isEngineRunning ? (data.cpu_clock ?? prev.cpuClock) : 0,
+          gpuClock: isEngineRunning ? (data.gpu_clock ?? prev.gpuClock) : 0,
+          rpm: isEngineRunning ? (data.rpm ?? prev.rpm) : 0,
+          encoderAvailable: data.encoder_available ?? prev.encoderAvailable,
           // DO NOT update throttle and brake from telemetry - these are user-controlled inputs
           // that must maintain their state while held
         };
@@ -922,6 +925,7 @@ export const CockpitController = () => {
               cpuClock={controlState.cpuClock}
               gpuClock={controlState.gpuClock}
               rpm={controlState.rpm}
+              encoderAvailable={controlState.encoderAvailable}
               onLaunch={handleLaunch}
               onDonut={handleDonut}
               isEngineRunning={isEngineRunning}

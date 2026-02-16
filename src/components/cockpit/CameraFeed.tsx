@@ -1,5 +1,8 @@
-import { useState } from "react";
-import { Video, VideoOff, Mic } from "lucide-react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { Video, VideoOff, Mic, RefreshCw } from "lucide-react";
+
+const MAX_AUTO_RETRIES = 5;
+const RETRY_DELAY_MS = 2000;
 
 interface CameraFeedProps {
   isConnected: boolean;
@@ -14,8 +17,73 @@ interface CameraFeedProps {
 export const CameraFeed = ({ isConnected, streamUrl, isCameraEnabled = true, onToggleCamera, narrationEnabled = false, narrationSpeaking = false, narrationLastText = '' }: CameraFeedProps) => {
   const [hasError, setHasError] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
+  const [imgKey, setImgKey] = useState(0); // Force remount of <img> on retry
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prevStreamUrlRef = useRef(streamUrl);
 
-  const showStream = isCameraEnabled && isConnected && streamUrl && !hasError;
+  // Reset state when streamUrl changes (reconnect to different server)
+  useEffect(() => {
+    if (streamUrl !== prevStreamUrlRef.current) {
+      prevStreamUrlRef.current = streamUrl;
+      setHasError(false);
+      setIsLoaded(false);
+      setRetryCount(0);
+      setImgKey(k => k + 1);
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+    }
+  }, [streamUrl]);
+
+  // Reset retry count when camera is toggled back on
+  useEffect(() => {
+    if (isCameraEnabled) {
+      setRetryCount(0);
+      setHasError(false);
+      setIsLoaded(false);
+      setImgKey(k => k + 1);
+    }
+  }, [isCameraEnabled]);
+
+  // Clean up timer on unmount
+  useEffect(() => {
+    return () => {
+      if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+    };
+  }, []);
+
+  const handleError = useCallback(() => {
+    setHasError(true);
+    setIsLoaded(false);
+    // Auto-retry up to MAX_AUTO_RETRIES times
+    setRetryCount(prev => {
+      const next = prev + 1;
+      if (next <= MAX_AUTO_RETRIES) {
+        retryTimerRef.current = setTimeout(() => {
+          setHasError(false);
+          setImgKey(k => k + 1);
+        }, RETRY_DELAY_MS);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleManualRetry = useCallback(() => {
+    setRetryCount(0);
+    setHasError(false);
+    setIsLoaded(false);
+    setImgKey(k => k + 1);
+  }, []);
+
+  // Build the actual src with cache-busting per retry
+  const effectiveStreamUrl = streamUrl
+    ? `${streamUrl}${streamUrl.includes('?') ? '&' : '?'}retry=${imgKey}`
+    : undefined;
+
+  const showStream = isCameraEnabled && isConnected && effectiveStreamUrl && !hasError;
+  const permanentError = hasError && retryCount > MAX_AUTO_RETRIES;
 
   return (
     <div className="w-full h-full flex flex-col overflow-hidden">
@@ -41,25 +109,45 @@ export const CameraFeed = ({ isConnected, streamUrl, isCameraEnabled = true, onT
             {/* Live MJPEG stream */}
             {showStream && (
               <img
-                src={streamUrl}
+                key={imgKey}
+                src={effectiveStreamUrl}
                 alt="Live Camera Feed"
                 className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-300 ${isLoaded ? 'opacity-100' : 'opacity-0'}`}
-                onLoad={() => setIsLoaded(true)}
-                onError={() => setHasError(true)}
+                onLoad={() => { setIsLoaded(true); setRetryCount(0); }}
+                onError={handleError}
               />
             )}
 
             {/* Placeholder when no stream */}
             {!showStream && (
               <div className="absolute inset-0 flex flex-col items-center justify-center">
-                {hasError ? (
-                  <VideoOff className="w-3 h-3 sm:w-5 sm:h-5 text-destructive" />
+                {permanentError ? (
+                  <>
+                    <VideoOff className="w-3 h-3 sm:w-5 sm:h-5 text-destructive" />
+                    <span className="text-[5px] sm:text-[7px] text-muted-foreground racing-text mt-0.5">FEED ERROR</span>
+                    <button
+                      onClick={handleManualRetry}
+                      className="mt-1 flex items-center gap-0.5 px-2 py-0.5 text-[5px] sm:text-[6px] bg-primary/80 hover:bg-primary text-primary-foreground rounded border border-primary/50 transition-colors racing-text"
+                    >
+                      <RefreshCw className="w-2 h-2" />
+                      RETRY
+                    </button>
+                  </>
+                ) : hasError ? (
+                  <>
+                    <Video className="w-3 h-3 sm:w-5 sm:h-5 text-primary animate-pulse" />
+                    <span className="text-[5px] sm:text-[7px] text-muted-foreground racing-text mt-0.5">
+                      RECONNECTING ({retryCount}/{MAX_AUTO_RETRIES})
+                    </span>
+                  </>
                 ) : (
-                  <Video className={`w-3 h-3 sm:w-5 sm:h-5 ${isConnected ? 'text-primary animate-pulse' : 'text-muted-foreground'}`} />
+                  <>
+                    <Video className={`w-3 h-3 sm:w-5 sm:h-5 ${isConnected ? 'text-primary animate-pulse' : 'text-muted-foreground'}`} />
+                    <span className="text-[5px] sm:text-[7px] text-muted-foreground racing-text mt-0.5">
+                      {isConnected ? 'CONNECTING...' : 'NO SIGNAL'}
+                    </span>
+                  </>
                 )}
-                <span className="text-[5px] sm:text-[7px] text-muted-foreground racing-text mt-0.5">
-                  {hasError ? 'FEED ERROR' : isConnected ? 'CONNECTING...' : 'NO SIGNAL'}
-                </span>
               </div>
             )}
             
