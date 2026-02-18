@@ -260,10 +260,22 @@ class MotorDriver:
         self._car._last_l_fwd = True
         self._car._last_r_fwd = True
 
-    def reverse(self, speed, duration=0.8):
-        """Reverse at *speed* for *duration* seconds, then stop."""
+    def reverse(self, speed, duration=0.8, rear_sonar=None,
+                rear_clear_cm=20):
+        """Reverse at *speed* for *duration* seconds, then stop.
+
+        If *rear_sonar* (a Sonar instance) is provided, the rear distance
+        is checked every iteration and the car stops immediately when an
+        obstacle is closer than *rear_clear_cm*.
+        """
         end = time.time() + duration
         while time.time() < end:
+            # Continuous rear-obstacle check while reversing
+            if rear_sonar is not None:
+                rd = rear_sonar.read()
+                if 0 < rd < rear_clear_cm:
+                    print(f"    ⛔ Rear obstacle at {rd:.0f}cm — stopping reverse")
+                    break
             self._car.reverse(speed)
             time.sleep(0.02)
         self._car.stop()
@@ -364,13 +376,17 @@ class AutoPilot:
         "CALIBRATION_TIME", "STATUS_INTERVAL",
     ]
 
-    def __init__(self, car, get_sonar, get_ir, get_rear_sonar=None):
+    def __init__(self, car, get_sonar, get_ir, get_rear_sonar=None,
+                 sensor_system=None, get_rear_distance=None):
         self._motor = MotorDriver(car)
         self._car = car
 
         self._front_sonar = Sonar(get_sonar, "front")
-        self._rear_sonar = Sonar(get_rear_sonar, "rear")
+        # Accept rear sonar callable from either kwarg name
+        rear_fn = get_rear_sonar or get_rear_distance
+        self._rear_sonar = Sonar(rear_fn, "rear")
         self._get_ir = get_ir
+        self._sensor_system = sensor_system
 
         # Gyro — central to navigation (yaw tracking)
         self._gyro = MPU6050Sensor()
@@ -502,12 +518,15 @@ class AutoPilot:
         if not self._active:
             return
 
-        # 2. REVERSE (check rear first)
+        # 2. REVERSE (check rear sonar before AND during reverse)
         rear_dist = self._rear_sonar.read()
         if rear_dist < 0 or rear_dist > self.REAR_CLEAR_CM:
             print(f"    ↩️  Reversing {self.ESCAPE_REVERSE_TIME:.1f}s "
                   f"(rear: {rear_dist:.0f}cm)")
-            self._motor.reverse(self.ESCAPE_SPEED, self.ESCAPE_REVERSE_TIME)
+            self._motor.reverse(
+                self.ESCAPE_SPEED, self.ESCAPE_REVERSE_TIME,
+                rear_sonar=self._rear_sonar,
+                rear_clear_cm=self.REAR_CLEAR_CM)
         else:
             print(f"    ⛔ Rear blocked ({rear_dist:.0f}cm) — skip reverse")
 

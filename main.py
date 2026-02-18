@@ -22,7 +22,7 @@ from enum import Enum
 from collections import deque
 from sensors import SensorSystem
 from motor import CarSystem
-from autopilot import AutoPilot, State
+from autopilot_pid import AutoPilot, State
 from vision import VisionSystem
 from narration import NarrationEngine, validate_key as narration_validate_key, list_multimodal_models
 from kokoro_client import get_kokoro_client
@@ -607,15 +607,13 @@ except Exception as e:
 # CarSystem was already created above (before sensor init) to avoid
 # duplicate-PWM conflicts.  Only the autopilot wiring remains here.
 
-def _get_sonar_for_autopilot():
-    return get_smoothed_sonar()
+def _get_laser_for_autopilot():
+    """Read forward laser distance (smoothed) for the autopilot."""
+    return get_smoothed_laser()
 
-def _get_rear_sonar_for_autopilot():
-    """Read rear sonar distance via sensor_system."""
-    try:
-        return sensor_system.get_rear_sonar_distance()
-    except Exception:
-        return -1
+def _get_rear_for_autopilot():
+    """Read rear HC-SR04 sonar distance for the autopilot."""
+    return sensor_system.get_rear_sonar_distance()
 
 def _get_ir_for_autopilot():
     """Read IR sensors: True = obstacle detected (active LOW, inverted)."""
@@ -629,9 +627,10 @@ def _get_ir_for_autopilot():
 
 autopilot = AutoPilot(
     car_system,
-    _get_sonar_for_autopilot,
+    _get_laser_for_autopilot,
     _get_ir_for_autopilot,
-    _get_rear_sonar_for_autopilot,
+    sensor_system=sensor_system,
+    get_rear_distance=_get_rear_for_autopilot,
 )
 
 # Store a copy of the original class-level defaults (immutable reference for reset)
@@ -673,6 +672,7 @@ car_state = {
     # 🤖 AUTONOMOUS DRIVING MODE
     "autonomous_mode": False,  # Smart Driver autonomous mode toggle
     "autonomous_state": State.CRUISING.value,  # Current autonomous driving state (read from AutoPilot)
+    "laser_scan_data": [],                        # Latest sweep scan data [{angle, distance}, ...]
     "last_obstacle_side": "none",  # Track which side detected obstacle for escape logic
     # 🧭 Slalom yaw-tracking telemetry
     "target_yaw": 0.0,              # Target yaw heading (degrees)
@@ -733,26 +733,28 @@ HEARTBEAT_INTERVAL = 2.0  # Send ping every 2 seconds
 HEARTBEAT_TIMEOUT = 5.0   # Declare client dead if no pong for 5 seconds
 
 # ==========================================
-# 📡 SONAR MOVING-AVERAGE FILTER
+# 📡 LASER MOVING-AVERAGE FILTER
 # ==========================================
-# Circular buffer of last 5 sonar readings for noise rejection.
-# At 50Hz read rate, this spans ~100ms — fast enough for real-time,
-# smooth enough to reject single bad readings.
-sonar_buffer = deque(maxlen=5)
+# Circular buffer of last 5 laser readings for noise rejection.
+# At 20Hz autopilot rate, this spans ~250ms — fast enough for
+# real-time, smooth enough to reject single bad readings.
+laser_buffer = deque(maxlen=5)
 
-def get_smoothed_sonar():
-    """Read sonar and return a moving-average smoothed distance."""
+def get_smoothed_laser():
+    """Read forward laser and return a moving-average smoothed distance."""
     try:
-        raw = sensor_system.get_sonar_distance()
+        raw = sensor_system.read_laser_cm()
     except:
         raw = -1
-    # Only add valid readings to the buffer
     if raw > 0:
-        sonar_buffer.append(raw)
-    # Return average of buffer, or safe default if empty
-    if sonar_buffer:
-        return sum(sonar_buffer) / len(sonar_buffer)
+        laser_buffer.append(raw)
+    if laser_buffer:
+        return sum(laser_buffer) / len(laser_buffer)
     return 100  # Safe default
+
+# Backward-compat alias used by physics_loop
+def get_smoothed_sonar():
+    return get_smoothed_laser()
 
 # ==========================================
 # 🚨 SENSOR HEALTH CHECK
@@ -775,12 +777,12 @@ def check_sensor_health():
     has_error = False
     
     try:
-        # Check Front Sonar
-        dist_front = sensor_system.get_sonar_distance()
+        # Check Front Laser (VL53L0X)
+        dist_front = sensor_system.read_laser_cm()
         if dist_front == -1:
             sensor_status["front_sonar"] = "FAILED"
             has_error = True
-        elif dist_front < 5:
+        elif dist_front < 2:
             sensor_status["front_sonar"] = "WARNING"
             has_error = True
         else:
@@ -789,20 +791,8 @@ def check_sensor_health():
         sensor_status["front_sonar"] = "FAILED"
         has_error = True
     
-    try:
-        # Check Rear Sonar
-        dist_rear = sensor_system.get_rear_sonar_distance()
-        if dist_rear == -1:
-            sensor_status["rear_sonar"] = "FAILED"
-            has_error = True
-        elif dist_rear < 5:
-            sensor_status["rear_sonar"] = "WARNING"
-            has_error = True
-        else:
-            sensor_status["rear_sonar"] = "OK"
-    except Exception as e:
-        sensor_status["rear_sonar"] = "FAILED"
-        has_error = True
+    # Rear sonar removed — always mark OK (no hardware to fail)
+    sensor_status["rear_sonar"] = "OK"
     
     try:
         # Check IR Sensors
@@ -904,9 +894,9 @@ def physics_loop():
         car_state["left_obstacle"] = left_obstacle
         car_state["right_obstacle"] = right_obstacle
         
-        # --- CHECK SONAR SENSOR (Moving-Average Filtered) ---
+        # --- CHECK LASER SENSOR (Moving-Average Filtered) ---
         if car_state["sonar_enabled"]:
-            sonar_distance = get_smoothed_sonar()
+            sonar_distance = get_smoothed_laser()
         else:
             sonar_distance = 100  # Default safe distance when disabled
         
@@ -1363,10 +1353,22 @@ def drive_autonomous():
         car_state["gyro_available"] = autopilot.gyro_available
         car_state["gyro_calibrated"] = autopilot.gyro_calibrated
 
-        # Mirror slalom yaw-tracking telemetry
+        # Mirror yaw-tracking telemetry
         car_state["target_yaw"] = round(autopilot.target_yaw, 1)
         car_state["current_heading"] = round(autopilot.current_heading, 1)
         car_state["slalom_sign"] = autopilot.slalom_sign
+
+        # Emit fresh laser scan data to UI clients
+        if autopilot.scan_data_fresh:
+            scan_payload = [
+                {"angle": a, "distance": round(d, 1)}
+                for a, d in autopilot.last_scan_data
+            ]
+            car_state["laser_scan_data"] = scan_payload
+            try:
+                socketio.emit('laser_scan', {'scan': scan_payload})
+            except Exception:
+                pass
 
         time.sleep(0.05)  # 20 Hz
 
@@ -1575,11 +1577,11 @@ def enable_autonomous():
     car_state["autonomous_mode"] = True
     car_state["autonomous_state"] = State.CRUISING.value
     car_state["last_obstacle_side"] = "none"
-    # Force IR and Sonar sensors enabled in autonomous mode for safety
+    # Force IR sensors enabled in autonomous mode for safety
     car_state["ir_enabled"] = True
     car_state["sonar_enabled"] = True
     autopilot.start()
-    print(f"🤖 SMART DRIVER: ENABLED - Autonomous driving active (slalom mode)")
+    print(f"🤖 SMART DRIVER: ENABLED - Laser-scanner autonomous active")
     return "AUTONOMOUS_ENABLED"
 
 @app.route("/autonomous_disable")
@@ -2161,8 +2163,6 @@ def on_autonomous_enable(data):
     """Handle Smart Driver autonomous mode enable"""
     # Check required sensors are enabled before starting autopilot
     disabled_sensors = []
-    if not car_state["sonar_enabled"]:
-        disabled_sensors.append("Front Sonar")
     if not car_state["ir_enabled"]:
         disabled_sensors.append("Left IR")
         disabled_sensors.append("Right IR")
@@ -2177,12 +2177,12 @@ def on_autonomous_enable(data):
     car_state["autonomous_mode"] = True
     car_state["autonomous_state"] = State.CRUISING.value
     car_state["last_obstacle_side"] = "none"
-    # Force IR and Sonar sensors enabled in autonomous mode for safety
+    # Force IR sensors enabled in autonomous mode for safety
     car_state["ir_enabled"] = True
-    car_state["sonar_enabled"] = True
+    car_state["sonar_enabled"] = True  # keep flag for UI compat (now reads laser)
     autopilot.start()
-    print(f"\n⚙️ [UI Control] 🤖 SMART DRIVER: ENABLED - Slalom yaw-tracking active")
-    print(f"📡 SAFETY: IR and Sonar sensors force-enabled in autonomous mode")
+    print(f"\n⚙️ [UI Control] 🤖 SMART DRIVER: ENABLED - Laser-scanner autonomous active")
+    print(f"📡 SAFETY: IR sensors force-enabled in autonomous mode")
     emit('autonomous_response', {'status': 'ok', 'autonomous_enabled': True})
 
 @socketio.on('autonomous_disable')
