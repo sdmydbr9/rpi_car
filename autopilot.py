@@ -237,11 +237,12 @@ class MotorDriver:
         rl = left_speed * rl_trim
         rr = right_speed * rr_trim
 
-        # Clamp after trim
-        fl = max(0, min(100, fl))
-        fr = max(0, min(100, fr))
-        rl = max(0, min(100, rl))
-        rr = max(0, min(100, rr))
+        # Clamp after trim — hard-cap to MAX_PWM_DUTY (voltage protection)
+        from motor import MAX_PWM_DUTY
+        fl = max(0, min(MAX_PWM_DUTY, fl))
+        fr = max(0, min(MAX_PWM_DUTY, fr))
+        rl = max(0, min(MAX_PWM_DUTY, rl))
+        rr = max(0, min(MAX_PWM_DUTY, rr))
 
         # Direct per-wheel PWM for trim support
         self._car.pwm_fl.ChangeDutyCycle(int(fl))

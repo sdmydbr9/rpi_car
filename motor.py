@@ -19,6 +19,16 @@ import os
 
 
 # ──────────────────────────────────────────────
+# Voltage-based PWM hard limit
+# ──────────────────────────────────────────────
+# Motors are rated 6 V; supply is 3 × 3.7 V = 11.1 V.
+# Hard-cap the duty cycle so the effective voltage never exceeds 7 V,
+# protecting the motors from premature burnout.
+BATTERY_VOLTAGE   = 11.1   # 3S Li-ion pack (3 × 3.7 V)
+MOTOR_MAX_VOLTAGE = 7.0    # Absolute max voltage the motors should see
+MAX_PWM_DUTY      = round(MOTOR_MAX_VOLTAGE / BATTERY_VOLTAGE * 100)  # ≈ 63 %
+
+# ──────────────────────────────────────────────
 # Motor safety constants
 # ──────────────────────────────────────────────
 MOTOR_SAFETY = {
@@ -330,32 +340,32 @@ class CarSystem:
         # Clamp the requested duty cycle and step toward it at most
         # max_delta per tick.  This gives a soft-start / soft-stop
         # at the hardware layer regardless of what the caller asks.
-        target_l = float(max(0, min(100, speed_l)))
-        target_r = float(max(0, min(100, speed_r)))
+        target_l = float(max(0, min(MAX_PWM_DUTY, speed_l)))
+        target_r = float(max(0, min(MAX_PWM_DUTY, speed_r)))
 
         # Front-Left ramp
         delta_fl = target_l - self._applied_duty_fl
         if abs(delta_fl) > max_delta:
             delta_fl = max_delta if delta_fl > 0 else -max_delta
-        self._applied_duty_fl = max(0.0, min(100.0, self._applied_duty_fl + delta_fl))
+        self._applied_duty_fl = max(0.0, min(float(MAX_PWM_DUTY), self._applied_duty_fl + delta_fl))
 
         # Front-Right ramp
         delta_fr = target_r - self._applied_duty_fr
         if abs(delta_fr) > max_delta:
             delta_fr = max_delta if delta_fr > 0 else -max_delta
-        self._applied_duty_fr = max(0.0, min(100.0, self._applied_duty_fr + delta_fr))
+        self._applied_duty_fr = max(0.0, min(float(MAX_PWM_DUTY), self._applied_duty_fr + delta_fr))
 
         # Rear-Left ramp
         delta_rl = target_l - self._applied_duty_rl
         if abs(delta_rl) > max_delta:
             delta_rl = max_delta if delta_rl > 0 else -max_delta
-        self._applied_duty_rl = max(0.0, min(100.0, self._applied_duty_rl + delta_rl))
+        self._applied_duty_rl = max(0.0, min(float(MAX_PWM_DUTY), self._applied_duty_rl + delta_rl))
 
         # Rear-Right ramp
         delta_rr = target_r - self._applied_duty_rr
         if abs(delta_rr) > max_delta:
             delta_rr = max_delta if delta_rr > 0 else -max_delta
-        self._applied_duty_rr = max(0.0, min(100.0, self._applied_duty_rr + delta_rr))
+        self._applied_duty_rr = max(0.0, min(float(MAX_PWM_DUTY), self._applied_duty_rr + delta_rr))
 
         self.pwm_fl.ChangeDutyCycle(int(self._applied_duty_fl))
         self.pwm_fr.ChangeDutyCycle(int(self._applied_duty_fr))
@@ -386,7 +396,7 @@ class CarSystem:
 
     def set_speed(self, speed):
         """Drive forward at *speed* (0-100) using the current steering angle."""
-        speed = max(0, min(100, speed))
+        speed = max(0, min(MAX_PWM_DUTY, speed))
         self._current_speed = speed
         self._apply_steering(speed, self._steering_angle, forward=True)
 
@@ -402,14 +412,14 @@ class CarSystem:
 
     def reverse(self, speed):
         """Drive both motors in reverse at *speed* (0-100). Steering centred."""
-        speed = max(0, min(100, speed))
+        speed = max(0, min(MAX_PWM_DUTY, speed))
         self._current_speed = speed
         self._set_raw_motors(speed, speed, False, False)
 
     def reverse_steer(self, speed, angle):
         """Reverse with differential steering for angled escape maneuvers.
         *angle*: -90 (bias left while reversing) to +90 (bias right)."""
-        speed = max(0, min(100, speed))
+        speed = max(0, min(MAX_PWM_DUTY, speed))
         angle = max(-90, min(90, angle))
         self._current_speed = speed
         self._apply_steering(speed, angle, forward=False)
@@ -420,7 +430,7 @@ class CarSystem:
         *direction*: "left" or "right".
         *speed*: PWM % for both motors (default 50).
         """
-        speed = max(0, min(100, speed))
+        speed = max(0, min(MAX_PWM_DUTY, speed))
         if direction == "left":
             # Left motor reverse, Right motor forward → car spins left
             self._set_raw_motors(speed, speed, False, True)
@@ -449,19 +459,20 @@ class CarSystem:
         # All 8 direction pins HIGH — all 4 motors brake simultaneously
         GPIO.output(self.ALL_DIR_PINS, True)
 
-        # Ramp braking PWM from current level to 100 %
+        # Ramp braking PWM from current level to MAX_PWM_DUTY %
+        brake_cap = MAX_PWM_DUTY  # Never exceed voltage limit, even when braking
         for i in range(1, steps + 1):
-            duty = int(start_duty + (100 - start_duty) * (i / steps))
+            duty = int(start_duty + (brake_cap - start_duty) * (i / steps))
             self.pwm_fl.ChangeDutyCycle(duty)
             self.pwm_fr.ChangeDutyCycle(duty)
             self.pwm_rl.ChangeDutyCycle(duty)
             self.pwm_rr.ChangeDutyCycle(duty)
             time.sleep(0.01)
 
-        self.pwm_fl.ChangeDutyCycle(100)
-        self.pwm_fr.ChangeDutyCycle(100)
-        self.pwm_rl.ChangeDutyCycle(100)
-        self.pwm_rr.ChangeDutyCycle(100)
+        self.pwm_fl.ChangeDutyCycle(brake_cap)
+        self.pwm_fr.ChangeDutyCycle(brake_cap)
+        self.pwm_rl.ChangeDutyCycle(brake_cap)
+        self.pwm_rr.ChangeDutyCycle(brake_cap)
 
         self._current_speed = 0
         self._applied_duty_fl = 0.0

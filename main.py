@@ -68,6 +68,7 @@ EMERGENCY_BRAKE_RATE = 5.0  # Emergency brake deceleration (faster stop on obsta
 FREQ = 1000         # PWM Frequency (Hz)
 
 # --- MOTOR PROTECTION ---
+from motor import MAX_PWM_DUTY  # Voltage-based PWM hard limit (~63 %)
 STEER_RATE_LIMIT_PER_TICK = 10   # Max degrees steering change per 20 ms tick (500°/s)
 MIN_SPEED_FOR_GEAR_CHANGE = 5.0  # Max current_pwm to allow forward↔reverse gear switch
 BRAKE_DECEL_RATE = 3.0           # Brake ramp-down rate (%/tick) — ~150 %/s, ~670 ms to stop from 100
@@ -1160,7 +1161,7 @@ def physics_loop():
                         target = car_state["speed_limit"] if (gas and gear != "N") else 0
                     else:
                         # Use gear-based speeds (original behavior)
-                        ranges = {"N": (0,0), "R": (0,80), "1": (0,40), "2": (40,60), "3": (60,80), "S": (80,100)}
+                        ranges = {"N": (0,0), "R": (0,min(80, MAX_PWM_DUTY)), "1": (0,min(40, MAX_PWM_DUTY)), "2": (40,min(60, MAX_PWM_DUTY)), "3": (min(60, MAX_PWM_DUTY),MAX_PWM_DUTY), "S": (min(60, MAX_PWM_DUTY),MAX_PWM_DUTY)}
                         min_s, max_s = ranges.get(gear, (0,40))
                         target = max_s if (gas and gear != "N") else 0
                         if gas and current < min_s: current = min_s
@@ -1179,6 +1180,9 @@ def physics_loop():
                         elif sonar_distance < SONAR_CAUTION_DISTANCE:
                             # Getting close - moderate speed (40% max)
                             target = min(target, 40)
+                    
+                    # Hard voltage cap on any target
+                    target = min(target, MAX_PWM_DUTY)
                     
                     # Smooth Ramping
                     if current < target: current += ACCEL_RATE
@@ -1210,7 +1214,7 @@ def physics_loop():
             if car_state["speed_limit_enabled"]:
                 target = car_state["speed_limit"] if gas else 0
             else:
-                ranges = {"N": (0,0), "R": (0,80), "1": (0,40), "2": (40,60), "3": (60,80), "S": (80,100)}
+                ranges = {"N": (0,0), "R": (0,min(80, MAX_PWM_DUTY)), "1": (0,min(40, MAX_PWM_DUTY)), "2": (40,min(60, MAX_PWM_DUTY)), "3": (min(60, MAX_PWM_DUTY),MAX_PWM_DUTY), "S": (min(60, MAX_PWM_DUTY),MAX_PWM_DUTY)}
                 min_s, max_s = ranges.get(gear, (0,40))
                 target = max_s if gas else 0
                 if gas and current < min_s: current = min_s
@@ -1225,6 +1229,9 @@ def physics_loop():
                     target = min(target, 15)
                 elif sonar_distance < SONAR_CAUTION_DISTANCE:
                     target = min(target, 40)
+            
+            # Hard voltage cap on any target
+            target = min(target, MAX_PWM_DUTY)
             
             # Smooth Ramping
             if current < target: current += ACCEL_RATE

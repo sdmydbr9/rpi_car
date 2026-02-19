@@ -1,6 +1,6 @@
 <?xml version="1.0" ?>
 <!--
-    URDF for Raspberry Pi 4WD Autonomous RC Car
+    URDF for Raspberry Pi 4WD Autonomous RC Car - Gazebo Ready
     
     Robot Structure:
     - Chassis: Main body
@@ -8,8 +8,31 @@
     - Sensors: Front/Rear Sonar (HC-SR04), IR sensors, MPU-6050 IMU, Camera
     - Computing: Raspberry Pi 3B+
     - Motor Drivers: 2x L298N
+    
+    Gazebo Plugins:
+    - libgazebo_ros_camera.so: Camera sensor simulation
+    - libgazebo_ros_imu_sensor.so: IMU sensor simulation
+    - libgazebo_ros_skid_steer_drive.so: Skid steer drive controller
 -->
+
 <robot name="rpi_rc_car">
+  
+  <!-- ===== BASE FOOTPRINT ===== -->
+  <!-- The base_footprint is a reference frame for navigation and path planning -->
+  <link name="base_footprint">
+    <inertial>
+      <mass value="0.0001"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.000001" ixy="0.0" ixz="0.0" iyy="0.000001" iyz="0.0" izz="0.000001"/>
+    </inertial>
+  </link>
+  
+  <!-- Fixed joint from base_footprint to base_link -->
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0.025" rpy="0 0 0"/>
+  </joint>
   
   <!-- ===== ROBOT BASE (CHASSIS) ===== -->
   <link name="base_link">
@@ -37,6 +60,11 @@
     </visual>
   </link>
   
+  <!-- Gazebo material for chassis -->
+  <gazebo reference="base_link">
+    <material>Gazebo/DarkGrey</material>
+  </gazebo>
+  
   <!-- ===== WHEELS ===== -->
   
   <!-- Front Left Wheel -->
@@ -48,14 +76,14 @@
     </inertial>
     
     <collision>
-      <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
       <geometry>
         <cylinder radius="0.033" length="0.030"/>
       </geometry>
     </collision>
     
     <visual>
-      <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
       <geometry>
         <cylinder radius="0.033" length="0.030"/>
       </geometry>
@@ -74,6 +102,17 @@
     <limit effort="5.0" velocity="20.0"/>
   </joint>
   
+  <!-- Front Left Wheel Gazebo Properties (Friction) -->
+  <gazebo reference="wheel_front_left">
+    <material>Gazebo/Black</material>
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+    <kp>1000000.0</kp>
+    <kd>100.0</kd>
+    <minDepth>0.001</minDepth>
+    <maxVel>0.1</maxVel>
+  </gazebo>
+  
   <!-- Front Right Wheel -->
   <link name="wheel_front_right">
     <inertial>
@@ -83,14 +122,14 @@
     </inertial>
     
     <collision>
-      <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
       <geometry>
         <cylinder radius="0.033" length="0.030"/>
       </geometry>
     </collision>
     
     <visual>
-      <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
       <geometry>
         <cylinder radius="0.033" length="0.030"/>
       </geometry>
@@ -109,6 +148,17 @@
     <limit effort="5.0" velocity="20.0"/>
   </joint>
   
+  <!-- Front Right Wheel Gazebo Properties (Friction) -->
+  <gazebo reference="wheel_front_right">
+    <material>Gazebo/Black</material>
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+    <kp>1000000.0</kp>
+    <kd>100.0</kd>
+    <minDepth>0.001</minDepth>
+    <maxVel>0.1</maxVel>
+  </gazebo>
+  
   <!-- Rear Left Wheel -->
   <link name="wheel_rear_left">
     <inertial>
@@ -118,14 +168,14 @@
     </inertial>
     
     <collision>
-      <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
       <geometry>
         <cylinder radius="0.033" length="0.030"/>
       </geometry>
     </collision>
     
     <visual>
-      <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
       <geometry>
         <cylinder radius="0.033" length="0.030"/>
       </geometry>
@@ -144,6 +194,17 @@
     <limit effort="5.0" velocity="20.0"/>
   </joint>
   
+  <!-- Rear Left Wheel Gazebo Properties (Friction) -->
+  <gazebo reference="wheel_rear_left">
+    <material>Gazebo/Black</material>
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+    <kp>1000000.0</kp>
+    <kd>100.0</kd>
+    <minDepth>0.001</minDepth>
+    <maxVel>0.1</maxVel>
+  </gazebo>
+  
   <!-- Rear Right Wheel -->
   <link name="wheel_rear_right">
     <inertial>
@@ -153,14 +214,14 @@
     </inertial>
     
     <collision>
-      <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
       <geometry>
         <cylinder radius="0.033" length="0.030"/>
       </geometry>
     </collision>
     
     <visual>
-      <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
       <geometry>
         <cylinder radius="0.033" length="0.030"/>
       </geometry>
@@ -178,6 +239,17 @@
     <axis xyz="0 1 0"/>
     <limit effort="5.0" velocity="20.0"/>
   </joint>
+  
+  <!-- Rear Right Wheel Gazebo Properties (Friction) -->
+  <gazebo reference="wheel_rear_right">
+    <material>Gazebo/Black</material>
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+    <kp>1000000.0</kp>
+    <kd>100.0</kd>
+    <minDepth>0.001</minDepth>
+    <maxVel>0.1</maxVel>
+  </gazebo>
   
   <!-- ===== SENSORS ===== -->
   
@@ -239,8 +311,55 @@
     <child link="laser_scanner"/>
     <origin xyz="0 0 0.015" rpy="0 0 0"/>
     <axis xyz="0 0 1"/>
-    <limit lower="${-pi/3}" upper="${pi/3}" effort="1.0" velocity="5.24"/>
+    <limit lower="-1.047197551" upper="1.047197551" effort="1.0" velocity="5.24"/>
   </joint>
+  
+  <!-- Gazebo Ray Sensor Plugin for VL53L0X Laser Scanner (I2C, GPIO21 servo) -->
+  <gazebo reference="laser_scanner">
+    <material>Gazebo/Red</material>
+    <sensor name="laser_scanner_sensor" type="ray">
+      <always_on>true</always_on>
+      <visualize>false</visualize>
+      <update_rate>10</update_rate>
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>1</samples>
+            <resolution>1</resolution>
+            <min_angle>0</min_angle>
+            <max_angle>0</max_angle>
+          </horizontal>
+          <vertical>
+            <samples>1</samples>
+            <resolution>1</resolution>
+            <min_angle>0</min_angle>
+            <max_angle>0</max_angle>
+          </vertical>
+        </scan>
+        <range>
+          <min>0.03</min>
+          <max>1.2</max>
+          <resolution>0.01</resolution>
+        </range>
+        <noise>
+          <type>gaussian</type>
+          <mean>0.0</mean>
+          <stddev>0.005</stddev>
+        </noise>
+      </ray>
+      <plugin name="laser_scanner_plugin" filename="libgazebo_ros_ray_sensor.so">
+        <ros>
+          <remapping>~/out:=scan</remapping>
+        </ros>
+        <output_type>sensor_msgs/Range</output_type>
+        <frame_name>laser_scanner</frame_name>
+        <radiation_type>infrared</radiation_type>
+        <fov>0.0349</fov>
+        <min_range>0.03</min_range>
+        <max_range>1.2</max_range>
+      </plugin>
+    </sensor>
+  </gazebo>
   
   <!-- IR Left Sensor -->
   <link name="ir_left">
@@ -294,6 +413,180 @@
     <origin xyz="0.080 -0.035 0.08" rpy="0 0 0"/>
   </joint>
   
+  <!-- Gazebo Ray Sensor Plugin for IR Left (GPIO 5) -->
+  <gazebo reference="ir_left">
+    <material>Gazebo/Red</material>
+    <sensor name="ir_left_sensor" type="ray">
+      <always_on>true</always_on>
+      <visualize>false</visualize>
+      <update_rate>30</update_rate>
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>1</samples>
+            <resolution>1</resolution>
+            <min_angle>0</min_angle>
+            <max_angle>0</max_angle>
+          </horizontal>
+          <vertical>
+            <samples>1</samples>
+            <resolution>1</resolution>
+            <min_angle>0</min_angle>
+            <max_angle>0</max_angle>
+          </vertical>
+        </scan>
+        <range>
+          <min>0.02</min>
+          <max>0.5</max>
+          <resolution>0.01</resolution>
+        </range>
+        <noise>
+          <type>gaussian</type>
+          <mean>0.0</mean>
+          <stddev>0.01</stddev>
+        </noise>
+      </ray>
+      <plugin name="ir_left_plugin" filename="libgazebo_ros_ray_sensor.so">
+        <ros>
+          <remapping>~/out:=ir_left</remapping>
+        </ros>
+        <output_type>sensor_msgs/Range</output_type>
+        <frame_name>ir_left</frame_name>
+        <radiation_type>infrared</radiation_type>
+        <fov>0.2618</fov>
+        <min_range>0.02</min_range>
+        <max_range>0.5</max_range>
+      </plugin>
+    </sensor>
+  </gazebo>
+  
+  <!-- Gazebo Ray Sensor Plugin for IR Right (GPIO 6) -->
+  <gazebo reference="ir_right">
+    <material>Gazebo/Red</material>
+    <sensor name="ir_right_sensor" type="ray">
+      <always_on>true</always_on>
+      <visualize>false</visualize>
+      <update_rate>30</update_rate>
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>1</samples>
+            <resolution>1</resolution>
+            <min_angle>0</min_angle>
+            <max_angle>0</max_angle>
+          </horizontal>
+          <vertical>
+            <samples>1</samples>
+            <resolution>1</resolution>
+            <min_angle>0</min_angle>
+            <max_angle>0</max_angle>
+          </vertical>
+        </scan>
+        <range>
+          <min>0.02</min>
+          <max>0.5</max>
+          <resolution>0.01</resolution>
+        </range>
+        <noise>
+          <type>gaussian</type>
+          <mean>0.0</mean>
+          <stddev>0.01</stddev>
+        </noise>
+      </ray>
+      <plugin name="ir_right_plugin" filename="libgazebo_ros_ray_sensor.so">
+        <ros>
+          <remapping>~/out:=ir_right</remapping>
+        </ros>
+        <output_type>sensor_msgs/Range</output_type>
+        <frame_name>ir_right</frame_name>
+        <radiation_type>infrared</radiation_type>
+        <fov>0.2618</fov>
+        <min_range>0.02</min_range>
+        <max_range>0.5</max_range>
+      </plugin>
+    </sensor>
+  </gazebo>
+  
+  <!-- Rear HC-SR04 Ultrasonic Sonar (TRIG=GPIO25, ECHO=GPIO24) -->
+  <link name="sonar_rear">
+    <inertial>
+      <mass value="0.020"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.000001" ixy="0.0" ixz="0.0" iyy="0.000001" iyz="0.0" izz="0.000001"/>
+    </inertial>
+    
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.040 0.020 0.020"/>
+      </geometry>
+    </collision>
+    
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.040 0.020 0.020"/>
+      </geometry>
+      <material name="sonar_color">
+        <color rgba="0.8 0.8 0.8 1.0"/>
+      </material>
+    </visual>
+  </link>
+  
+  <!-- Rear Sonar Joint (fixed to rear of chassis) -->
+  <joint name="sonar_rear_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="sonar_rear"/>
+    <origin xyz="-0.095 0 0.08" rpy="0 0 3.14159"/>
+  </joint>
+  
+  <!-- Gazebo Ray Sensor Plugin for Rear Sonar (GPIO25/24) -->
+  <gazebo reference="sonar_rear">
+    <material>Gazebo/Gray</material>
+    <sensor name="sonar_rear_sensor" type="ray">
+      <always_on>true</always_on>
+      <visualize>false</visualize>
+      <update_rate>20</update_rate>
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>1</samples>
+            <resolution>1</resolution>
+            <min_angle>0</min_angle>
+            <max_angle>0</max_angle>
+          </horizontal>
+          <vertical>
+            <samples>1</samples>
+            <resolution>1</resolution>
+            <min_angle>0</min_angle>
+            <max_angle>0</max_angle>
+          </vertical>
+        </scan>
+        <range>
+          <min>0.02</min>
+          <max>4.0</max>
+          <resolution>0.01</resolution>
+        </range>
+        <noise>
+          <type>gaussian</type>
+          <mean>0.0</mean>
+          <stddev>0.02</stddev>
+        </noise>
+      </ray>
+      <plugin name="sonar_rear_plugin" filename="libgazebo_ros_ray_sensor.so">
+        <ros>
+          <remapping>~/out:=sonar/rear</remapping>
+        </ros>
+        <output_type>sensor_msgs/Range</output_type>
+        <frame_name>sonar_rear</frame_name>
+        <radiation_type>ultrasound</radiation_type>
+        <fov>0.5236</fov>
+        <min_range>0.02</min_range>
+        <max_range>4.0</max_range>
+      </plugin>
+    </sensor>
+  </gazebo>
+  
   <!-- Camera (Pi Camera or USB) -->
   <link name="camera">
     <inertial>
@@ -327,6 +620,36 @@
     <origin xyz="0.075 0 0.09" rpy="0 0.2 0"/>
   </joint>
   
+  <!-- Camera Gazebo Plugin -->
+  <gazebo reference="camera">
+    <material>Gazebo/Black</material>
+    <sensor name="camera_sensor" type="camera">
+      <camera>
+        <horizontal_fov>1.047</horizontal_fov>
+        <image>
+          <width>640</width>
+          <height>480</height>
+          <format>R8G8B8</format>
+        </image>
+        <clip>
+          <near>0.05</near>
+          <far>100.0</far>
+        </clip>
+      </camera>
+      <always_on>1</always_on>
+      <update_rate>30</update_rate>
+      <visualize>1</visualize>
+      <plugin name="camera_plugin" filename="libgazebo_ros_camera.so">
+        <ros>
+          <remapping>~/image_raw:=camera/image_raw</remapping>
+          <remapping>~/camera_info:=camera/camera_info</remapping>
+        </ros>
+        <camera_name>camera</camera_name>
+        <frame_name>camera</frame_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+  
   <!-- MPU-6050 IMU -->
   <link name="imu">
     <inertial>
@@ -353,6 +676,64 @@
     <origin xyz="0.0 0.0 0.06" rpy="0 0 0"/>
   </joint>
   
+  <!-- IMU Gazebo Plugin -->
+  <gazebo reference="imu">
+    <material>Gazebo/Blue</material>
+    <sensor name="imu_sensor" type="imu">
+      <plugin filename="libgazebo_ros_imu_sensor.so" name="imu_plugin">
+        <ros>
+          <remapping>~/out:=imu/data</remapping>
+        </ros>
+        <initial_orientation_as_reference>0</initial_orientation_as_reference>
+      </plugin>
+      <always_on>1</always_on>
+      <update_rate>50</update_rate>
+      <visualize>0</visualize>
+      <imu>
+        <angular_velocity>
+          <x>
+            <noise type="gaussian">
+              <mean>0.0</mean>
+              <stddev>0.009</stddev>
+            </noise>
+          </x>
+          <y>
+            <noise type="gaussian">
+              <mean>0.0</mean>
+              <stddev>0.009</stddev>
+            </noise>
+          </y>
+          <z>
+            <noise type="gaussian">
+              <mean>0.0</mean>
+              <stddev>0.009</stddev>
+            </noise>
+          </z>
+        </angular_velocity>
+        <linear_acceleration>
+          <x>
+            <noise type="gaussian">
+              <mean>0.0</mean>
+              <stddev>0.021</stddev>
+            </noise>
+          </x>
+          <y>
+            <noise type="gaussian">
+              <mean>0.0</mean>
+              <stddev>0.021</stddev>
+            </noise>
+          </y>
+          <z>
+            <noise type="gaussian">
+              <mean>0.0</mean>
+              <stddev>0.021</stddev>
+            </noise>
+          </z>
+        </linear_acceleration>
+      </imu>
+    </sensor>
+  </gazebo>
+  
   <!-- Raspberry Pi Board -->
   <link name="raspberry_pi">
     <inertial>
@@ -378,6 +759,11 @@
     <child link="raspberry_pi"/>
     <origin xyz="-0.005 0 0.065" rpy="0 0 0"/>
   </joint>
+  
+  <!-- Gazebo material for RPi -->
+  <gazebo reference="raspberry_pi">
+    <material>Gazebo/Orange</material>
+  </gazebo>
   
   <!-- ===== TRANSMISSIONS (Motor Control) ===== -->
   
@@ -428,5 +814,41 @@
       <mechanicalReduction>30.0</mechanicalReduction>
     </actuator>
   </transmission>
+  
+  <!-- ===== GAZEBO SKID STEER DRIVE PLUGIN ===== -->
+  <!-- This plugin simulates a skid steer drive (like tank or quad robot) -->
+  <gazebo>
+    <plugin filename="libgazebo_ros_skid_steer_drive.so" name="skid_steer_drive_controller">
+      <ros>
+        <namespace></namespace>
+        <argument>cmd_vel:=cmd_vel</argument>
+        <argument>odom:=odom</argument>
+      </ros>
+      <update_rate>100</update_rate>
+      
+      <!-- Wheel joints (left side front, left side rear, right side front, right side rear) -->
+      <left_front_joint>wheel_front_left_joint</left_front_joint>
+      <left_rear_joint>wheel_rear_left_joint</left_rear_joint>
+      <right_front_joint>wheel_front_right_joint</right_front_joint>
+      <right_rear_joint>wheel_rear_right_joint</right_rear_joint>
+      
+      <!-- Wheel separation and diameter -->
+      <wheel_separation>0.14</wheel_separation>
+      <wheel_diameter>0.066</wheel_diameter>
+      <max_wheel_torque>20</max_wheel_torque>
+      <max_wheel_acceleration>10.0</max_wheel_acceleration>
+      
+      <!-- Odometry settings -->
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>base_footprint</robot_base_frame>
+      <odometry_source>world</odometry_source>
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>true</publish_odom_tf>
+      
+      <!-- Covariances for odometry (optional, can be tuned) -->
+      <pose_covariance_diagonal>0.001 0.001 0.001 0.001 0.001 0.03</pose_covariance_diagonal>
+      <twist_covariance_diagonal>0.001 0.001 0.001 0.001 0.001 0.001</twist_covariance_diagonal>
+    </plugin>
+  </gazebo>
   
 </robot>

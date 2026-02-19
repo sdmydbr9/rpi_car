@@ -28,6 +28,10 @@ IR_L = 5; IR_R = 6
 BASE_SPEED = 50       
 ESCAPE_SPEED = 65     # Slightly faster reverse
 GYRO_KP = 1.5         # INCREASED to 1.5 (Very snappy)
+
+# Voltage-based PWM hard limit: 6 V motors on 3×3.7 V = 11.1 V supply
+# Cap duty cycle so effective voltage never exceeds 7 V.
+MAX_PWM_DUTY = 63     # round(7.0 / 11.1 * 100)
 CRITICAL_DIST = 20    
 WARN_DIST = 100       
 
@@ -89,10 +93,10 @@ def get_yaw():
     return current_yaw
 
 def set_motors(left_speed, right_speed, direction):
-    ls = max(0, min(100, abs(left_speed))) * TRIM_FL
-    rs = max(0, min(100, abs(right_speed))) * TRIM_FR
-    rl_s = max(0, min(100, abs(left_speed))) * TRIM_RL
-    rr_s = max(0, min(100, abs(right_speed))) * TRIM_RR
+    ls = min(MAX_PWM_DUTY, max(0, min(100, abs(left_speed))) * TRIM_FL)
+    rs = min(MAX_PWM_DUTY, max(0, min(100, abs(right_speed))) * TRIM_FR)
+    rl_s = min(MAX_PWM_DUTY, max(0, min(100, abs(left_speed))) * TRIM_RL)
+    rr_s = min(MAX_PWM_DUTY, max(0, min(100, abs(right_speed))) * TRIM_RR)
 
     pwm_fl.ChangeDutyCycle(ls); pwm_fr.ChangeDutyCycle(rs)
     pwm_rl.ChangeDutyCycle(rl_s); pwm_rr.ChangeDutyCycle(rr_s)
