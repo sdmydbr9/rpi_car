@@ -52,24 +52,24 @@ WARN_DIST           = 80        # start swerving — increased from 60 for earli
 CRITICAL_DIST       = 40        # reduce speed — increased from 30 to slow down earlier
 ALL_BLOCKED_CM      = 22        # every forward sector is this close → boxed in (raised from 18)
 EMERGENCY_IR_DIST   = 0         # IR triggers (binary, active LOW)
-HARD_SWERVE_DIST    = 55        # force min swerve when forward obstacle nearer (raised from 40 — car wasn't swerving at 42cm)
-MIN_FORCED_SWERVE   = 35        # minimum swerve degrees when forced (raised from 30 for stronger avoidance)
-EMERGENCY_FWD_CM    = 25        # emergency max-swerve when centre sectors this close (raised from 22)
+HARD_SWERVE_DIST    = 60        # force min swerve when forward obstacle nearer (was 55 — still not reacting early enough)
+MIN_FORCED_SWERVE   = 45        # minimum swerve degrees when forced (was 35 — not acute enough)
+EMERGENCY_FWD_CM    = 30        # emergency max-swerve when centre sectors this close (was 25 — triggered too late)
 SIDE_CLEAR_MIN_CM   = 20        # side must have at least this to be considered clear
 CIRCLE_HEADING_LIMIT = 120      # degrees — trigger boxed-in if car rotates this much
 # Stuck detection — car not turning despite close obstacles
 STUCK_HEADING_THRESH = 5.0      # degrees — max heading change to count as "not turning"
-STUCK_CYCLE_LIMIT    = 35       # cycles (~0.7s) — trigger recovery after this many stuck cycles (was 40)
+STUCK_CYCLE_LIMIT    = 50       # cycles (~1.0s) — trigger recovery after this many stuck cycles (raised from 35; corrected servo should prevent most stuck)
 STUCK_MIN_FWD_CM     = 50       # cm — only count as stuck when forward obstacle is this close (was 35 — missed stuck at 42cm)
 
 # Swerve geometry
-SWERVE_MAX_ANGLE    = 70        # max differential angle (degrees)  (was 90 — caused near-pivot turns)
-IR_SWERVE_BOOST     = 55        # added degrees when IR fires  (was 65)
-SPEED_FLOOR_FACTOR  = 0.55      # minimum speed fraction near obstacles
-INNER_WHEEL_MIN     = 0.20      # inner wheels keep 20% speed — ensure enough torque to actually turn (was 0.15 — 11% PWM stalled)
+SWERVE_MAX_ANGLE    = 85        # max differential angle (degrees)  (was 70 — not acute enough, car still hit obstacles)
+IR_SWERVE_BOOST     = 65        # added degrees when IR fires  (was 55 — increased for harder swerve)
+SPEED_FLOOR_FACTOR  = 0.45      # minimum speed fraction near obstacles (was 0.55 — too fast near walls)
+INNER_WHEEL_MIN     = 0.12      # inner wheels keep 12% speed — stronger turn (was 0.20 — not enough differential)
 SWERVE_SPEED_FLOOR  = 1.00      # outer wheel stays at full BASE_SPEED during swerve
 SWERVE_OUTER_BOOST  = 1.05      # slight boost to outer wheel  (was 1.15 — too aggressive differential)
-SWERVE_SMOOTH_ALPHA = 0.60      # EMA smoothing factor — raised from 0.40 for faster swerve response
+SWERVE_SMOOTH_ALPHA = 0.70      # EMA smoothing factor — raised from 0.60 for faster swerve response
 
 # Heading-rate damping — prevents persistent one-direction swerve (circling)
 HEADING_DAMP_START  = 30        # degrees — start damping after this much heading change
@@ -90,11 +90,11 @@ MOVING_THRESHOLD_G  = 0.3       # detect if wheels spin but car is stuck
 CRASH_COOLDOWN      = 1.5       # seconds between consecutive crash events (reduced from 3.0 — missed 2nd impact)
 
 # Navigation — proactive "navigate toward open space" approach
-NAVIGATE_DIST       = 100       # cm – start looking for best direction when fwd closer
-BEST_DIR_ADVANTAGE  = 15        # cm – best direction must have this much more room than fwd
+NAVIGATE_DIST       = 80        # cm – start looking for best direction when fwd closer
+BEST_DIR_ADVANTAGE  = 30        # cm – best direction must have this much more room than fwd
 TARGET_HEADING_TOL  = 12        # degrees – turn considered complete within this tolerance
-TURN_OUTER_SPEED    = 50        # PWM % for outer wheels during active heading turns
-TURN_INNER_SPEED    = 15        # PWM % for inner wheels (above motor stall threshold)
+TURN_OUTER_SPEED    = 55        # PWM % for outer wheels during active heading turns (was 50)
+TURN_INNER_SPEED    = 10        # PWM % for inner wheels (was 15 — not enough differential to avoid obstacles)
 MIN_STEER_ANGLE     = 20        # degrees – below this, motors can't actually turn; drive straight
 CRUISE_CLEAR_DIST   = 120       # cm – when forward is this clear, just cruise straight
 NAV_SMOOTH_ALPHA    = 0.3       # EMA smoothing for target heading updates (prevents oscillation)
@@ -452,8 +452,9 @@ class LaserScanner:
 
     def _set_servo_angle(self, user_deg):
         """Move servo to user-space angle (-60…+60).
-        Servo-space = 90 + user_deg.  Duty = 2 + servo_deg / 18."""
-        servo_deg = 90 + user_deg
+        Servo-space = 90 - user_deg  (negated so +angle = physical RIGHT).
+        Duty = 2 + servo_deg / 18."""
+        servo_deg = 90 - user_deg
         servo_deg = max(0, min(180, servo_deg))
         duty = 2.0 + servo_deg / 18.0
         self._pwm.ChangeDutyCycle(duty)
@@ -1054,8 +1055,9 @@ def compute_swerve(sector_map, ir_left: bool, ir_right: bool,
 def find_best_direction(sector_map, min_fwd):
     """Analyze the laser sector map and find the best direction to navigate.
 
-    Instead of only reacting to close obstacles, this proactively identifies
-    the direction with the most open space and tells the car to head there.
+    Uses corridor scoring: each direction is scored by the average distance
+    of itself and its immediate neighbours, finding the widest clear path
+    rather than a single lucky sector.
 
     Returns:
         best_angle: float – target angle relative to car forward (-60..+60)
@@ -1065,18 +1067,40 @@ def find_best_direction(sector_map, min_fwd):
     if not sector_map:
         return 0.0, SECTOR_DEFAULT_CM, False
 
-    # Find the sector with the farthest obstacle (most open space)
-    best_angle = 0
-    best_dist = 0
+    n = len(sector_map)
+    dists = [d for _, d, _ in sector_map]
+    angles = [a for a, _, _ in sector_map]
 
-    for angle, dist, conf in sector_map:
-        # Slight preference for forward-ish directions (avoid unnecessary turns)
-        effective_dist = dist
-        if abs(angle) <= 10:
-            effective_dist *= 1.05  # 5% bonus for staying forward
-        if effective_dist > best_dist:
-            best_dist = dist   # store actual distance
-            best_angle = angle
+    # Corridor score: average of sector and its immediate neighbours
+    # This finds the direction with the widest clear corridor, not just
+    # one sector that happens to be far.
+    best_score = -1.0
+    best_idx = n // 2  # default: forward
+
+    for i in range(n):
+        # Gather corridor (self + up to 2 neighbours on each side)
+        corridor = [dists[i]]
+        if i > 0:
+            corridor.append(dists[i - 1])
+        if i < n - 1:
+            corridor.append(dists[i + 1])
+        if i > 1:
+            corridor.append(dists[i - 2])
+        if i < n - 2:
+            corridor.append(dists[i + 2])
+
+        score = sum(corridor) / len(corridor)
+
+        # Only a very small forward bonus (2%) and only when forward is clear
+        if abs(angles[i]) <= 10 and min_fwd > WARN_DIST:
+            score *= 1.02
+
+        if score > best_score:
+            best_score = score
+            best_idx = i
+
+    best_angle = angles[best_idx]
+    best_dist = dists[best_idx]
 
     # Should we actively turn toward this direction?
     # Yes if: forward is closing in AND the best direction is significantly
@@ -1414,47 +1438,82 @@ class AutonomousController:
 
                 # ── Branch 3: Heading-based turn toward open space ───
                 elif should_turn:
-                    # Set target heading if not already navigating
-                    if self._nav_target_heading is None:
-                        self._nav_target_heading = imu_heading + self._nav_smoothed_best
-                        _log.info("NAV_TURN_START target=%.1f best_angle=%.1f "
-                                  "best_dist=%.1f min_fwd=%.1f",
-                                  self._nav_target_heading,
-                                  self._nav_smoothed_best,
-                                  best_dist, min_fwd)
-
-                    # Compute heading error
-                    heading_error = self._nav_target_heading - imu_heading
-                    # Normalise to [-180, 180]
-                    while heading_error > 180:
-                        heading_error -= 360
-                    while heading_error < -180:
-                        heading_error += 360
-
-                    swerve_angle = heading_error
-
-                    if abs(heading_error) > TARGET_HEADING_TOL:
-                        # Still turning – strong differential
-                        if heading_error > 0:
-                            # Turn right: left=outer, right=inner
-                            left_spd = TURN_OUTER_SPEED
-                            right_spd = TURN_INNER_SPEED
-                        else:
-                            # Turn left: right=outer, left=inner
-                            left_spd = TURN_INNER_SPEED
-                            right_spd = TURN_OUTER_SPEED
-                        _log.debug("NAV_TURNING error=%.1f target=%.1f "
-                                   "heading=%.1f spd=[%.1f,%.1f]",
-                                   heading_error, self._nav_target_heading,
-                                   imu_heading, left_spd, right_spd)
-                    else:
-                        # Turn complete – go straight
+                    # SAFETY: abort heading turn if obstacle is dangerously close
+                    # — fall through to Branch 4 for emergency obstacle avoidance
+                    if min_fwd < CRITICAL_DIST:
                         self._nav_target_heading = None
-                        self._target_heading = imu_heading
+                        _log.warning("NAV_TURN_ABORT min_fwd=%.1f < CRITICAL=%d – "
+                                     "switching to obstacle avoidance",
+                                     min_fwd, CRITICAL_DIST)
+                        # Fall through to Branch 4 below by NOT entering this block
+                        swerve_angle = raw_swerve
+                        if 0 < abs(swerve_angle) < MIN_FORCED_SWERVE:
+                            # Force a strong swerve toward clearest side
+                            if right_avg >= left_avg:
+                                swerve_angle = max(swerve_angle, MIN_FORCED_SWERVE)
+                            else:
+                                swerve_angle = min(swerve_angle, -MIN_FORCED_SWERVE)
+                        if abs(swerve_angle) >= MIN_STEER_ANGLE:
+                            if swerve_angle > 0:
+                                left_spd = TURN_OUTER_SPEED
+                                right_spd = TURN_INNER_SPEED
+                            else:
+                                left_spd = TURN_INNER_SPEED
+                                right_spd = TURN_OUTER_SPEED
+                        else:
+                            effective_speed = BASE_SPEED * speed_factor
+                            left_spd, right_spd = differential_speeds(
+                                effective_speed, swerve_angle)
                         self._heading_at_swerve_start = imu_heading
-                        left_spd = BASE_SPEED * speed_factor
-                        right_spd = left_spd
-                        _log.info("NAV_TURN_COMPLETE heading=%.1f", imu_heading)
+                        _log.debug("NAV_OBSTACLE swerve=%.1f min_fwd=%.1f "
+                                   "spd=[%.1f,%.1f]",
+                                   swerve_angle, min_fwd, left_spd, right_spd)
+                    else:
+                        # Set target heading if not already navigating
+                        # NOTE: laser +angle = RIGHT of car, but heading
+                        #   DECREASES when turning right (clockwise), so
+                        #   negate the laser angle for heading convention.
+                        if self._nav_target_heading is None:
+                            self._nav_target_heading = imu_heading - self._nav_smoothed_best
+                            _log.info("NAV_TURN_START target=%.1f best_angle=%.1f "
+                                      "best_dist=%.1f min_fwd=%.1f",
+                                      self._nav_target_heading,
+                                      self._nav_smoothed_best,
+                                      best_dist, min_fwd)
+
+                        # Compute heading error
+                        heading_error = self._nav_target_heading - imu_heading
+                        # Normalise to [-180, 180]
+                        while heading_error > 180:
+                            heading_error -= 360
+                        while heading_error < -180:
+                            heading_error += 360
+
+                        swerve_angle = heading_error
+
+                        if abs(heading_error) > TARGET_HEADING_TOL:
+                            # Still turning – strong differential
+                            # heading_error < 0 → target below current
+                            #   → need heading to decrease → turn RIGHT
+                            #   → left wheels faster
+                            if heading_error < 0:
+                                left_spd = TURN_OUTER_SPEED
+                                right_spd = TURN_INNER_SPEED
+                            else:
+                                left_spd = TURN_INNER_SPEED
+                                right_spd = TURN_OUTER_SPEED
+                            _log.debug("NAV_TURNING error=%.1f target=%.1f "
+                                       "heading=%.1f spd=[%.1f,%.1f]",
+                                       heading_error, self._nav_target_heading,
+                                       imu_heading, left_spd, right_spd)
+                        else:
+                            # Turn complete – go straight
+                            self._nav_target_heading = None
+                            self._target_heading = imu_heading
+                            self._heading_at_swerve_start = imu_heading
+                            left_spd = BASE_SPEED * speed_factor
+                            right_spd = left_spd
+                            _log.info("NAV_TURN_COMPLETE heading=%.1f", imu_heading)
 
                 # ── Branch 4: Moderate obstacle avoidance / cruise ───
                 else:
@@ -1617,22 +1676,72 @@ class AutonomousController:
     # ── BOXED-IN recovery ────────────────────────────────────────────────
 
     def _do_boxed_in_recovery(self):
+        """Recovery from boxed-in / stuck situation.
+        First attempt: aggressive forward turn toward the clearest side.
+        Last resort:   reverse only if forward turn fails and rear is clear.
+        """
         self._set_state(State.BOXED_IN)
         self.motor.brake()
-        time.sleep(0.3)
+        time.sleep(0.2)
 
+        # Get fresh scan data
+        sweep_before = self.scanner.sweep_count
+        t_wait = time.time()
+        while (self.scanner.sweep_count <= sweep_before and
+               (time.time() - t_wait) < 1.0):
+            time.sleep(0.02)
+
+        sector_map = self.scanner.get_sector_map()
+        left_dists  = [d for a, d, c in sector_map if a < -5]
+        right_dists = [d for a, d, c in sector_map if a > 5]
+        left_avg  = sum(left_dists)  / max(1, len(left_dists))
+        right_avg = sum(right_dists) / max(1, len(right_dists))
+        left_max  = max(left_dists)  if left_dists  else 0
+        right_max = max(right_dists) if right_dists else 0
+
+        _log.info("BOXED_IN_RECOVERY left_avg=%.1f right_avg=%.1f "
+                  "left_max=%.1f right_max=%.1f",
+                  left_avg, right_avg, left_max, right_max)
+
+        # ── Attempt 1: aggressive forward turn toward clearest side ──
+        # This avoids stopping and reversing — just swerve hard forward.
+        if left_max >= SIDE_CLEAR_MIN_CM or right_max >= SIDE_CLEAR_MIN_CM:
+            if left_avg >= right_avg:
+                _log.info("RECOVERY_FWD_TURN LEFT left_avg=%.1f right_avg=%.1f",
+                          left_avg, right_avg)
+                self.motor.forward_differential(BASE_SPEED * 0.15,
+                                                BASE_SPEED * 0.95)
+            else:
+                _log.info("RECOVERY_FWD_TURN RIGHT left_avg=%.1f right_avg=%.1f",
+                          left_avg, right_avg)
+                self.motor.forward_differential(BASE_SPEED * 0.95,
+                                                BASE_SPEED * 0.15)
+
+            time.sleep(RECOVERY_TURN_DURATION)
+            self.motor.coast()
+            time.sleep(0.1)
+
+            self.imu.reset_heading()
+            self._target_heading = 0.0
+            self._heading_at_swerve_start = 0.0
+            self._stuck_cycles = 0
+            self._stuck_heading_ref = 0.0
+            self._last_boxed_recovery_time = time.time()
+            self._set_state(State.DRIVING)
+            return
+
+        # ── Attempt 2 (last resort): reverse if truly boxed in on all sides ──
         rear_d, _ = self.sonar.read()
-        _log.info("BOXED_IN_RECOVERY rear_dist=%.1f", rear_d)
+        _log.info("BOXED_IN_REVERSE_FALLBACK rear_dist=%.1f", rear_d)
 
         if rear_d < 0 or rear_d < REAR_CLEAR_CM:
             _log.error("FULLY_STUCK rear_blocked=%.1f – waiting for manual "
                        "intervention (press R)", rear_d)
             self.motor.coast()
-            # Stay in BOXED_IN; user presses R to retry
             self._running = False
             return
 
-        # Reverse with rear sonar monitoring
+        # Short reverse
         _log.info("REVERSE_START speed=%d duration=%.1fs",
                   REVERSE_SPEED, REVERSE_DURATION)
         self.motor.reverse_straight(REVERSE_SPEED)
@@ -1650,18 +1759,14 @@ class AutonomousController:
         self.motor.brake()
         _log.info("REVERSE_END")
 
-        # Wait for a fresh scanner sweep after reversing — stale sector
-        # data from pre-reverse position leads to wrong turn direction
+        # Wait for fresh scan after reverse
         sweep_before = self.scanner.sweep_count
         t_wait = time.time()
         while (self.scanner.sweep_count <= sweep_before and
                (time.time() - t_wait) < 1.5):
             time.sleep(0.02)
-        _log.debug("POST_REVERSE_SCAN_WAIT sweeps=%d (%.0fms)",
-                   self.scanner.sweep_count - sweep_before,
-                   (time.time() - t_wait) * 1000)
 
-        # Determine which side has more room and do a wide turn
+        # Re-scan and turn toward clearest side
         sector_map = self.scanner.get_sector_map()
         left_dists  = [d for a, d, c in sector_map if a < -5]
         right_dists = [d for a, d, c in sector_map if a > 5]
@@ -1671,14 +1776,13 @@ class AutonomousController:
         if left_avg >= right_avg:
             _log.info("RECOVERY_TURN LEFT left_avg=%.1f right_avg=%.1f",
                       left_avg, right_avg)
-            # Turn left: right wheels faster
-            self.motor.forward_differential(BASE_SPEED * 0.3,
-                                            BASE_SPEED * 0.9)
+            self.motor.forward_differential(BASE_SPEED * 0.15,
+                                            BASE_SPEED * 0.95)
         else:
             _log.info("RECOVERY_TURN RIGHT left_avg=%.1f right_avg=%.1f",
                       left_avg, right_avg)
-            self.motor.forward_differential(BASE_SPEED * 0.9,
-                                            BASE_SPEED * 0.3)
+            self.motor.forward_differential(BASE_SPEED * 0.95,
+                                            BASE_SPEED * 0.15)
 
         time.sleep(RECOVERY_TURN_DURATION)
         self.motor.coast()
@@ -1750,13 +1854,13 @@ class AutonomousController:
         if left_avg >= right_avg:
             _log.info("CRASH_TURN LEFT left_avg=%.1f right_avg=%.1f",
                       left_avg, right_avg)
-            self.motor.forward_differential(BASE_SPEED * 0.25,
+            self.motor.forward_differential(BASE_SPEED * 0.15,
                                             BASE_SPEED * 0.85)
         else:
             _log.info("CRASH_TURN RIGHT left_avg=%.1f right_avg=%.1f",
                       left_avg, right_avg)
             self.motor.forward_differential(BASE_SPEED * 0.85,
-                                            BASE_SPEED * 0.25)
+                                            BASE_SPEED * 0.15)
         time.sleep(turn_dur)
         self.motor.coast()
 
