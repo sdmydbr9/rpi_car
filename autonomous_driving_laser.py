@@ -89,6 +89,20 @@ CRASH_MS2           = CRASH_G * ACCEL_G   # ~14.7 m/s² – actual comparison va
 MOVING_THRESHOLD_G  = 0.3       # detect if wheels spin but car is stuck
 CRASH_COOLDOWN      = 1.5       # seconds between consecutive crash events (reduced from 3.0 — missed 2nd impact)
 
+# Navigation — proactive "navigate toward open space" approach
+NAVIGATE_DIST       = 100       # cm – start looking for best direction when fwd closer
+BEST_DIR_ADVANTAGE  = 15        # cm – best direction must have this much more room than fwd
+TARGET_HEADING_TOL  = 12        # degrees – turn considered complete within this tolerance
+TURN_OUTER_SPEED    = 50        # PWM % for outer wheels during active heading turns
+TURN_INNER_SPEED    = 15        # PWM % for inner wheels (above motor stall threshold)
+MIN_STEER_ANGLE     = 20        # degrees – below this, motors can't actually turn; drive straight
+CRUISE_CLEAR_DIST   = 120       # cm – when forward is this clear, just cruise straight
+NAV_SMOOTH_ALPHA    = 0.3       # EMA smoothing for target heading updates (prevents oscillation)
+
+# MPU resilience
+MPU_MAX_CONSEC_ERRORS = 10      # consecutive MPU read failures → switch to fallback mode
+MPU_RETRY_INTERVAL    = 50      # cycles – how often to retry MPU in fallback mode
+
 # Sector map
 SCAN_RANGE_DEG      = 60        # ±60° from centre  → 120° total
 SCAN_STEP_DEG       = 10        # 13 sectors
@@ -692,6 +706,9 @@ class IMU:
         self._integral = 0.0
         self._prev_error = 0.0
 
+        # MPU error tracking
+        self._consecutive_errors = 0
+
     def calibrate(self):
         """Collect CALIBRATION_SAMPLES to compute offsets and noise floor.
         Car MUST be stationary during calibration."""
@@ -767,6 +784,7 @@ class IMU:
         self._last_time = now
 
         if not HAS_IMU or not self._calibrated:
+            self._last_time = now
             return {
                 "heading": self._heading,
                 "dt": dt,
@@ -774,20 +792,39 @@ class IMU:
                 "gyro": {"z": 0},
                 "lateral_g": 0.0,
                 "crash": False,
+                "mpu_valid": False,
+                "mpu_errors": self._consecutive_errors,
             }
 
         try:
             accel = _imu.get_accel_data()
             gyro = _imu.get_gyro_data()
-        except Exception:
+        except Exception as exc:
+            self._consecutive_errors += 1
+            # Print to console so user sees MPU issues in real-time
+            if self._consecutive_errors == 1 or self._consecutive_errors % 5 == 0:
+                print(f"\n⚠ MPU6050 READ ERROR #{self._consecutive_errors}: {exc}")
+            _log.error("MPU_READ_ERROR count=%d err=%s",
+                       self._consecutive_errors, exc)
+            # DON'T update heading – wait for next valid signal from MPU
+            self._last_time = now
             return {
-                "heading": self._heading,
+                "heading": self._heading,  # keep last known heading
                 "dt": dt,
                 "accel": {"x": 0, "y": 0, "z": 9.81},
                 "gyro": {"z": 0},
                 "lateral_g": 0.0,
                 "crash": False,
+                "mpu_valid": False,
+                "mpu_errors": self._consecutive_errors,
             }
+
+        # Successfully read MPU – reset error counter
+        if self._consecutive_errors > 0:
+            _log.info("MPU_SIGNAL_RESTORED after %d errors",
+                      self._consecutive_errors)
+        self._consecutive_errors = 0
+        self._last_time = now
 
         # Integrate yaw from gyro-Z
         gz_corrected = gyro["z"] - self._gz_offset
@@ -808,6 +845,8 @@ class IMU:
             "gyro": gyro,
             "lateral_g": round(lateral_g, 3),
             "crash": crash,
+            "mpu_valid": True,
+            "mpu_errors": 0,
         }
 
     def pid_correction(self, target_heading, dt):
@@ -1012,6 +1051,43 @@ def compute_swerve(sector_map, ir_left: bool, ir_right: bool,
     return swerve_angle, speed_factor, threat_mag, boxed
 
 
+def find_best_direction(sector_map, min_fwd):
+    """Analyze the laser sector map and find the best direction to navigate.
+
+    Instead of only reacting to close obstacles, this proactively identifies
+    the direction with the most open space and tells the car to head there.
+
+    Returns:
+        best_angle: float – target angle relative to car forward (-60..+60)
+        best_dist:  float – obstacle distance in the best direction (cm)
+        should_turn: bool – True if the car should actively turn toward best_angle
+    """
+    if not sector_map:
+        return 0.0, SECTOR_DEFAULT_CM, False
+
+    # Find the sector with the farthest obstacle (most open space)
+    best_angle = 0
+    best_dist = 0
+
+    for angle, dist, conf in sector_map:
+        # Slight preference for forward-ish directions (avoid unnecessary turns)
+        effective_dist = dist
+        if abs(angle) <= 10:
+            effective_dist *= 1.05  # 5% bonus for staying forward
+        if effective_dist > best_dist:
+            best_dist = dist   # store actual distance
+            best_angle = angle
+
+    # Should we actively turn toward this direction?
+    # Yes if: forward is closing in AND the best direction is significantly
+    # better AND the angle is large enough for motors to actually execute
+    should_turn = (min_fwd < NAVIGATE_DIST and
+                   best_dist > min_fwd + BEST_DIR_ADVANTAGE and
+                   abs(best_angle) >= MIN_STEER_ANGLE)
+
+    return float(best_angle), best_dist, should_turn
+
+
 def differential_speeds(base_speed: float, swerve_angle: float):
     """Convert swerve angle to (left_speed, right_speed) for differential drive.
     Positive swerve = steer right → left wheels faster, right wheels slower."""
@@ -1070,6 +1146,12 @@ class AutonomousController:
         self._stuck_cycles = 0
         self._stuck_heading_ref = 0.0
 
+        # Navigation state — heading-based "navigate toward open space"
+        self._nav_target_heading = None   # None = cruise, float = heading to turn toward
+        self._nav_smoothed_best = 0.0     # EMA-smoothed best direction angle
+        self._mpu_fallback_mode = False   # True when MPU has too many errors
+        self._fallback_cycles = 0         # cycle counter in fallback mode
+
         # Drive thread
         self._drive_thread = None
 
@@ -1124,6 +1206,10 @@ class AutonomousController:
         self._heading_at_swerve_start = 0.0
         self._stuck_cycles = 0
         self._stuck_heading_ref = 0.0
+        self._nav_target_heading = None
+        self._nav_smoothed_best = 0.0
+        self._mpu_fallback_mode = False
+        self._fallback_cycles = 0
 
         self._set_state(State.DRIVING)
         _log.info("DRIVING_START base_speed=%d", BASE_SPEED)
@@ -1148,6 +1234,10 @@ class AutonomousController:
             self._heading_at_swerve_start = 0.0
             self._stuck_cycles = 0
             self._stuck_heading_ref = 0.0
+            self._nav_target_heading = None
+            self._nav_smoothed_best = 0.0
+            self._mpu_fallback_mode = False
+            self._fallback_cycles = 0
             self._set_state(State.DRIVING)
             self._drive_thread = threading.Thread(target=self._drive_loop,
                                                    daemon=True)
@@ -1217,19 +1307,32 @@ class AutonomousController:
                     compute_swerve(sector_map, ir_l, ir_r,
                                    sweep_ready=sweep_ready)
 
-                # Smooth the swerve angle via EMA to prevent jerky steering.
-                # IR-triggered swerves bypass smoothing for instant reaction.
-                if ir_l or ir_r:
-                    swerve_angle = raw_swerve   # instant IR reaction
-                    prev_swerve = raw_swerve
-                else:
-                    swerve_angle = (SWERVE_SMOOTH_ALPHA * raw_swerve +
-                                    (1.0 - SWERVE_SMOOTH_ALPHA) * prev_swerve)
-                    prev_swerve = swerve_angle
+                # ── MPU status check ─────────────────────────────────
+                mpu_valid = imu_data.get("mpu_valid", True)
+                mpu_errors = imu_data.get("mpu_errors", 0)
+                imu_heading = imu_data["heading"]
 
+                if mpu_errors >= MPU_MAX_CONSEC_ERRORS and not self._mpu_fallback_mode:
+                    self._mpu_fallback_mode = True
+                    self._fallback_cycles = 0
+                    _log.warning("MPU_FALLBACK_ENABLED errors=%d – switching to laser-only nav",
+                                 mpu_errors)
+                elif mpu_valid and self._mpu_fallback_mode:
+                    self._mpu_fallback_mode = False
+                    self._fallback_cycles = 0
+                    _log.info("MPU_FALLBACK_DISABLED – MPU signal restored")
+
+                # ── Find best direction (proactive navigation) ───────
+                best_angle, best_dist, should_turn = \
+                    find_best_direction(sector_map, min_fwd)
+
+                # Smooth best direction via EMA
+                self._nav_smoothed_best = (
+                    NAV_SMOOTH_ALPHA * best_angle +
+                    (1.0 - NAV_SMOOTH_ALPHA) * self._nav_smoothed_best)
+
+                # ── Boxed-in detection (keep existing logic) ─────────
                 if boxed:
-                    # Cooldown: don't re-trigger boxed-in within 2s of
-                    # last recovery — prevents instant re-entry loop
                     if (t_start - self._last_boxed_recovery_time) < 2.0:
                         _log.debug("BOXED_IN_SUPPRESSED cooldown=%.1fs",
                                    t_start - self._last_boxed_recovery_time)
@@ -1241,15 +1344,14 @@ class AutonomousController:
                         self._do_boxed_in_recovery()
                         continue
 
-                # ── Stuck detection: heading barely changes despite    ──
-                # ── close obstacles → car is wedged/stuck              ──
+                # ── Stuck detection ──────────────────────────────────
                 if min_fwd < STUCK_MIN_FWD_CM:
-                    heading_change = abs(imu_data["heading"] - self._stuck_heading_ref)
+                    heading_change = abs(imu_heading - self._stuck_heading_ref)
                     if heading_change < STUCK_HEADING_THRESH:
                         self._stuck_cycles += 1
                     else:
                         self._stuck_cycles = 0
-                        self._stuck_heading_ref = imu_data["heading"]
+                        self._stuck_heading_ref = imu_heading
                     if self._stuck_cycles >= STUCK_CYCLE_LIMIT:
                         self._stuck_cycles = 0
                         self._boxed_in_count += 1
@@ -1262,11 +1364,10 @@ class AutonomousController:
                         continue
                 else:
                     self._stuck_cycles = 0
-                    self._stuck_heading_ref = imu_data["heading"]
+                    self._stuck_heading_ref = imu_heading
 
-                # ── Circle detection: if the car has rotated too far ──
-                # ── from its swerve-start heading, it's spinning.     ──
-                heading_delta = abs(imu_data["heading"] - self._heading_at_swerve_start)
+                # ── Circle detection ─────────────────────────────────
+                heading_delta = abs(imu_heading - self._heading_at_swerve_start)
                 if heading_delta > CIRCLE_HEADING_LIMIT and min_fwd < WARN_DIST:
                     self._boxed_in_count += 1
                     _log.warning(
@@ -1276,52 +1377,129 @@ class AutonomousController:
                     self._do_boxed_in_recovery()
                     continue
 
-                # PID heading correction when driving fairly straight
-                dt = imu_data["dt"]
-                if abs(swerve_angle) < 15:
-                    correction = self.imu.pid_correction(
-                        self._target_heading, dt)
-                    swerve_angle += correction * 0.3
-                    # Reset circle-detection anchor when driving straight
-                    self._heading_at_swerve_start = imu_data["heading"]
-                else:
-                    # re-anchor heading so PID doesn't fight swerves
-                    self._target_heading = self.imu.heading
+                # ═══════════════════════════════════════════════════════
+                #  NAVIGATION DECISION — 4 branches
+                # ═══════════════════════════════════════════════════════
 
-                # ── Heading-rate damping: reduce swerve when heading  ──
-                # ── has accumulated significantly in one direction.   ──
-                # ── Prevents persistent one-direction turning that    ──
-                # ── causes circling.  IR-triggered swerves exempt.    ──
-                if not (ir_l or ir_r):
-                    heading_delta = abs(imu_data["heading"] -
-                                        self._heading_at_swerve_start)
-                    if heading_delta > HEADING_DAMP_START and abs(swerve_angle) > 10:
-                        damp_frac = min(HEADING_DAMP_MAX,
-                                        HEADING_DAMP_MAX *
-                                        (heading_delta - HEADING_DAMP_START) /
-                                        (HEADING_DAMP_FULL - HEADING_DAMP_START))
-                        swerve_angle *= (1.0 - damp_frac)
+                swerve_angle = 0.0
 
-                # Compute wheel speeds
-                effective_speed = BASE_SPEED * speed_factor
-                if abs(swerve_angle) > 18:
-                    # ACTIVE SWERVE: differential steering for obstacle
-                    # avoidance.  Outer wheel slightly boosted, inner wheel
-                    # stays at fraction of BASE_SPEED for forward progress.
-                    turn_ratio = abs(swerve_angle) / SWERVE_MAX_ANGLE
-                    outer_speed = BASE_SPEED * SWERVE_OUTER_BOOST
-                    inner_speed = BASE_SPEED * max(INNER_WHEEL_MIN,
-                                                    1.0 - turn_ratio)
-                    if swerve_angle > 0:  # steer right → left=outer
-                        left_spd, right_spd = outer_speed, inner_speed
-                    else:                 # steer left  → right=outer
-                        left_spd, right_spd = inner_speed, outer_speed
+                # ── Branch 1: IR emergency – instant hard swerve ─────
+                if ir_l or ir_r:
+                    swerve_angle = raw_swerve
+                    if ir_l and not ir_r:
+                        left_spd, right_spd = TURN_OUTER_SPEED, TURN_INNER_SPEED
+                    elif ir_r and not ir_l:
+                        left_spd, right_spd = TURN_INNER_SPEED, TURN_OUTER_SPEED
+                    else:
+                        # both IR triggered – bias toward best_angle
+                        if self._nav_smoothed_best >= 0:
+                            left_spd, right_spd = TURN_OUTER_SPEED, TURN_INNER_SPEED
+                        else:
+                            left_spd, right_spd = TURN_INNER_SPEED, TURN_OUTER_SPEED
+                    self._heading_at_swerve_start = imu_heading
+                    self._nav_target_heading = None
+                    _log.debug("NAV_IR_SWERVE angle=%.1f ir=[%d,%d] spd=[%.1f,%.1f]",
+                               swerve_angle, ir_l, ir_r, left_spd, right_spd)
+
+                # ── Branch 2: MPU fallback – laser-only navigation ───
+                elif self._mpu_fallback_mode:
+                    self._fallback_cycles += 1
+                    swerve_angle, left_spd, right_spd = \
+                        self._fallback_navigate(sector_map, min_fwd,
+                                                best_angle, best_dist,
+                                                should_turn, speed_factor)
+                    # Periodically retry MPU
+                    if self._fallback_cycles % MPU_RETRY_INTERVAL == 0:
+                        _log.info("MPU_RETRY_ATTEMPT cycle=%d", self._fallback_cycles)
+
+                # ── Branch 3: Heading-based turn toward open space ───
+                elif should_turn:
+                    # Set target heading if not already navigating
+                    if self._nav_target_heading is None:
+                        self._nav_target_heading = imu_heading + self._nav_smoothed_best
+                        _log.info("NAV_TURN_START target=%.1f best_angle=%.1f "
+                                  "best_dist=%.1f min_fwd=%.1f",
+                                  self._nav_target_heading,
+                                  self._nav_smoothed_best,
+                                  best_dist, min_fwd)
+
+                    # Compute heading error
+                    heading_error = self._nav_target_heading - imu_heading
+                    # Normalise to [-180, 180]
+                    while heading_error > 180:
+                        heading_error -= 360
+                    while heading_error < -180:
+                        heading_error += 360
+
+                    swerve_angle = heading_error
+
+                    if abs(heading_error) > TARGET_HEADING_TOL:
+                        # Still turning – strong differential
+                        if heading_error > 0:
+                            # Turn right: left=outer, right=inner
+                            left_spd = TURN_OUTER_SPEED
+                            right_spd = TURN_INNER_SPEED
+                        else:
+                            # Turn left: right=outer, left=inner
+                            left_spd = TURN_INNER_SPEED
+                            right_spd = TURN_OUTER_SPEED
+                        _log.debug("NAV_TURNING error=%.1f target=%.1f "
+                                   "heading=%.1f spd=[%.1f,%.1f]",
+                                   heading_error, self._nav_target_heading,
+                                   imu_heading, left_spd, right_spd)
+                    else:
+                        # Turn complete – go straight
+                        self._nav_target_heading = None
+                        self._target_heading = imu_heading
+                        self._heading_at_swerve_start = imu_heading
+                        left_spd = BASE_SPEED * speed_factor
+                        right_spd = left_spd
+                        _log.info("NAV_TURN_COMPLETE heading=%.1f", imu_heading)
+
+                # ── Branch 4: Moderate obstacle avoidance / cruise ───
                 else:
-                    if abs(swerve_angle) > 10:
-                        effective_speed = max(effective_speed,
-                                             BASE_SPEED * SWERVE_SPEED_FLOOR)
-                    left_spd, right_spd = differential_speeds(
-                        effective_speed, swerve_angle)
+                    self._nav_target_heading = None
+                    dt = imu_data["dt"]
+
+                    if min_fwd < WARN_DIST:
+                        # Close obstacle – use compute_swerve but enforce
+                        # minimum steer angle so motors actually respond
+                        swerve_angle = raw_swerve
+                        if 0 < abs(swerve_angle) < MIN_STEER_ANGLE:
+                            swerve_angle = (MIN_STEER_ANGLE
+                                            if swerve_angle > 0
+                                            else -MIN_STEER_ANGLE)
+
+                        # Apply strong differential for obstacle avoidance
+                        if abs(swerve_angle) >= MIN_STEER_ANGLE:
+                            if swerve_angle > 0:
+                                left_spd = TURN_OUTER_SPEED
+                                right_spd = TURN_INNER_SPEED
+                            else:
+                                left_spd = TURN_INNER_SPEED
+                                right_spd = TURN_OUTER_SPEED
+                        else:
+                            effective_speed = BASE_SPEED * speed_factor
+                            left_spd, right_spd = differential_speeds(
+                                effective_speed, swerve_angle)
+                        self._heading_at_swerve_start = imu_heading
+                        _log.debug("NAV_OBSTACLE swerve=%.1f min_fwd=%.1f "
+                                   "spd=[%.1f,%.1f]",
+                                   swerve_angle, min_fwd, left_spd, right_spd)
+                    else:
+                        # Cruising – apply PID heading correction
+                        correction = self.imu.pid_correction(
+                            self._target_heading, dt)
+                        # Only apply if correction is significant enough
+                        if abs(correction * 0.3) > MIN_STEER_ANGLE * 0.5:
+                            swerve_angle = correction * 0.3
+                        else:
+                            swerve_angle = 0.0
+                        effective_speed = BASE_SPEED * speed_factor
+                        left_spd, right_spd = differential_speeds(
+                            effective_speed, swerve_angle)
+                        # Reset circle-detection anchor for straight driving
+                        self._heading_at_swerve_start = imu_heading
 
                 # Drive
                 self.motor.forward_differential(left_spd, right_spd)
@@ -1351,6 +1529,11 @@ class AutonomousController:
                     cycle_hz=round(1.0 / max(0.001,
                                    time.time() - t_start), 1),
                     uptime=round(time.time() - self._start_time, 1),
+                    mpu_fallback=self._mpu_fallback_mode,
+                    nav_target=self._nav_target_heading,
+                    best_dir=round(self._nav_smoothed_best, 1),
+                    best_dist=round(best_dist, 1),
+                    mpu_errors=mpu_errors,
                 )
 
             # ── 4. comprehensive sensor log ──────────────────────────
@@ -1390,6 +1573,46 @@ class AutonomousController:
                 time.sleep(sleep_time)
 
         _log.info("DRIVE_LOOP_END cycles=%d", cycle)
+
+    # ── Laser-only fallback navigation (used when MPU fails) ────────────
+
+    def _fallback_navigate(self, sector_map, min_fwd, best_angle,
+                           best_dist, should_turn, speed_factor):
+        """Navigate using laser only – no MPU heading tracking.
+
+        As the car turns, the laser rotates with it, so best_angle
+        naturally converges toward 0 (self-correcting).
+
+        Returns (swerve_angle, left_spd, right_spd).
+        """
+        if should_turn or min_fwd < WARN_DIST:
+            # Steer toward the best direction using strong differential
+            if abs(best_angle) < MIN_STEER_ANGLE:
+                # Best direction is roughly forward – cruise
+                effective_speed = BASE_SPEED * speed_factor
+                _log.debug("FALLBACK_CRUISE fwd=%.1f best_angle=%.1f",
+                           min_fwd, best_angle)
+                return 0.0, effective_speed, effective_speed
+
+            if best_angle > 0:
+                # Turn right: left=outer
+                left_spd = TURN_OUTER_SPEED
+                right_spd = TURN_INNER_SPEED
+            else:
+                # Turn left: right=outer
+                left_spd = TURN_INNER_SPEED
+                right_spd = TURN_OUTER_SPEED
+
+            _log.debug("FALLBACK_STEER angle=%.1f dist=%.1f "
+                       "min_fwd=%.1f spd=[%.1f,%.1f]",
+                       best_angle, best_dist, min_fwd,
+                       left_spd, right_spd)
+            return best_angle, left_spd, right_spd
+        else:
+            # Forward is clear enough – cruise straight
+            effective_speed = BASE_SPEED * speed_factor
+            _log.debug("FALLBACK_CLEAR fwd=%.1f", min_fwd)
+            return 0.0, effective_speed, effective_speed
 
     # ── BOXED-IN recovery ────────────────────────────────────────────────
 
