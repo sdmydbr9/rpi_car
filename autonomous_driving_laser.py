@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-auto_slalom.py — Autonomous Laser-Scanning Slalom Controller
-=============================================================
-Standalone script for obstacle-avoidance slalom using:
+autonomous_driving_laser.py — Autonomous Laser-Scanning Driving Controller
+=========================================================================
+Standalone script for autonomous obstacle-avoidance driving using:
   • VL53L0X laser on servo for continuous 120° sector scanning
   • Front IR sensors (left + right) for close-range detection
   • MPU6050 accelerometer for crash detection, gyro for yaw tracking
   • Rear HC-SR04 sonar for safe reversing
   • Differential steering for smooth swerving (no pivot turns)
 
-Run:  python3 auto_slalom.py
+Run:  python3 autonomous_driving_laser.py
 Controls:  S = Start | P = Pause | R = Resume/Retry | Q = Quit
-Logs:      slalom.logs (append mode, comprehensive timestamped data)
+Logs:      autonomous_driving_laser.logs (append mode, comprehensive timestamped data)
 """
 
 import time
@@ -31,12 +31,12 @@ from enum import Enum, auto
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Motor / PWM
-BASE_SPEED          = 40        # forward cruise PWM % (was 50 — too fast for sensor reaction time)
+BASE_SPEED          = 35        # forward cruise PWM % (reduced from 40 for better reaction time)
 MAX_PWM_DUTY        = 63        # voltage cap  (7 V / 11.1 V × 100)
 PWM_FREQ            = 1000      # Hz
 REVERSE_SPEED       = 40
 REVERSE_DURATION    = 1.0       # seconds
-RECOVERY_TURN_DURATION = 1.0    # seconds of wide turn after reverse
+RECOVERY_TURN_DURATION = 1.5    # seconds of wide turn after reverse (was 1.0 — too short to reorient)
 CRASH_REVERSE_SPEED = 35
 CRASH_REVERSE_DURATION = 0.5
 DIRECTION_CHANGE_DWELL = 0.15   # seconds between fwd↔rev
@@ -48,29 +48,33 @@ RL_TRIM = 1.00
 RR_TRIM = 1.00
 
 # Obstacle distances (cm)
-WARN_DIST           = 60        # start swerving  (was 100 — too reactive in slalom, every sector triggered)
-CRITICAL_DIST       = 30        # reduce speed  (was 35 — slightly lower to avoid crawling)
-ALL_BLOCKED_CM      = 18        # every forward sector is this close → boxed in (was 30 — too conservative for slalom)
+WARN_DIST           = 80        # start swerving — increased from 60 for earlier reaction
+CRITICAL_DIST       = 40        # reduce speed — increased from 30 to slow down earlier
+ALL_BLOCKED_CM      = 22        # every forward sector is this close → boxed in (raised from 18)
 EMERGENCY_IR_DIST   = 0         # IR triggers (binary, active LOW)
-HARD_SWERVE_DIST    = 25        # force min swerve when forward obstacle nearer  (was 50 — triggered constantly in slalom)
-MIN_FORCED_SWERVE   = 25        # minimum swerve degrees when forced  (was 40 — too aggressive, caused circling)
-EMERGENCY_FWD_CM    = 18        # emergency max-swerve when centre sectors this close  (was 25)
-SIDE_CLEAR_MIN_CM   = 20        # side must have at least this to be considered clear (was 40 — false boxed-in)
-CIRCLE_HEADING_LIMIT = 120      # degrees — trigger boxed-in if car rotates this much  (was 150 — detect earlier)
+HARD_SWERVE_DIST    = 55        # force min swerve when forward obstacle nearer (raised from 40 — car wasn't swerving at 42cm)
+MIN_FORCED_SWERVE   = 35        # minimum swerve degrees when forced (raised from 30 for stronger avoidance)
+EMERGENCY_FWD_CM    = 25        # emergency max-swerve when centre sectors this close (raised from 22)
+SIDE_CLEAR_MIN_CM   = 20        # side must have at least this to be considered clear
+CIRCLE_HEADING_LIMIT = 120      # degrees — trigger boxed-in if car rotates this much
+# Stuck detection — car not turning despite close obstacles
+STUCK_HEADING_THRESH = 5.0      # degrees — max heading change to count as "not turning"
+STUCK_CYCLE_LIMIT    = 35       # cycles (~0.7s) — trigger recovery after this many stuck cycles (was 40)
+STUCK_MIN_FWD_CM     = 50       # cm — only count as stuck when forward obstacle is this close (was 35 — missed stuck at 42cm)
 
 # Swerve geometry
 SWERVE_MAX_ANGLE    = 70        # max differential angle (degrees)  (was 90 — caused near-pivot turns)
 IR_SWERVE_BOOST     = 55        # added degrees when IR fires  (was 65)
 SPEED_FLOOR_FACTOR  = 0.55      # minimum speed fraction near obstacles
-INNER_WHEEL_MIN     = 0.25      # inner wheels keep 25% speed for forward motion  (was 0.00 — pivot turns)
+INNER_WHEEL_MIN     = 0.20      # inner wheels keep 20% speed — ensure enough torque to actually turn (was 0.15 — 11% PWM stalled)
 SWERVE_SPEED_FLOOR  = 1.00      # outer wheel stays at full BASE_SPEED during swerve
 SWERVE_OUTER_BOOST  = 1.05      # slight boost to outer wheel  (was 1.15 — too aggressive differential)
-SWERVE_SMOOTH_ALPHA = 0.40      # EMA smoothing factor  (was 0.70 — locked swerve at max too quickly)
+SWERVE_SMOOTH_ALPHA = 0.60      # EMA smoothing factor — raised from 0.40 for faster swerve response
 
 # Heading-rate damping — prevents persistent one-direction swerve (circling)
 HEADING_DAMP_START  = 30        # degrees — start damping after this much heading change
 HEADING_DAMP_FULL   = 120       # degrees — full damping at this heading change
-HEADING_DAMP_MAX    = 0.70      # max swerve reduction factor (0–1)
+HEADING_DAMP_MAX    = 0.45      # max swerve reduction factor (0–1) — reduced from 0.70 to allow stronger swerves
 
 # PID heading correction (gyro-Z)
 GYRO_KP             = 1.5
@@ -83,7 +87,7 @@ ACCEL_G             = 9.81      # m/s² per g
 CRASH_G             = 1.5       # g-force lateral impact threshold
 CRASH_MS2           = CRASH_G * ACCEL_G   # ~14.7 m/s² – actual comparison value
 MOVING_THRESHOLD_G  = 0.3       # detect if wheels spin but car is stuck
-CRASH_COOLDOWN      = 3.0       # seconds between consecutive crash events
+CRASH_COOLDOWN      = 1.5       # seconds between consecutive crash events (reduced from 3.0 — missed 2nd impact)
 
 # Sector map
 SCAN_RANGE_DEG      = 60        # ±60° from centre  → 120° total
@@ -154,14 +158,14 @@ class State(Enum):
 #  LOGGING SETUP  →  slalom.logs
 # ─────────────────────────────────────────────────────────────────────────────
 
-LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "slalom.logs")
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "autonomous_driving_laser.logs")
 
 _file_formatter = logging.Formatter(
     fmt="%(asctime)s.%(msecs)03d | %(levelname)-5s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-_log = logging.getLogger("auto_slalom")
+_log = logging.getLogger("autonomous_driving_laser")
 _log.setLevel(logging.DEBUG)
 
 _fh = logging.FileHandler(LOG_FILE, mode="a", encoding="utf-8")
@@ -486,9 +490,9 @@ class LaserScanner:
         return result
 
     def get_min_forward_distance(self):
-        """Return minimum distance in the centre sectors (±15°)."""
+        """Return minimum distance in the forward sectors (±25°)."""
         smap = self.get_sector_map()
-        centre_dists = [d for a, d, c in smap if -15 <= a <= 15]
+        centre_dists = [d for a, d, c in smap if -25 <= a <= 25]
         if centre_dists:
             return min(centre_dists)
         return SECTOR_DEFAULT_CM
@@ -867,8 +871,8 @@ def compute_swerve(sector_map, ir_left: bool, ir_right: bool,
             if dist_cm < min_dist:
                 min_dist = dist_cm
 
-            # Forward-facing minimum (centre 3 sectors)
-            if -15 <= angle_deg <= 15 and dist_cm < min_fwd:
+            # Forward-facing minimum (wider ±25° — was ±15°, missed oblique obstacles)
+            if -25 <= angle_deg <= 25 and dist_cm < min_fwd:
                 min_fwd = dist_cm
 
             # Side clearance tracking
@@ -907,11 +911,12 @@ def compute_swerve(sector_map, ir_left: bool, ir_right: bool,
     threat_mag = math.sqrt(threat_x * threat_x + threat_y * threat_y)
 
     # Boxed-in: trigger when surrounded or both IRs confirm.
+    # Relaxed thresholds: 40%/60% instead of 50%/70% — catch wedged-against-wall scenarios
     n_sectors = len(sector_map)
     if use_laser:
-        boxed = ((blocked_count >= n_sectors * 0.5) and (ir_left or ir_right)) or \
+        boxed = ((blocked_count >= n_sectors * 0.4) and (ir_left or ir_right)) or \
                 (ir_left and ir_right and min_dist < ALL_BLOCKED_CM) or \
-                (blocked_count >= n_sectors * 0.7)
+                (blocked_count >= n_sectors * 0.6)
     else:
         boxed = ir_left and ir_right
 
@@ -923,11 +928,11 @@ def compute_swerve(sector_map, ir_left: bool, ir_right: bool,
         swerve_angle = 0.0
     else:
         raw_angle = -math.degrees(math.atan2(threat_x, max(threat_y, 0.01)))
-        # Gain: 1.2× baseline, up to 2.0× when obstacles are very close
-        # (was 2.0× base / 4.0× max — way too aggressive, produced 60° swerve
-        #  from mild asymmetric sectors and caused persistent circling)
-        proximity_gain = 1.0 + (1.0 - min(min_fwd, WARN_DIST) / WARN_DIST)
-        swerve_gain = 1.2 * proximity_gain   # 1.2–2.4× amplification
+        # Gain scales with proximity: 2.0× at WARN_DIST, up to 4.0× at close range
+        # (was 1.5–3.0× — too weak when obstacle is straight ahead producing
+        #  a near-zero lateral angle)
+        proximity_gain = 1.0 + 1.0 * (1.0 - min(min_fwd, WARN_DIST) / WARN_DIST)
+        swerve_gain = 2.0 * proximity_gain   # 2.0–4.0× amplification
         swerve_angle = raw_angle * swerve_gain
         swerve_angle = max(-SWERVE_MAX_ANGLE, min(SWERVE_MAX_ANGLE, swerve_angle))
 
@@ -988,15 +993,19 @@ def compute_swerve(sector_map, ir_left: bool, ir_right: bool,
         if min_fwd < EMERGENCY_FWD_CM:
             swerve_angle = -SWERVE_MAX_ANGLE
 
-    # Speed reduction: primarily based on forward obstacles.
-    # Side obstacles contribute at reduced weight (×2.0 factor scales them
-    # up before comparison) so the car slows only when side obstacles are
-    # very close, not just because something is at 60° periphery.
+    # Speed reduction: progressive slowdown based on forward obstacles.
+    # Start slowing from WARN_DIST, aggressive reduction below CRITICAL_DIST.
     side_influence = min(min_fwd, min_dist * 2.0) if min_dist < SECTOR_DEFAULT_CM else min_fwd
     overall_min = max(min_fwd * 0.7, side_influence)  # forward biased
     if overall_min < CRITICAL_DIST:
-        speed_factor = max(SPEED_FLOOR_FACTOR,
-                           overall_min / CRITICAL_DIST)
+        # Quadratic reduction for tighter braking near obstacles
+        ratio = overall_min / CRITICAL_DIST
+        speed_factor = max(SPEED_FLOOR_FACTOR, ratio * ratio)
+    elif overall_min < WARN_DIST:
+        # Steeper linear reduction between WARN_DIST and CRITICAL_DIST
+        # (was 0.85+0.15 — car kept 86% speed at 42cm, too fast to react)
+        speed_factor = 0.75 + 0.25 * ((overall_min - CRITICAL_DIST) /
+                                        (WARN_DIST - CRITICAL_DIST))
     else:
         speed_factor = 1.0
 
@@ -1027,7 +1036,7 @@ def differential_speeds(base_speed: float, swerve_angle: float):
 #  MAIN CONTROLLER
 # ─────────────────────────────────────────────────────────────────────────────
 
-class SlalomController:
+class AutonomousController:
     """Top-level state machine orchestrating all subsystems."""
 
     def __init__(self):
@@ -1057,11 +1066,15 @@ class SlalomController:
         self._target_heading = 0.0
         self._heading_at_swerve_start = 0.0
 
+        # Stuck detection
+        self._stuck_cycles = 0
+        self._stuck_heading_ref = 0.0
+
         # Drive thread
         self._drive_thread = None
 
         _log.info("========================================================================")
-        _log.info("AUTO_SLALOM INIT  pid=%d", os.getpid())
+        _log.info("AUTONOMOUS_DRIVING INIT  pid=%d", os.getpid())
         _log.info("========================================================================")
 
         self._set_state(State.CALIBRATING)
@@ -1109,6 +1122,8 @@ class SlalomController:
         self.imu.reset_heading()
         self._target_heading = 0.0
         self._heading_at_swerve_start = 0.0
+        self._stuck_cycles = 0
+        self._stuck_heading_ref = 0.0
 
         self._set_state(State.DRIVING)
         _log.info("DRIVING_START base_speed=%d", BASE_SPEED)
@@ -1131,6 +1146,8 @@ class SlalomController:
             self.imu.reset_heading()
             self._target_heading = 0.0
             self._heading_at_swerve_start = 0.0
+            self._stuck_cycles = 0
+            self._stuck_heading_ref = 0.0
             self._set_state(State.DRIVING)
             self._drive_thread = threading.Thread(target=self._drive_loop,
                                                    daemon=True)
@@ -1224,6 +1241,29 @@ class SlalomController:
                         self._do_boxed_in_recovery()
                         continue
 
+                # ── Stuck detection: heading barely changes despite    ──
+                # ── close obstacles → car is wedged/stuck              ──
+                if min_fwd < STUCK_MIN_FWD_CM:
+                    heading_change = abs(imu_data["heading"] - self._stuck_heading_ref)
+                    if heading_change < STUCK_HEADING_THRESH:
+                        self._stuck_cycles += 1
+                    else:
+                        self._stuck_cycles = 0
+                        self._stuck_heading_ref = imu_data["heading"]
+                    if self._stuck_cycles >= STUCK_CYCLE_LIMIT:
+                        self._stuck_cycles = 0
+                        self._boxed_in_count += 1
+                        _log.warning(
+                            "STUCK_DETECTED count=%d cycles=%d "
+                            "heading_change=%.1f min_fwd=%.1f",
+                            self._boxed_in_count, STUCK_CYCLE_LIMIT,
+                            heading_change, min_fwd)
+                        self._do_boxed_in_recovery()
+                        continue
+                else:
+                    self._stuck_cycles = 0
+                    self._stuck_heading_ref = imu_data["heading"]
+
                 # ── Circle detection: if the car has rotated too far ──
                 # ── from its swerve-start heading, it's spinning.     ──
                 heading_delta = abs(imu_data["heading"] - self._heading_at_swerve_start)
@@ -1264,7 +1304,7 @@ class SlalomController:
 
                 # Compute wheel speeds
                 effective_speed = BASE_SPEED * speed_factor
-                if abs(swerve_angle) > 25:
+                if abs(swerve_angle) > 18:
                     # ACTIVE SWERVE: differential steering for obstacle
                     # avoidance.  Outer wheel slightly boosted, inner wheel
                     # stays at fraction of BASE_SPEED for forward progress.
@@ -1424,6 +1464,8 @@ class SlalomController:
         self.imu.reset_heading()
         self._target_heading = 0.0
         self._heading_at_swerve_start = 0.0
+        self._stuck_cycles = 0
+        self._stuck_heading_ref = 0.0
         self._last_boxed_recovery_time = time.time()
         self._set_state(State.DRIVING)
 
@@ -1467,11 +1509,39 @@ class SlalomController:
             _log.warning("CRASH_NO_REVERSE rear_blocked=%.1f", rd)
 
         time.sleep(0.3)
+
+        # Recovery turn after crash reverse — steer away from closest side
+        sweep_before = self.scanner.sweep_count
+        t_wait = time.time()
+        while (self.scanner.sweep_count <= sweep_before and
+               (time.time() - t_wait) < 1.0):
+            time.sleep(0.02)
+
+        sector_map = self.scanner.get_sector_map()
+        left_dists  = [d for a, d, c in sector_map if a < -5]
+        right_dists = [d for a, d, c in sector_map if a > 5]
+        left_avg  = sum(left_dists)  / max(1, len(left_dists))
+        right_avg = sum(right_dists) / max(1, len(right_dists))
+
+        turn_dur = 0.8  # shorter than boxed-in recovery turn
+        if left_avg >= right_avg:
+            _log.info("CRASH_TURN LEFT left_avg=%.1f right_avg=%.1f",
+                      left_avg, right_avg)
+            self.motor.forward_differential(BASE_SPEED * 0.25,
+                                            BASE_SPEED * 0.85)
+        else:
+            _log.info("CRASH_TURN RIGHT left_avg=%.1f right_avg=%.1f",
+                      left_avg, right_avg)
+            self.motor.forward_differential(BASE_SPEED * 0.85,
+                                            BASE_SPEED * 0.25)
+        time.sleep(turn_dur)
         self.motor.coast()
 
         self.imu.reset_heading()
         self._target_heading = 0.0
         self._heading_at_swerve_start = 0.0
+        self._stuck_cycles = 0
+        self._stuck_heading_ref = 0.0
 
         _log.info("CRASH_RECOVERY_DONE count=%d", self._crash_count)
         self._set_state(State.DRIVING)
@@ -1551,6 +1621,8 @@ def _curses_main(stdscr, controller):
                 controller.imu.reset_heading()
                 controller._target_heading = 0.0
                 controller._heading_at_swerve_start = 0.0
+                controller._stuck_cycles = 0
+                controller._stuck_heading_ref = 0.0
                 controller._last_boxed_recovery_time = time.time()
                 controller._set_state(State.DRIVING)
                 controller._drive_thread = threading.Thread(
@@ -1574,7 +1646,7 @@ def _curses_main(stdscr, controller):
         elif controller.state == State.PAUSED:
             state_col = COL_WARN
 
-        header = f"  AUTO SLALOM  |  {controller.state.name}  |  " \
+        header = f"  AUTONOMOUS DRIVE  |  {controller.state.name}  |  " \
                  f"Cycles: {controller._cycle_count}"
         _safe(row, 0, header, COL_HDR)
         row += 2
@@ -1659,7 +1731,7 @@ def _curses_main(stdscr, controller):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    controller = SlalomController()
+    controller = AutonomousController()
 
     def _sighandler(sig, frame):
         _log.info("SIGNAL_%s received",
