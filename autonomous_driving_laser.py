@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
-autonomous_driving_laser.py — Autonomous Laser-Scanning Driving Controller
+autonomous_driving_laser.py — Autonomous Sonar+Laser Driving Controller
 =========================================================================
 Standalone script for autonomous obstacle-avoidance driving using:
-  • VL53L0X laser on servo for continuous 120° sector scanning
+  • Front HC-SR04 sonar as PRIMARY always-on forward obstacle detector
+  • VL53L0X laser on servo as SECONDARY on-demand directional scanner
+    – Activates only when sonar detects obstacle within LASER_TRIGGER_DIST
+    – Two-phase scan: quick 5-angle check, full sweep if ambiguous
+    – Determines clearest escape direction for steering
   • Front IR sensors (left + right) for close-range detection
   • MPU6050 accelerometer for crash detection, gyro for yaw tracking
-  • Rear HC-SR04 sonar for safe reversing
   • Differential steering for smooth swerving (no pivot turns)
+  • No rear sensor — reversing is blind (short timed bursts)
 
 Run:  python3 autonomous_driving_laser.py
 Controls:  S = Start | P = Pause | R = Resume/Retry | Q = Quit
@@ -48,6 +52,7 @@ RL_TRIM = 1.00
 RR_TRIM = 1.00
 
 # Obstacle distances (cm)
+APPROACH_DIST       = 100       # pre-emptive laser scan trigger — map area before reaching CAUTION
 WARN_DIST           = 80        # start swerving — increased from 60 for earlier reaction
 CRITICAL_DIST       = 40        # reduce speed — increased from 30 to slow down earlier
 ALL_BLOCKED_CM      = 22        # every forward sector is this close → boxed in (raised from 18)
@@ -56,8 +61,9 @@ HARD_SWERVE_DIST    = 60        # force min swerve when forward obstacle nearer 
 MIN_FORCED_SWERVE   = 45        # minimum swerve degrees when forced (was 35 — not acute enough)
 EMERGENCY_FWD_CM    = 30        # emergency max-swerve when centre sectors this close (was 25 — triggered too late)
 TANK_TURN_DIST      = 20        # cm (200mm) — full tank turn (spin in place) at this distance or less
-TANK_TURN_SPEED     = 40        # PWM % for each side during tank turn
+TANK_TURN_SPEED     = 45        # PWM % for each side during tank turn (raised from 40)
 SIDE_CLEAR_MIN_CM   = 20        # side must have at least this to be considered clear
+CRITICAL_TANK_DURATION = 0.6    # seconds — minimum tank turn duration before re-scanning in CRITICAL
 CIRCLE_HEADING_LIMIT = 120      # degrees — trigger boxed-in if car rotates this much
 # Stuck detection — car not turning despite close obstacles
 STUCK_HEADING_THRESH = 5.0      # degrees — max heading change to count as "not turning"
@@ -66,6 +72,8 @@ STUCK_MIN_FWD_CM     = 50       # cm — only count as stuck when forward obstac
 
 # Swerve geometry
 SWERVE_MAX_ANGLE    = 85        # max differential angle (degrees)  (was 70 — not acute enough, car still hit obstacles)
+SWERVE_MIN_DYNAMIC  = 30        # minimum dynamic swerve angle (at APPROACH_DIST) — gentle start
+SWERVE_CAUTION_MAX  = 75        # max swerve at CAUTION-DANGER boundary — aggressive before DANGER
 IR_SWERVE_BOOST     = 65        # added degrees when IR fires  (was 55 — increased for harder swerve)
 IR_CLOSE_MAX_SWERVE_CM = 25     # cm — full differential (100,0 / 0,100) below this distance
 IR_STUCK_REVERSE_DUR   = 0.5    # seconds to reverse when single IR fires
@@ -74,6 +82,7 @@ INNER_WHEEL_MIN     = 0.12      # inner wheels keep 12% speed — stronger turn 
 SWERVE_SPEED_FLOOR  = 1.00      # outer wheel stays at full BASE_SPEED during swerve
 SWERVE_OUTER_BOOST  = 1.05      # slight boost to outer wheel  (was 1.15 — too aggressive differential)
 SWERVE_SMOOTH_ALPHA = 0.70      # EMA smoothing factor — raised from 0.60 for faster swerve response
+DANGER_OUTER_FLOOR  = 0.75      # outer wheel never below 75% in DANGER — maintain turn torque
 
 # Heading-rate damping — prevents persistent one-direction swerve (circling)
 HEADING_DAMP_START  = 30        # degrees — start damping after this much heading change
@@ -121,12 +130,19 @@ FLOOR_REJECT_CM     = 12        # absolute minimum (anything shorter = noise)
 # Grace period — react as soon as any sector has data
 GRACE_SWEEPS        = 0         # was 2 — blinded car for ~1.5 s, causing collisions
 
-# Rear sonar
-REAR_CLEAR_CM       = 15        # minimum rear clearance to allow reverse
-REAR_STOP_CM        = 10        # abort reverse if rear drops below this
-REAR_MIN_VALID_CM   = 3.0       # reject readings shorter than this (sensor noise)
-REAR_FLOOR_LOW      = 14        # floor-bounce band
-REAR_FLOOR_HIGH     = 18
+# Front sonar (HC-SR04 — primary obstacle detector, static mount)
+FRONT_SONAR_HZ      = 10        # polling rate (higher than old rear sonar)
+FRONT_MIN_VALID_CM  = 3.0       # reject readings shorter than this (sensor noise)
+LASER_TRIGGER_DIST  = 100       # cm — sonar distance that activates laser scan (matches APPROACH_DIST)
+SCAN_COOLDOWN_S     = 1.5       # minimum seconds between laser scans
+
+# Laser on-demand scan (two-phase)
+QUICK_SCAN_ANGLES   = [-60, -30, 0, 30, 60]   # Phase 1: quick 5-angle check
+AMBIGUITY_THRESH_CM = 15        # if |left_avg - right_avg| < this → do full sweep
+
+# Blind reverse (no rear sensor)
+BLIND_REVERSE_SPEED    = 30     # PWM % — reduced for safety (blind)
+BLIND_REVERSE_DURATION = 0.5    # seconds — short burst
 
 # MPU6050 calibration
 CALIBRATION_SAMPLES = 200
@@ -136,7 +152,6 @@ CALIBRATION_INTERVAL = 0.010    # seconds between samples
 LOOP_HZ             = 50
 LOOP_PERIOD         = 1.0 / LOOP_HZ
 UI_REFRESH_HZ       = 5
-REAR_SONAR_HZ       = 5
 SENSOR_LOG_EVERY_N  = 1         # log every Nth control cycle (1 = every)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -155,9 +170,9 @@ RR_IN3 = 9;   RR_IN4 = 11;  RR_ENB = 18
 # Sensors
 IR_LEFT_PIN   = 5
 IR_RIGHT_PIN  = 6
-SERVO_PIN     = 21
-REAR_TRIG_PIN = 25
-REAR_ECHO_PIN = 24
+SERVO_PIN      = 21
+FRONT_TRIG_PIN = 25
+FRONT_ECHO_PIN = 24
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  STATE ENUM
@@ -174,8 +189,9 @@ class State(Enum):
 
 class AvoidanceZone(Enum):
     """FSM obstacle avoidance zones — steering aggression scales with proximity."""
-    CLEAR    = auto()   # > WARN_DIST (80cm): cruise normally
-    CAUTION  = auto()   # CRITICAL_DIST .. WARN_DIST (40-80cm): moderate swerve
+    CLEAR    = auto()   # > APPROACH_DIST (100cm): cruise normally
+    APPROACH = auto()   # WARN_DIST .. APPROACH_DIST (80-100cm): pre-scan, gentle swerve
+    CAUTION  = auto()   # CRITICAL_DIST .. WARN_DIST (40-80cm): moderate->hard swerve
     DANGER   = auto()   # TANK_TURN_DIST .. CRITICAL_DIST (20-40cm): hard swerve, minimal forward
     CRITICAL = auto()   # ≤ TANK_TURN_DIST (20cm / 200mm): tank turn — spin in place
 
@@ -460,32 +476,38 @@ class MotorDriver:
         return list(self._current_pwm)
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  LASER SCANNER  (servo + VL53L0X)
+#  LASER SCANNER  (servo + VL53L0X — on-demand secondary navigation)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class LaserScanner:
-    """Continuous-sweep sector mapper using a servo-mounted VL53L0X."""
+    """On-demand directional scanner using a servo-mounted VL53L0X.
+
+    The laser is NOT continuously scanning.  It stays centered (forward)
+    while idle and only activates when the front sonar detects an obstacle
+    within LASER_TRIGGER_DIST.  Two-phase scan:
+      Phase 1 (quick): 5 key angles — ~250 ms
+      Phase 2 (full):  13 sectors ±60° — ~650 ms extra (only if ambiguous)
+    After scanning, servo returns to center.
+    """
 
     def __init__(self):
-        self._angles = list(range(-SCAN_RANGE_DEG, SCAN_RANGE_DEG + 1,
-                                  SCAN_STEP_DEG))
-        self._n_sectors = len(self._angles)
+        self._full_angles = list(range(-SCAN_RANGE_DEG, SCAN_RANGE_DEG + 1,
+                                       SCAN_STEP_DEG))
+        self._n_sectors = len(self._full_angles)
 
-        # Per-sector storage: [distance_cm, timestamp]
-        self._sector_data = [[SECTOR_DEFAULT_CM, 0.0]
-                              for _ in range(self._n_sectors)]
-        self._lock = threading.Lock()
-        self._sweep_count = 0
-        self._running = False
-        self._thread = None
+        # Last scan result storage
+        self._last_scan_result = None   # set by scan_for_direction()
+        self._last_scan_time = 0.0
+        self._scan_count = 0
+        self._scanning = False          # True while a scan is in progress
 
         # Servo PWM setup
         GPIO.setup(SERVO_PIN, GPIO.OUT)
         self._pwm = GPIO.PWM(SERVO_PIN, 50)  # 50 Hz standard servo
         self._pwm.start(0)
 
-        _log.info("SCANNER_INIT sectors=%d angles=%s",
-                  self._n_sectors, self._angles)
+        _log.info("SCANNER_INIT on-demand mode, quick_angles=%s full_sectors=%d",
+                  QUICK_SCAN_ANGLES, self._n_sectors)
 
     # ── servo helpers ────────────────────────────────────────────────────
 
@@ -522,89 +544,169 @@ class LaserScanner:
         except Exception:
             return -1
 
-    # ── sector map access ────────────────────────────────────────────────
+    # ── on-demand scan ───────────────────────────────────────────────────
 
-    def get_sector_map(self):
-        """Return list of (angle_deg, distance_cm, confidence) tuples."""
-        now = time.time()
-        result = []
-        with self._lock:
-            for i in range(self._n_sectors):
-                age = now - self._sector_data[i][1]
-                dist = self._sector_data[i][0]
-                if age > SECTOR_STALE_S or self._sector_data[i][1] == 0:
+    def read_forward(self):
+        """Single laser reading at 0° (forward).  Use as backup distance
+        confirmation while servo is idle.  Returns cm or -1."""
+        self._set_servo_angle(0)
+        d = self._read_laser_cm()
+        self._pwm.ChangeDutyCycle(0)
+        return d
+
+    def scan_for_direction(self):
+        """Two-phase on-demand scan to find the clearest escape direction.
+
+        Phase 1 (quick): Read 5 key angles [-60, -30, 0, +30, +60]
+        Phase 2 (full):  If left vs right are ambiguous (within
+                         AMBIGUITY_THRESH_CM), do a full 13-sector sweep.
+
+        Returns dict:
+            direction: 'left' | 'right' | 'forward'
+            best_angle: float (-60..+60)
+            left_avg:   float (cm)
+            right_avg:  float (cm)
+            fwd_dist:   float (cm) — distance at 0°
+            sector_map: list of (angle, dist, 1.0) tuples
+            phase:      1 or 2 — which phase was used for decision
+        """
+        self._scanning = True
+        t_start = time.time()
+
+        # ── Phase 1: quick scan at 5 key angles ─────────────────────
+        quick_data = []
+        for angle in QUICK_SCAN_ANGLES:
+            self._set_servo_angle(angle)
+            dist = self._read_laser_cm()
+            if dist < 0:
+                dist = SECTOR_DEFAULT_CM
+            quick_data.append((angle, dist, 1.0))
+
+        # Compute side averages from quick scan
+        left_dists  = [d for a, d, _ in quick_data if a < -5]
+        right_dists = [d for a, d, _ in quick_data if a > 5]
+        fwd_dists   = [d for a, d, _ in quick_data if -5 <= a <= 5]
+        left_avg  = sum(left_dists)  / max(1, len(left_dists))
+        right_avg = sum(right_dists) / max(1, len(right_dists))
+        fwd_dist  = fwd_dists[0] if fwd_dists else SECTOR_DEFAULT_CM
+
+        phase = 1
+        sector_map = list(quick_data)
+
+        _log.info("SCAN_PHASE1 L_avg=%.1f R_avg=%.1f fwd=%.1f (%.0fms)",
+                  left_avg, right_avg, fwd_dist,
+                  (time.time() - t_start) * 1000)
+
+        # ── Phase 2: full sweep if ambiguous ─────────────────────────
+        if abs(left_avg - right_avg) < AMBIGUITY_THRESH_CM:
+            phase = 2
+            full_data = []
+            for angle in self._full_angles:
+                self._set_servo_angle(angle)
+                dist = self._read_laser_cm()
+                if dist < 0:
                     dist = SECTOR_DEFAULT_CM
-                    conf = 0.0
-                elif age > SECTOR_DECAY_S:
-                    conf = max(0.3, 1.0 - (age - SECTOR_DECAY_S) /
-                               (SECTOR_STALE_S - SECTOR_DECAY_S))
-                else:
-                    conf = 1.0
-                result.append((self._angles[i], dist, conf))
+                full_data.append((angle, dist, 1.0))
+
+            # Recompute with full data
+            left_dists  = [d for a, d, _ in full_data if a < -5]
+            right_dists = [d for a, d, _ in full_data if a > 5]
+            fwd_dists   = [d for a, d, _ in full_data if -5 <= a <= 5]
+            left_avg  = sum(left_dists)  / max(1, len(left_dists))
+            right_avg = sum(right_dists) / max(1, len(right_dists))
+            fwd_dist  = min(fwd_dists) if fwd_dists else SECTOR_DEFAULT_CM
+            sector_map = list(full_data)
+
+            _log.info("SCAN_PHASE2 L_avg=%.1f R_avg=%.1f fwd=%.1f (%.0fms)",
+                      left_avg, right_avg, fwd_dist,
+                      (time.time() - t_start) * 1000)
+
+        # Return servo to center
+        self.center_servo()
+
+        # Determine best direction
+        if fwd_dist > max(left_avg, right_avg) and fwd_dist > LASER_TRIGGER_DIST:
+            direction = 'forward'
+            best_angle = 0.0
+        elif left_avg >= right_avg:
+            direction = 'left'
+            # Find the exact best angle on the left side
+            left_sectors = [(a, d) for a, d, _ in sector_map if a < -5]
+            if left_sectors:
+                best_angle = max(left_sectors, key=lambda x: x[1])[0]
+            else:
+                best_angle = -45.0
+        else:
+            direction = 'right'
+            right_sectors = [(a, d) for a, d, _ in sector_map if a > 5]
+            if right_sectors:
+                best_angle = max(right_sectors, key=lambda x: x[1])[0]
+            else:
+                best_angle = 45.0
+
+        result = {
+            'direction': direction,
+            'best_angle': best_angle,
+            'left_avg': left_avg,
+            'right_avg': right_avg,
+            'fwd_dist': fwd_dist,
+            'sector_map': sector_map,
+            'phase': phase,
+        }
+
+        self._last_scan_result = result
+        self._last_scan_time = time.time()
+        self._scan_count += 1
+        self._scanning = False
+
+        _log.info("SCAN_RESULT dir=%s best_angle=%.0f L=%.1f R=%.1f "
+                  "fwd=%.1f phase=%d count=%d (%.0fms total)",
+                  direction, best_angle, left_avg, right_avg,
+                  fwd_dist, phase, self._scan_count,
+                  (time.time() - t_start) * 1000)
+
         return result
 
+    # ── sector map access (from last scan) ───────────────────────────
+
+    def get_sector_map(self):
+        """Return sector map from last scan, or defaults if no scan yet."""
+        if self._last_scan_result and self._last_scan_result.get('sector_map'):
+            return list(self._last_scan_result['sector_map'])
+        # No scan data — return defaults
+        return [(a, SECTOR_DEFAULT_CM, 0.0) for a in self._full_angles]
+
     def get_min_forward_distance(self):
-        """Return minimum distance in the forward sectors (±25°)."""
+        """Return minimum distance in the forward sectors (±25°) from last scan."""
         smap = self.get_sector_map()
         centre_dists = [d for a, d, c in smap if -25 <= a <= 25]
         if centre_dists:
             return min(centre_dists)
         return SECTOR_DEFAULT_CM
 
-    # ── thread control ───────────────────────────────────────────────────
-
-    def start(self):
-        """Start continuous background scanning."""
-        if self._running:
-            return
-        self._running = True
-        self._thread = threading.Thread(target=self._scan_loop, daemon=True)
-        self._thread.start()
-        _log.info("SCANNER_START continuous sweep ±%d° step=%d°",
-                  SCAN_RANGE_DEG, SCAN_STEP_DEG)
-
-    def stop(self):
-        """Stop scanning thread."""
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=2.0)
-        self.center_servo()
-        _log.info("SCANNER_STOP")
+    @property
+    def last_scan_result(self):
+        """Most recent scan_for_direction() result dict, or None."""
+        return self._last_scan_result
 
     @property
-    def sweep_count(self):
-        """Number of completed sweeps."""
-        return self._sweep_count
+    def last_scan_time(self):
+        """Timestamp of most recent scan."""
+        return self._last_scan_time
 
-    def _scan_loop(self):
-        """Background thread: sweep servo back and forth, sampling laser."""
-        idx = 0
-        direction = 1  # +1 = left-to-right, -1 = right-to-left
+    @property
+    def scan_count(self):
+        """Total number of completed scans."""
+        return self._scan_count
 
-        while self._running:
-            angle = self._angles[idx]
-            self._set_servo_angle(angle)
-            dist = self._read_laser_cm()
-            now = time.time()
-
-            if dist > 0:
-                with self._lock:
-                    self._sector_data[idx] = [dist, now]
-
-            # Advance index
-            idx += direction
-            if idx >= self._n_sectors:
-                idx = self._n_sectors - 2
-                direction = -1
-                self._sweep_count += 1
-            elif idx < 0:
-                idx = 1
-                direction = 1
-                self._sweep_count += 1
+    @property
+    def is_scanning(self):
+        """True while a scan is in progress."""
+        return self._scanning
 
     def cleanup(self):
-        """Stop scanning and release servo PWM."""
-        self.stop()
+        """Release servo PWM."""
+        self.center_servo()
         try:
             self._pwm.stop()
         except Exception:
@@ -629,62 +731,62 @@ class IRSensors:
         return l, r
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  REAR HC-SR04 SONAR
+#  FRONT HC-SR04 SONAR  (primary obstacle detector — static mount)
 # ─────────────────────────────────────────────────────────────────────────────
 
-class RearSonar:
-    """Threaded rear distance sensor with median filtering and floor
-    detection.  Runs at REAR_SONAR_HZ in the background."""
+class FrontSonar:
+    """Threaded front distance sensor with median filtering.
+    Runs at FRONT_SONAR_HZ in the background.  This is the PRIMARY
+    obstacle detector — always active while driving."""
 
     def __init__(self):
-        GPIO.setup(REAR_TRIG_PIN, GPIO.OUT)
-        GPIO.setup(REAR_ECHO_PIN, GPIO.IN)
-        GPIO.output(REAR_TRIG_PIN, False)
+        GPIO.setup(FRONT_TRIG_PIN, GPIO.OUT)
+        GPIO.setup(FRONT_ECHO_PIN, GPIO.IN)
+        GPIO.output(FRONT_TRIG_PIN, False)
         time.sleep(0.05)
 
         self._dist = -1.0
-        self._floor_bounce = 0
         self._lock = threading.Lock()
         self._running = False
         self._thread = None
         self._history = deque(maxlen=5)
 
-        _log.info("REAR_SONAR_INIT trig=GPIO%d echo=GPIO%d",
-                  REAR_TRIG_PIN, REAR_ECHO_PIN)
+        _log.info("FRONT_SONAR_INIT trig=GPIO%d echo=GPIO%d",
+                  FRONT_TRIG_PIN, FRONT_ECHO_PIN)
 
     def _measure_once(self):
         """Single HC-SR04 measurement.  Returns distance in cm or -1."""
         try:
-            GPIO.output(REAR_TRIG_PIN, True)
+            GPIO.output(FRONT_TRIG_PIN, True)
             time.sleep(0.00001)
-            GPIO.output(REAR_TRIG_PIN, False)
+            GPIO.output(FRONT_TRIG_PIN, False)
 
             t0 = time.time()
             timeout = t0 + 0.06
-            while GPIO.input(REAR_ECHO_PIN) == 0:
+            while GPIO.input(FRONT_ECHO_PIN) == 0:
                 t0 = time.time()
                 if t0 > timeout:
                     return -1
 
             t1 = time.time()
             timeout = t1 + 0.06
-            while GPIO.input(REAR_ECHO_PIN) == 1:
+            while GPIO.input(FRONT_ECHO_PIN) == 1:
                 t1 = time.time()
                 if t1 > timeout:
                     return -1
 
             duration = t1 - t0
             dist = round(duration * 17150, 1)
-            if dist > 400 or dist < REAR_MIN_VALID_CM:
+            if dist > 400 or dist < FRONT_MIN_VALID_CM:
                 return -1
             return dist
         except Exception:
             return -1
 
     def read(self):
-        """Return (distance_cm, floor_bounce_flag)."""
+        """Return distance in cm (-1 if no valid reading)."""
         with self._lock:
-            return self._dist, self._floor_bounce
+            return self._dist
 
     def start(self):
         """Start background measurement thread."""
@@ -693,18 +795,18 @@ class RearSonar:
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
-        _log.info("REAR_SONAR_START rate=%d Hz", REAR_SONAR_HZ)
+        _log.info("FRONT_SONAR_START rate=%d Hz", FRONT_SONAR_HZ)
 
     def stop(self):
         """Stop measurement thread."""
         self._running = False
         if self._thread:
             self._thread.join(timeout=2.0)
-        _log.info("REAR_SONAR_STOP")
+        _log.info("FRONT_SONAR_STOP")
 
     def _loop(self):
         """Background measurement loop with median filtering."""
-        period = 1.0 / REAR_SONAR_HZ
+        period = 1.0 / FRONT_SONAR_HZ
         while self._running:
             d = self._measure_once()
             if d > 0:
@@ -716,12 +818,8 @@ class RearSonar:
             else:
                 med = -1.0
 
-            # Floor-bounce detection
-            fb = 1 if (REAR_FLOOR_LOW < med < REAR_FLOOR_HIGH) else 0
-
             with self._lock:
                 self._dist = med
-                self._floor_bounce = fb
 
             time.sleep(period)
 
@@ -1180,7 +1278,7 @@ def get_avoidance_zone(min_fwd):
     """Determine FSM obstacle avoidance zone based on minimum forward distance.
 
     Returns:
-        AvoidanceZone – one of CLEAR, CAUTION, DANGER, CRITICAL
+        AvoidanceZone – one of CLEAR, APPROACH, CAUTION, DANGER, CRITICAL
     """
     if min_fwd <= TANK_TURN_DIST:
         return AvoidanceZone.CRITICAL
@@ -1188,6 +1286,8 @@ def get_avoidance_zone(min_fwd):
         return AvoidanceZone.DANGER
     elif min_fwd <= WARN_DIST:
         return AvoidanceZone.CAUTION
+    elif min_fwd <= APPROACH_DIST:
+        return AvoidanceZone.APPROACH
     else:
         return AvoidanceZone.CLEAR
 
@@ -1211,7 +1311,7 @@ class AutonomousController:
         self.motor   = MotorDriver()
         self.scanner = LaserScanner()
         self.ir      = IRSensors()
-        self.sonar   = RearSonar()
+        self.sonar   = FrontSonar()
         self.imu     = IMU()
 
         # Counters
@@ -1219,6 +1319,7 @@ class AutonomousController:
         self._ir_left_count = 0
         self._ir_right_count = 0
         self._boxed_in_count = 0
+        self._scan_trigger_count = 0
         self._last_crash_time = 0.0
         self._last_boxed_recovery_time = 0.0
 
@@ -1229,6 +1330,11 @@ class AutonomousController:
         # Stuck detection
         self._stuck_cycles = 0
         self._stuck_heading_ref = 0.0
+
+        # Laser scan state
+        self._last_scan_time = 0.0
+        self._steering_from_scan = None   # cached scan result for steering
+        self._steer_direction = None      # 'left', 'right', or 'forward'
 
         # Navigation state — heading-based "navigate toward open space"
         self._nav_target_heading = None   # None = cruise, float = heading to turn toward
@@ -1270,18 +1376,12 @@ class AutonomousController:
         return result
 
     def start_driving(self):
-        """Start scanner, sonar, wait for first sweep, then begin driving."""
-        self.scanner.start()
+        """Start front sonar, center laser servo, then begin driving."""
+        # Center laser servo (idle position — ready for on-demand scan)
+        self.scanner.center_servo()
+        _log.info("SCANNER_CENTERED laser idle, ready for on-demand scan")
 
-        # Wait for first scanner sweep
-        _log.info("WAITING_FOR_SCANNER first sweep...")
-        t_wait = time.time()
-        while self.scanner.sweep_count < 1 and (time.time() - t_wait) < 5.0:
-            time.sleep(0.02)
-        _log.info("SCANNER_READY sweeps=%d (%.1fms wait)",
-                  self.scanner.sweep_count,
-                  (time.time() - t_wait) * 1000)
-
+        # Start front sonar background polling
         self.sonar.start()
 
         self._running = True
@@ -1291,6 +1391,9 @@ class AutonomousController:
         self._heading_at_swerve_start = 0.0
         self._stuck_cycles = 0
         self._stuck_heading_ref = 0.0
+        self._last_scan_time = 0.0
+        self._steering_from_scan = None
+        self._steer_direction = None
         self._nav_target_heading = None
         self._nav_smoothed_best = 0.0
         self._mpu_fallback_mode = False
@@ -1319,6 +1422,9 @@ class AutonomousController:
             self._heading_at_swerve_start = 0.0
             self._stuck_cycles = 0
             self._stuck_heading_ref = 0.0
+            self._last_scan_time = 0.0
+            self._steering_from_scan = None
+            self._steer_direction = None
             self._nav_target_heading = None
             self._nav_smoothed_best = 0.0
             self._mpu_fallback_mode = False
@@ -1334,9 +1440,21 @@ class AutonomousController:
         self.motor.coast()
 
     # ── MAIN DRIVE LOOP ─────────────────────────────────────────────────
+    #
+    #  Architecture:
+    #    • Front sonar (HC-SR04) is the PRIMARY always-on sensor
+    #    • Laser (servo + VL53L0X) is SECONDARY — on-demand only
+    #    • CLEAR  (>100cm):  cruise with PID heading
+    #    • APPROACH (80-100cm): pre-emptive laser scan, gentle swerve
+    #    • CAUTION (40-80cm): dynamic swerve (30°→75°) + speed reduction
+    #    • DANGER  (20-40cm): hard dynamic swerve (75°→85°), outer wheel stays strong
+    #    • CRITICAL (≤20cm): brake → scan → sustained tank turn (0.6s)
+    #    • Swerve intensity is DYNAMIC — scales with proximity.
+    #
+    # ─────────────────────────────────────────────────────────────────────
 
     def _drive_loop(self):
-        _log.info("DRIVE_LOOP_START hz=%d", LOOP_HZ)
+        _log.info("DRIVE_LOOP_START hz=%d sonar_primary laser_on_demand", LOOP_HZ)
         prev_ir_l = False
         prev_ir_r = False
         prev_swerve = 0.0          # for swerve smoothing (EMA)
@@ -1350,11 +1468,14 @@ class AutonomousController:
             self._cycle_count = cycle
 
             # ── 1. read sensors ──────────────────────────────────────
-            imu_data    = self.imu.update()
-            ir_l, ir_r  = self.ir.read()
-            sector_map  = self.scanner.get_sector_map()
-            rear_d, rear_fb = self.sonar.read()
-            min_fwd = self.scanner.get_min_forward_distance()  # fallback; overwritten by compute_swerve
+            imu_data   = self.imu.update()
+            ir_l, ir_r = self.ir.read()
+            front_dist = self.sonar.read()    # primary obstacle distance
+
+            # Use sonar as the forward distance (primary sensor)
+            # Fall back to a large value if sonar returns -1 (no echo)
+            if front_dist < 0:
+                front_dist = SECTOR_DEFAULT_CM
 
             # IR activation counters
             if ir_l and not prev_ir_l:
@@ -1382,32 +1503,13 @@ class AutonomousController:
                     imu_data["gyro"]["z"],
                     imu_data["heading"],
                 )
-                self._do_crash_recovery(rear_d)
+                self._do_crash_recovery()
                 continue
 
             # ── 3. state-dependent behaviour ─────────────────────────
             if self.state == State.DRIVING:
-                sweep_ready = self.scanner.sweep_count >= GRACE_SWEEPS
-                raw_swerve, speed_factor, threat_mag, boxed, min_fwd, left_avg, right_avg = \
-                    compute_swerve(sector_map, ir_l, ir_r,
-                                   sweep_ready=sweep_ready)
 
-                # ── Swerve EMA smoothing (prevents violent oscillation) ──
-                raw_swerve = (SWERVE_SMOOTH_ALPHA * raw_swerve +
-                              (1.0 - SWERVE_SMOOTH_ALPHA) * prev_swerve)
-                prev_swerve = raw_swerve
-
-                # ── Heading-rate damping (reduces swerve when circling) ──
-                heading_delta_abs = abs(imu_data["heading"] -
-                                        self._heading_at_swerve_start)
-                if heading_delta_abs > HEADING_DAMP_START:
-                    damp_frac = min(1.0,
-                                    (heading_delta_abs - HEADING_DAMP_START) /
-                                    (HEADING_DAMP_FULL - HEADING_DAMP_START))
-                    damp_factor = 1.0 - damp_frac * HEADING_DAMP_MAX
-                    raw_swerve *= damp_factor
-
-                # ── MPU status check ─────────────────────────────────
+                # MPU status tracking
                 mpu_valid = imu_data.get("mpu_valid", True)
                 mpu_errors = imu_data.get("mpu_errors", 0)
                 imu_heading = imu_data["heading"]
@@ -1415,37 +1517,319 @@ class AutonomousController:
                 if mpu_errors >= MPU_MAX_CONSEC_ERRORS and not self._mpu_fallback_mode:
                     self._mpu_fallback_mode = True
                     self._fallback_cycles = 0
-                    _log.warning("MPU_FALLBACK_ENABLED errors=%d – switching to laser-only nav",
-                                 mpu_errors)
+                    _log.warning("MPU_FALLBACK_ENABLED errors=%d", mpu_errors)
                 elif mpu_valid and self._mpu_fallback_mode:
                     self._mpu_fallback_mode = False
                     self._fallback_cycles = 0
                     _log.info("MPU_FALLBACK_DISABLED – MPU signal restored")
 
-                # ── Find best direction (proactive navigation) ───────
-                best_angle, best_dist, should_turn = \
-                    find_best_direction(sector_map, min_fwd)
+                # ── Branch 1: IR emergency — reverse, scan, swerve ───
+                if ir_l and ir_r:
+                    _log.warning("IR_BOTH_BLOCKED ir=[%d,%d] – "
+                                 "reversing + pivot", ir_l, ir_r)
+                    self._do_ir_both_blocked_recovery()
+                    continue
+                elif ir_l:
+                    _log.warning("IR_LEFT_STUCK – reversing + swerve right")
+                    self._do_ir_stuck_recovery('left')
+                    continue
+                elif ir_r:
+                    _log.warning("IR_RIGHT_STUCK – reversing + swerve left")
+                    self._do_ir_stuck_recovery('right')
+                    continue
 
-                # Smooth best direction via EMA
-                self._nav_smoothed_best = (
-                    NAV_SMOOTH_ALPHA * best_angle +
-                    (1.0 - NAV_SMOOTH_ALPHA) * self._nav_smoothed_best)
+                # ── Determine FSM zone from front sonar ──────────────
+                zone = get_avoidance_zone(front_dist)
+                if zone != self._prev_zone:
+                    _log.info("FSM_ZONE %s → %s front_dist=%.1f",
+                              self._prev_zone.name, zone.name, front_dist)
+                    self._prev_zone = zone
 
-                # ── Boxed-in detection (keep existing logic) ─────────
-                if boxed:
-                    if (t_start - self._last_boxed_recovery_time) < 2.0:
-                        _log.debug("BOXED_IN_SUPPRESSED cooldown=%.1fs",
-                                   t_start - self._last_boxed_recovery_time)
+                swerve_angle = 0.0
+                use_tank = False
+                speed_factor = 1.0
+                threat_mag = 0.0
+                left_avg = SECTOR_DEFAULT_CM
+                right_avg = SECTOR_DEFAULT_CM
+                best_angle = 0.0
+                best_dist = SECTOR_DEFAULT_CM
+                scan_result = self._steering_from_scan
+                sector_map = self.scanner.get_sector_map()
+
+                # ═══════════════════════════════════════════════════════
+                #  SONAR-PRIMARY NAVIGATION with ON-DEMAND LASER
+                #  Swerve intensity is DYNAMIC — scales with proximity.
+                # ═══════════════════════════════════════════════════════
+
+                # ── CRITICAL (≤20cm): BRAKE → SCAN once → SUSTAINED TANK TURN ─
+                if zone == AvoidanceZone.CRITICAL:
+                    self._nav_target_heading = None
+
+                    # Use cached scan if fresh (< 2s old), else do ONE scan
+                    if scan_result and (t_start - self._last_scan_time) < 2.0:
+                        # Reuse the scan we already have — don't re-scan every cycle
+                        pass
                     else:
-                        self._boxed_in_count += 1
-                        _log.warning("BOXED_IN count=%d min_fwd=%.1f ir=[%s,%s]",
-                                     self._boxed_in_count, min_fwd,
-                                     ir_l, ir_r)
-                        self._do_boxed_in_recovery()
-                        continue
+                        self.motor.brake()
+                        time.sleep(0.1)
+                        _log.info("CRITICAL_SCAN front_dist=%.1f – forced scan",
+                                  front_dist)
+                        scan_result = self.scanner.scan_for_direction()
+                        self._steering_from_scan = scan_result
+                        self._last_scan_time = time.time()
+                        self._scan_trigger_count += 1
 
-                # ── Stuck detection ──────────────────────────────────
-                if min_fwd < STUCK_MIN_FWD_CM:
+                    left_avg = scan_result['left_avg']
+                    right_avg = scan_result['right_avg']
+                    sector_map = scan_result['sector_map']
+
+                    if left_avg >= right_avg:
+                        turn_dir = 'left'
+                        swerve_angle = -SWERVE_MAX_ANGLE
+                    else:
+                        turn_dir = 'right'
+                        swerve_angle = SWERVE_MAX_ANGLE
+
+                    # Sustained tank turn — hold for CRITICAL_TANK_DURATION
+                    # so the car actually rotates before the next loop cycle
+                    self.motor.tank_turn(turn_dir, TANK_TURN_SPEED)
+                    time.sleep(CRITICAL_TANK_DURATION)
+                    use_tank = True
+                    left_spd = TANK_TURN_SPEED
+                    right_spd = TANK_TURN_SPEED
+                    self._heading_at_swerve_start = imu_heading
+                    self._steer_direction = turn_dir
+
+                    # Re-read sonar after the turn to check if we escaped
+                    front_dist_new = self.sonar.read()
+                    if front_dist_new > 0:
+                        front_dist = front_dist_new
+                    # If still critical, the next cycle will re-enter here
+                    # but will reuse the cached scan (no re-scan delay)
+                    if front_dist > TANK_TURN_DIST:
+                        # We escaped critical — invalidate scan so next
+                        # zone re-evaluates fresh
+                        self._steering_from_scan = None
+                        _log.info("CRITICAL_ESCAPED front=%.1f after tank turn",
+                                  front_dist)
+
+                    _log.info("CRITICAL_TANK_TURN dir=%s front=%.1f "
+                              "L=%.1f R=%.1f phase=%d dur=%.1fs",
+                              turn_dir, front_dist, left_avg, right_avg,
+                              scan_result['phase'], CRITICAL_TANK_DURATION)
+
+                # ── DANGER (20–40cm): hard dynamic swerve — outer wheel stays strong ─
+                elif zone == AvoidanceZone.DANGER:
+                    self._nav_target_heading = None
+
+                    # Trigger laser scan if cooldown elapsed
+                    if (t_start - self._last_scan_time) > SCAN_COOLDOWN_S:
+                        _log.info("DANGER_SCAN front_dist=%.1f", front_dist)
+                        scan_result = self.scanner.scan_for_direction()
+                        self._steering_from_scan = scan_result
+                        self._last_scan_time = time.time()
+                        self._scan_trigger_count += 1
+
+                    # Dynamic swerve: SWERVE_CAUTION_MAX at 40cm → SWERVE_MAX_ANGLE at 20cm
+                    prox_ratio = 1.0 - max(0.0, min(1.0,
+                        (front_dist - TANK_TURN_DIST) /
+                        max(1, CRITICAL_DIST - TANK_TURN_DIST)))
+                    dynamic_swerve = SWERVE_CAUTION_MAX + (
+                        SWERVE_MAX_ANGLE - SWERVE_CAUTION_MAX) * prox_ratio
+
+                    # Use scan result for steering (cached or fresh)
+                    if scan_result:
+                        left_avg = scan_result['left_avg']
+                        right_avg = scan_result['right_avg']
+                        best_angle = scan_result['best_angle']
+                        sector_map = scan_result['sector_map']
+                        direction = scan_result['direction']
+
+                        if direction == 'left':
+                            swerve_angle = -dynamic_swerve
+                        elif direction == 'right':
+                            swerve_angle = dynamic_swerve
+                        else:
+                            swerve_angle = 0.0
+                    else:
+                        # No scan data yet — force hard swerve right
+                        swerve_angle = dynamic_swerve
+
+                    # Outer wheel stays strong (DANGER_OUTER_FLOOR),
+                    # inner wheel drops to near-zero for max turn rate
+                    zone_ratio = max(0.0, min(1.0,
+                        (front_dist - TANK_TURN_DIST) /
+                        max(1, CRITICAL_DIST - TANK_TURN_DIST)))
+                    outer_spd = TURN_OUTER_SPEED * max(DANGER_OUTER_FLOOR,
+                                                       0.4 + 0.6 * zone_ratio)
+                    inner_spd = max(0, TURN_INNER_SPEED * zone_ratio * 0.2)
+                    speed_factor = 0.4 + 0.6 * zone_ratio
+
+                    if swerve_angle > 0:   # turn right
+                        left_spd, right_spd = outer_spd, inner_spd
+                    elif swerve_angle < 0:  # turn left
+                        left_spd, right_spd = inner_spd, outer_spd
+                    else:
+                        left_spd = BASE_SPEED * speed_factor
+                        right_spd = left_spd
+
+                    self._heading_at_swerve_start = imu_heading
+                    threat_mag = 1.0 - zone_ratio
+
+                    _log.debug("FSM_DANGER swerve=%.1f front=%.1f "
+                               "spd=[%.1f,%.1f] L=%.1f R=%.1f dyn=%.1f",
+                               swerve_angle, front_dist,
+                               left_spd, right_spd, left_avg, right_avg,
+                               dynamic_swerve)
+
+                # ── CAUTION (40–80cm): dynamic swerve scales with proximity ─
+                elif zone == AvoidanceZone.CAUTION:
+                    # Trigger laser scan if cooldown elapsed
+                    if (t_start - self._last_scan_time) > SCAN_COOLDOWN_S:
+                        _log.info("CAUTION_SCAN front_dist=%.1f", front_dist)
+                        scan_result = self.scanner.scan_for_direction()
+                        self._steering_from_scan = scan_result
+                        self._last_scan_time = time.time()
+                        self._scan_trigger_count += 1
+
+                    # Speed reduction proportional to distance
+                    speed_factor = 0.75 + 0.25 * (
+                        (front_dist - CRITICAL_DIST) /
+                        max(1, WARN_DIST - CRITICAL_DIST))
+                    speed_factor = max(SPEED_FLOOR_FACTOR, min(1.0, speed_factor))
+                    effective_speed = BASE_SPEED * speed_factor
+
+                    # Dynamic swerve: scales from SWERVE_MIN_DYNAMIC (at 80cm)
+                    # to SWERVE_CAUTION_MAX (at 40cm)
+                    prox_ratio = 1.0 - max(0.0, min(1.0,
+                        (front_dist - CRITICAL_DIST) /
+                        max(1, WARN_DIST - CRITICAL_DIST)))
+                    dynamic_swerve = SWERVE_MIN_DYNAMIC + (
+                        SWERVE_CAUTION_MAX - SWERVE_MIN_DYNAMIC) * prox_ratio
+
+                    if scan_result:
+                        left_avg = scan_result['left_avg']
+                        right_avg = scan_result['right_avg']
+                        best_angle = scan_result['best_angle']
+                        sector_map = scan_result['sector_map']
+                        direction = scan_result['direction']
+
+                        if direction == 'forward':
+                            swerve_angle = 0.0
+                            left_spd, right_spd = effective_speed, effective_speed
+                        else:
+                            # Dynamic swerve — use the larger of best_angle
+                            # and the distance-based minimum
+                            raw_swerve = max(abs(best_angle), dynamic_swerve)
+                            raw_swerve = min(raw_swerve, SWERVE_MAX_ANGLE)
+                            swerve_angle = raw_swerve if direction == 'right' else -raw_swerve
+
+                            # Ensure minimum steering angle
+                            if 0 < abs(swerve_angle) < MIN_STEER_ANGLE:
+                                swerve_angle = (MIN_STEER_ANGLE
+                                                if swerve_angle > 0
+                                                else -MIN_STEER_ANGLE)
+
+                            # Outer wheel stays strong, inner reduces for turn
+                            if swerve_angle > 0:
+                                left_spd = TURN_OUTER_SPEED * speed_factor
+                                right_spd = max(TURN_INNER_SPEED * (1.0 - prox_ratio * 0.7), 0)
+                            else:
+                                left_spd = max(TURN_INNER_SPEED * (1.0 - prox_ratio * 0.7), 0)
+                                right_spd = TURN_OUTER_SPEED * speed_factor
+
+                        threat_mag = 0.5 * (1.0 - speed_factor)
+                    else:
+                        # No scan data — slow down and drive straight
+                        swerve_angle = 0.0
+                        left_spd = effective_speed
+                        right_spd = effective_speed
+
+                    self._heading_at_swerve_start = imu_heading
+
+                    _log.debug("FSM_CAUTION swerve=%.1f front=%.1f "
+                               "sf=%.2f spd=[%.1f,%.1f] dyn=%.1f",
+                               swerve_angle, front_dist,
+                               speed_factor, left_spd, right_spd,
+                               dynamic_swerve)
+
+                # ── APPROACH (80–100cm): pre-scan, gentle swerve ─────
+                elif zone == AvoidanceZone.APPROACH:
+                    # Pre-emptive laser scan — map the area while still far
+                    if (t_start - self._last_scan_time) > SCAN_COOLDOWN_S:
+                        _log.info("APPROACH_SCAN front_dist=%.1f", front_dist)
+                        scan_result = self.scanner.scan_for_direction()
+                        self._steering_from_scan = scan_result
+                        self._last_scan_time = time.time()
+                        self._scan_trigger_count += 1
+
+                    # Gentle speed reduction
+                    speed_factor = 0.90 + 0.10 * (
+                        (front_dist - WARN_DIST) /
+                        max(1, APPROACH_DIST - WARN_DIST))
+                    speed_factor = max(0.85, min(1.0, speed_factor))
+                    effective_speed = BASE_SPEED * speed_factor
+
+                    # Gentle swerve based on scan result
+                    if scan_result:
+                        left_avg = scan_result['left_avg']
+                        right_avg = scan_result['right_avg']
+                        best_angle = scan_result['best_angle']
+                        sector_map = scan_result['sector_map']
+                        direction = scan_result['direction']
+
+                        if direction == 'forward':
+                            swerve_angle = 0.0
+                            left_spd, right_spd = effective_speed, effective_speed
+                        else:
+                            # Gentle swerve — SWERVE_MIN_DYNAMIC
+                            swerve_angle = SWERVE_MIN_DYNAMIC if direction == 'right' else -SWERVE_MIN_DYNAMIC
+                            left_spd, right_spd = differential_speeds(
+                                effective_speed, swerve_angle)
+
+                        threat_mag = 0.1
+                    else:
+                        swerve_angle = 0.0
+                        left_spd, right_spd = effective_speed, effective_speed
+
+                    self._heading_at_swerve_start = imu_heading
+
+                    _log.debug("FSM_APPROACH swerve=%.1f front=%.1f "
+                               "sf=%.2f spd=[%.1f,%.1f]",
+                               swerve_angle, front_dist,
+                               speed_factor, left_spd, right_spd)
+
+                # ── CLEAR (>100cm): cruise with PID heading correction ─
+                else:
+                    # Clear path — laser idle, sonar monitoring
+                    self._steering_from_scan = None
+                    self._steer_direction = None
+                    self._nav_target_heading = None
+                    dt = imu_data["dt"]
+
+                    if not self._mpu_fallback_mode:
+                        # PID heading correction for straight-line cruise
+                        correction = self.imu.pid_correction(
+                            self._target_heading, dt)
+                        if abs(correction * 0.3) > MIN_STEER_ANGLE * 0.5:
+                            swerve_angle = correction * 0.3
+                        else:
+                            swerve_angle = 0.0
+                    else:
+                        # MPU fallback — just drive straight
+                        self._fallback_cycles += 1
+                        swerve_angle = 0.0
+                        if self._fallback_cycles % MPU_RETRY_INTERVAL == 0:
+                            _log.info("MPU_RETRY_ATTEMPT cycle=%d",
+                                      self._fallback_cycles)
+
+                    effective_speed = BASE_SPEED
+                    left_spd, right_spd = differential_speeds(
+                        effective_speed, swerve_angle)
+                    self._heading_at_swerve_start = imu_heading
+
+                # ── Stuck detection (uses front sonar distance) ──────
+                if front_dist < STUCK_MIN_FWD_CM and not use_tank:
                     heading_change = abs(imu_heading - self._stuck_heading_ref)
                     if heading_change < STUCK_HEADING_THRESH:
                         self._stuck_cycles += 1
@@ -1457,9 +1841,9 @@ class AutonomousController:
                         self._boxed_in_count += 1
                         _log.warning(
                             "STUCK_DETECTED count=%d cycles=%d "
-                            "heading_change=%.1f min_fwd=%.1f",
+                            "heading_change=%.1f front_dist=%.1f",
                             self._boxed_in_count, STUCK_CYCLE_LIMIT,
-                            heading_change, min_fwd)
+                            heading_change, front_dist)
                         self._do_boxed_in_recovery()
                         continue
                 else:
@@ -1468,237 +1852,24 @@ class AutonomousController:
 
                 # ── Circle detection ─────────────────────────────────
                 heading_delta = abs(imu_heading - self._heading_at_swerve_start)
-                if heading_delta > CIRCLE_HEADING_LIMIT and min_fwd < WARN_DIST:
+                if heading_delta > CIRCLE_HEADING_LIMIT and front_dist < WARN_DIST:
                     self._boxed_in_count += 1
                     _log.warning(
                         "CIRCLE_DETECTED count=%d heading_delta=%.1f "
-                        "min_fwd=%.1f – triggering recovery",
-                        self._boxed_in_count, heading_delta, min_fwd)
+                        "front_dist=%.1f – triggering recovery",
+                        self._boxed_in_count, heading_delta, front_dist)
                     self._do_boxed_in_recovery()
                     continue
-
-                # ═══════════════════════════════════════════════════════
-                #  NAVIGATION DECISION — FSM Avoidance Zones
-                # ═══════════════════════════════════════════════════════
-
-                swerve_angle = 0.0
-                use_tank = False
-
-                # ── Branch 1: IR emergency – reverse, scan, swerve ─
-                if ir_l and ir_r:
-                    # Both IR triggered → front is blocked regardless of
-                    # laser data.  Reverse, scan, pivot toward open side.
-                    _log.warning("IR_BOTH_BLOCKED ir=[%d,%d] – "
-                                 "reversing + pivot", ir_l, ir_r)
-                    self._do_ir_both_blocked_recovery()
-                    continue
-                elif ir_l:
-                    # Left IR triggered → stuck on left, can't turn left.
-                    # Reverse briefly, scan, then swerve hard right.
-                    _log.warning("IR_LEFT_STUCK – reversing + swerve right")
-                    self._do_ir_stuck_recovery('left')
-                    continue
-                elif ir_r:
-                    # Right IR triggered → stuck on right, can't turn right.
-                    # Reverse briefly, scan, then swerve hard left.
-                    _log.warning("IR_RIGHT_STUCK – reversing + swerve left")
-                    self._do_ir_stuck_recovery('right')
-                    continue
-
-                # ── Determine FSM avoidance zone ────────────────────
-                zone = get_avoidance_zone(min_fwd)
-                if zone != self._prev_zone:
-                    _log.info("FSM_ZONE %s → %s min_fwd=%.1f",
-                              self._prev_zone.name, zone.name, min_fwd)
-                    self._prev_zone = zone
-
-                # ── MPU fallback (only when NOT in danger/critical) ──
-                if (self._mpu_fallback_mode and
-                        zone not in (AvoidanceZone.CRITICAL,
-                                     AvoidanceZone.DANGER)):
-                    self._fallback_cycles += 1
-                    swerve_angle, left_spd, right_spd = \
-                        self._fallback_navigate(sector_map, min_fwd,
-                                                best_angle, best_dist,
-                                                should_turn, speed_factor)
-                    # Periodically retry MPU
-                    if self._fallback_cycles % MPU_RETRY_INTERVAL == 0:
-                        _log.info("MPU_RETRY_ATTEMPT cycle=%d", self._fallback_cycles)
-
-                # ── CRITICAL zone (≤20cm / 200mm): TANK TURN ─────────
-                elif zone == AvoidanceZone.CRITICAL:
-                    self._nav_target_heading = None
-                    # Choose turn direction: toward the side with more room
-                    if right_avg >= left_avg:
-                        turn_dir = 'right'
-                        swerve_angle = SWERVE_MAX_ANGLE
-                    else:
-                        turn_dir = 'left'
-                        swerve_angle = -SWERVE_MAX_ANGLE
-                    self.motor.tank_turn(turn_dir, TANK_TURN_SPEED)
-                    use_tank = True
-                    left_spd = TANK_TURN_SPEED
-                    right_spd = TANK_TURN_SPEED
-                    self._heading_at_swerve_start = imu_heading
-                    _log.info("FSM_TANK_TURN dir=%s min_fwd=%.1f "
-                              "L_avg=%.1f R_avg=%.1f",
-                              turn_dir, min_fwd, left_avg, right_avg)
-
-                # ── DANGER zone (20–40cm): hard swerve, inner ≈ 0 ────
-                elif zone == AvoidanceZone.DANGER:
-                    self._nav_target_heading = None
-                    swerve_angle = raw_swerve
-                    # Force strong swerve if computed angle is too weak
-                    if abs(swerve_angle) < MIN_FORCED_SWERVE:
-                        swerve_angle = (SWERVE_MAX_ANGLE
-                                        if right_avg >= left_avg
-                                        else -SWERVE_MAX_ANGLE)
-                    # Speed scales with distance: near TANK_TURN_DIST → very slow,
-                    # near CRITICAL_DIST → moderate
-                    zone_ratio = max(0.0, min(1.0,
-                        (min_fwd - TANK_TURN_DIST) /
-                        max(1, CRITICAL_DIST - TANK_TURN_DIST)))
-                    outer_spd = TURN_OUTER_SPEED * (0.4 + 0.6 * zone_ratio)
-                    inner_spd = max(0, TURN_INNER_SPEED * zone_ratio * 0.3)
-                    if swerve_angle > 0:   # turn right
-                        left_spd, right_spd = outer_spd, inner_spd
-                    else:                   # turn left
-                        left_spd, right_spd = inner_spd, outer_spd
-                    self._heading_at_swerve_start = imu_heading
-                    _log.debug("FSM_DANGER swerve=%.1f min_fwd=%.1f "
-                               "spd=[%.1f,%.1f] zr=%.2f",
-                               swerve_angle, min_fwd,
-                               left_spd, right_spd, zone_ratio)
-
-                # ── CAUTION zone (40–80cm): moderate swerve / nav ────
-                elif zone == AvoidanceZone.CAUTION:
-                    # Heading-based navigation only if safe enough
-                    if should_turn and min_fwd > CRITICAL_DIST + 5:
-                        # Re-evaluate target heading to track shifting best dir
-                        desired_target = imu_heading - self._nav_smoothed_best
-                        if self._nav_target_heading is None:
-                            self._nav_target_heading = desired_target
-                            _log.info("NAV_TURN_START target=%.1f best_angle=%.1f "
-                                      "best_dist=%.1f min_fwd=%.1f",
-                                      self._nav_target_heading,
-                                      self._nav_smoothed_best,
-                                      best_dist, min_fwd)
-                        else:
-                            # Smooth-update target if best direction shifted
-                            target_diff = abs(desired_target - self._nav_target_heading)
-                            if target_diff > 15:
-                                self._nav_target_heading = (
-                                    0.3 * desired_target +
-                                    0.7 * self._nav_target_heading)
-
-                        heading_error = self._nav_target_heading - imu_heading
-                        while heading_error > 180:
-                            heading_error -= 360
-                        while heading_error < -180:
-                            heading_error += 360
-
-                        swerve_angle = heading_error
-
-                        if abs(heading_error) > TARGET_HEADING_TOL:
-                            if heading_error < 0:
-                                left_spd = TURN_OUTER_SPEED
-                                right_spd = TURN_INNER_SPEED
-                            else:
-                                left_spd = TURN_INNER_SPEED
-                                right_spd = TURN_OUTER_SPEED
-                            _log.debug("NAV_TURNING error=%.1f target=%.1f "
-                                       "heading=%.1f spd=[%.1f,%.1f]",
-                                       heading_error, self._nav_target_heading,
-                                       imu_heading, left_spd, right_spd)
-                        else:
-                            # Turn complete
-                            self._nav_target_heading = None
-                            self._target_heading = imu_heading
-                            self._heading_at_swerve_start = imu_heading
-                            left_spd = BASE_SPEED * speed_factor
-                            right_spd = left_spd
-                            _log.info("NAV_TURN_COMPLETE heading=%.1f", imu_heading)
-                    else:
-                        # Obstacle avoidance with swerve
-                        self._nav_target_heading = None
-                        swerve_angle = raw_swerve
-                        if 0 < abs(swerve_angle) < MIN_STEER_ANGLE:
-                            swerve_angle = (MIN_STEER_ANGLE
-                                            if swerve_angle > 0
-                                            else -MIN_STEER_ANGLE)
-                        if abs(swerve_angle) >= MIN_STEER_ANGLE:
-                            if swerve_angle > 0:
-                                left_spd = TURN_OUTER_SPEED
-                                right_spd = TURN_INNER_SPEED
-                            else:
-                                left_spd = TURN_INNER_SPEED
-                                right_spd = TURN_OUTER_SPEED
-                        else:
-                            effective_speed = BASE_SPEED * speed_factor
-                            left_spd, right_spd = differential_speeds(
-                                effective_speed, swerve_angle)
-                        self._heading_at_swerve_start = imu_heading
-                        _log.debug("FSM_CAUTION swerve=%.1f min_fwd=%.1f "
-                                   "spd=[%.1f,%.1f]",
-                                   swerve_angle, min_fwd, left_spd, right_spd)
-
-                # ── CLEAR zone (>80cm): cruise / heading nav ─────────
-                else:
-                    dt = imu_data["dt"]
-                    if should_turn:
-                        if self._nav_target_heading is None:
-                            self._nav_target_heading = imu_heading - self._nav_smoothed_best
-                            _log.info("NAV_TURN_START target=%.1f best_angle=%.1f "
-                                      "best_dist=%.1f min_fwd=%.1f",
-                                      self._nav_target_heading,
-                                      self._nav_smoothed_best,
-                                      best_dist, min_fwd)
-
-                        heading_error = self._nav_target_heading - imu_heading
-                        while heading_error > 180:
-                            heading_error -= 360
-                        while heading_error < -180:
-                            heading_error += 360
-
-                        swerve_angle = heading_error
-
-                        if abs(heading_error) > TARGET_HEADING_TOL:
-                            if heading_error < 0:
-                                left_spd = TURN_OUTER_SPEED
-                                right_spd = TURN_INNER_SPEED
-                            else:
-                                left_spd = TURN_INNER_SPEED
-                                right_spd = TURN_OUTER_SPEED
-                            _log.debug("NAV_TURNING error=%.1f target=%.1f "
-                                       "heading=%.1f spd=[%.1f,%.1f]",
-                                       heading_error, self._nav_target_heading,
-                                       imu_heading, left_spd, right_spd)
-                        else:
-                            self._nav_target_heading = None
-                            self._target_heading = imu_heading
-                            self._heading_at_swerve_start = imu_heading
-                            left_spd = BASE_SPEED * speed_factor
-                            right_spd = left_spd
-                            _log.info("NAV_TURN_COMPLETE heading=%.1f", imu_heading)
-                    else:
-                        self._nav_target_heading = None
-                        # Cruising – PID heading correction
-                        correction = self.imu.pid_correction(
-                            self._target_heading, dt)
-                        if abs(correction * 0.3) > MIN_STEER_ANGLE * 0.5:
-                            swerve_angle = correction * 0.3
-                        else:
-                            swerve_angle = 0.0
-                        effective_speed = BASE_SPEED * speed_factor
-                        left_spd, right_spd = differential_speeds(
-                            effective_speed, swerve_angle)
-                        self._heading_at_swerve_start = imu_heading
 
                 # Drive (skip if tank turn already applied)
                 if not use_tank:
                     self.motor.forward_differential(left_spd, right_spd)
 
-                # Update telemetry
+                # ── Update telemetry ─────────────────────────────────
+                scan_status = ("SCANNING" if self.scanner.is_scanning
+                               else "IDLE" if not scan_result
+                               else f"DONE:{scan_result['direction'].upper()}")
+
                 self._update_telem(
                     swerve_angle=round(swerve_angle, 1),
                     speed_factor=round(speed_factor, 2),
@@ -1707,42 +1878,40 @@ class AutonomousController:
                     right_speed=round(right_spd, 1),
                     ir_left=ir_l,
                     ir_right=ir_r,
-                    rear_dist=rear_d,
-                    rear_floor=rear_fb,
+                    front_dist=round(front_dist, 1),
                     heading=imu_data["heading"],
                     accel=imu_data["accel"],
                     gyro_z=round(imu_data["gyro"].get("z", 0), 2),
                     lateral_g=imu_data["lateral_g"],
-                    min_forward=round(min_fwd, 1),
                     sector_map=[(a, round(d, 1), round(c, 2))
                                 for a, d, c in sector_map],
                     crash_count=self._crash_count,
                     ir_left_count=self._ir_left_count,
                     ir_right_count=self._ir_right_count,
                     boxed_in_count=self._boxed_in_count,
+                    scan_trigger_count=self._scan_trigger_count,
                     cycle_hz=round(1.0 / max(0.001,
                                    time.time() - t_start), 1),
                     uptime=round(time.time() - self._start_time, 1),
                     mpu_fallback=self._mpu_fallback_mode,
-                    nav_target=self._nav_target_heading,
-                    best_dir=round(self._nav_smoothed_best, 1),
-                    best_dist=round(best_dist, 1),
                     mpu_errors=mpu_errors,
                     avoidance_zone=zone.name,
                     tank_turn=use_tank,
+                    scan_status=scan_status,
+                    scan_left_avg=round(left_avg, 1),
+                    scan_right_avg=round(right_avg, 1),
+                    scan_direction=self._steer_direction or "",
+                    best_angle=round(best_angle, 1),
+                    best_dist=round(best_dist, 1),
                 )
 
             # ── 4. comprehensive sensor log ──────────────────────────
             if cycle % SENSOR_LOG_EVERY_N == 0:
-                sectors_str = " ".join(
-                    f"{a}:{d:.0f}" for a, d, _ in sector_map)
                 _log.debug(
                     "CYCLE=%d st=%s zone=%s spd=[%.1f,%.1f] swerve=%.1f "
-                    "sf=%.2f threat=%.2f min_fwd=%.1f tank=%s "
-                    "ir=[%d,%d] rear=%.1f(fb=%d) "
-                    "hdg=%.1f gz=%.2f lat_g=%.3f "
-                    "ax=%.3f ay=%.3f az=%.3f "
-                    "sectors=[%s]",
+                    "sf=%.2f threat=%.2f front=%.1f tank=%s "
+                    "ir=[%d,%d] scan=%s "
+                    "hdg=%.1f gz=%.2f lat_g=%.3f",
                     cycle,
                     self.state.name,
                     self._telem.get("avoidance_zone", "?"),
@@ -1751,17 +1920,13 @@ class AutonomousController:
                     self._telem.get("swerve_angle", 0),
                     self._telem.get("speed_factor", 1),
                     self._telem.get("threat_mag", 0),
-                    min_fwd,
+                    front_dist,
                     self._telem.get("tank_turn", False),
                     ir_l, ir_r,
-                    rear_d, rear_fb,
+                    self._telem.get("scan_status", "?"),
                     imu_data["heading"],
                     imu_data["gyro"].get("z", 0),
                     imu_data["lateral_g"],
-                    imu_data["accel"].get("x", 0),
-                    imu_data["accel"].get("y", 0),
-                    imu_data["accel"].get("z", 0),
-                    sectors_str,
                 )
 
             # ── 5. pace the loop ─────────────────────────────────────
@@ -1772,78 +1937,33 @@ class AutonomousController:
 
         _log.info("DRIVE_LOOP_END cycles=%d", cycle)
 
-    # ── Laser-only fallback navigation (used when MPU fails) ────────────
-
-    def _fallback_navigate(self, sector_map, min_fwd, best_angle,
-                           best_dist, should_turn, speed_factor):
-        """Navigate using laser only – no MPU heading tracking.
-
-        As the car turns, the laser rotates with it, so best_angle
-        naturally converges toward 0 (self-correcting).
-
-        Returns (swerve_angle, left_spd, right_spd).
-        """
-        if should_turn or min_fwd < WARN_DIST:
-            # Steer toward the best direction using strong differential
-            if abs(best_angle) < MIN_STEER_ANGLE:
-                # Best direction is roughly forward – cruise
-                effective_speed = BASE_SPEED * speed_factor
-                _log.debug("FALLBACK_CRUISE fwd=%.1f best_angle=%.1f",
-                           min_fwd, best_angle)
-                return 0.0, effective_speed, effective_speed
-
-            if best_angle > 0:
-                # Turn right: left=outer
-                left_spd = TURN_OUTER_SPEED
-                right_spd = TURN_INNER_SPEED
-            else:
-                # Turn left: right=outer
-                left_spd = TURN_INNER_SPEED
-                right_spd = TURN_OUTER_SPEED
-
-            _log.debug("FALLBACK_STEER angle=%.1f dist=%.1f "
-                       "min_fwd=%.1f spd=[%.1f,%.1f]",
-                       best_angle, best_dist, min_fwd,
-                       left_spd, right_spd)
-            return best_angle, left_spd, right_spd
-        else:
-            # Forward is clear enough – cruise straight
-            effective_speed = BASE_SPEED * speed_factor
-            _log.debug("FALLBACK_CLEAR fwd=%.1f", min_fwd)
-            return 0.0, effective_speed, effective_speed
-
     # ── BOXED-IN recovery ────────────────────────────────────────────────
 
     def _do_boxed_in_recovery(self):
         """Recovery from boxed-in / stuck situation.
-        First attempt: aggressive forward turn toward the clearest side.
-        Last resort:   reverse only if forward turn fails and rear is clear.
+        First attempt: laser scan + aggressive tank turn toward clearest side.
+        Last resort:   blind reverse + re-scan + tank turn.
+        No rear sensor — reverses are short timed bursts.
         """
         self._set_state(State.BOXED_IN)
         self.motor.brake()
         time.sleep(0.2)
 
-        # Get fresh scan data
-        sweep_before = self.scanner.sweep_count
-        t_wait = time.time()
-        while (self.scanner.sweep_count <= sweep_before and
-               (time.time() - t_wait) < 1.0):
-            time.sleep(0.02)
-
-        sector_map = self.scanner.get_sector_map()
-        left_dists  = [d for a, d, c in sector_map if a < -5]
-        right_dists = [d for a, d, c in sector_map if a > 5]
-        left_avg  = sum(left_dists)  / max(1, len(left_dists))
-        right_avg = sum(right_dists) / max(1, len(right_dists))
-        left_max  = max(left_dists)  if left_dists  else 0
-        right_max = max(right_dists) if right_dists else 0
+        # Get fresh laser scan data
+        _log.info("BOXED_IN_SCANNING for escape direction")
+        scan = self.scanner.scan_for_direction()
+        left_avg  = scan['left_avg']
+        right_avg = scan['right_avg']
+        left_max  = max((d for a, d, _ in scan['sector_map'] if a < -5),
+                        default=0)
+        right_max = max((d for a, d, _ in scan['sector_map'] if a > 5),
+                        default=0)
 
         _log.info("BOXED_IN_RECOVERY left_avg=%.1f right_avg=%.1f "
                   "left_max=%.1f right_max=%.1f",
                   left_avg, right_avg, left_max, right_max)
 
-        # ── Attempt 1: aggressive forward turn toward clearest side ──
-        # This avoids stopping and reversing — just swerve hard forward.
+        # ── Attempt 1: aggressive tank turn toward clearest side ─────
         if left_max >= SIDE_CLEAR_MIN_CM or right_max >= SIDE_CLEAR_MIN_CM:
             if left_avg >= right_avg:
                 turn_dir = 'left'
@@ -1854,62 +1974,27 @@ class AutonomousController:
                 _log.info("RECOVERY_TANK_TURN RIGHT left_avg=%.1f right_avg=%.1f",
                           left_avg, right_avg)
             self.motor.tank_turn(turn_dir, TANK_TURN_SPEED)
-
             time.sleep(RECOVERY_TURN_DURATION)
             self.motor.coast()
             time.sleep(0.1)
 
-            self.imu.reset_heading()
-            self._target_heading = 0.0
-            self._heading_at_swerve_start = 0.0
-            self._stuck_cycles = 0
-            self._stuck_heading_ref = 0.0
+            self._reset_nav_state()
             self._last_boxed_recovery_time = time.time()
             self._set_state(State.DRIVING)
             return
 
-        # ── Attempt 2 (last resort): reverse if truly boxed in on all sides ──
-        rear_d, _ = self.sonar.read()
-        _log.info("BOXED_IN_REVERSE_FALLBACK rear_dist=%.1f", rear_d)
-
-        if rear_d < 0 or rear_d < REAR_CLEAR_CM:
-            _log.error("FULLY_STUCK rear_blocked=%.1f – waiting for manual "
-                       "intervention (press R)", rear_d)
-            self.motor.coast()
-            self._running = False
-            return
-
-        # Short reverse
-        _log.info("REVERSE_START speed=%d duration=%.1fs",
-                  REVERSE_SPEED, REVERSE_DURATION)
-        self.motor.reverse_straight(REVERSE_SPEED)
-        t0 = time.time()
-
-        while time.time() - t0 < REVERSE_DURATION and self._running:
-            rd, rfb = self.sonar.read()
-            _log.debug("REVERSING rear=%.1f floor=%d", rd, rfb)
-            if 0 < rd < REAR_STOP_CM:
-                _log.warning("REVERSE_ABORT rear=%.1f < %d cm",
-                             rd, REAR_STOP_CM)
-                break
-            time.sleep(0.05)
-
+        # ── Attempt 2: blind reverse + re-scan + tank turn ───────────
+        _log.info("BOXED_IN_BLIND_REVERSE speed=%d dur=%.1fs (no rear sensor)",
+                  BLIND_REVERSE_SPEED, BLIND_REVERSE_DURATION)
+        self.motor.reverse_straight(BLIND_REVERSE_SPEED)
+        time.sleep(BLIND_REVERSE_DURATION)
         self.motor.brake()
-        _log.info("REVERSE_END")
+        time.sleep(0.2)
 
-        # Wait for fresh scan after reverse
-        sweep_before = self.scanner.sweep_count
-        t_wait = time.time()
-        while (self.scanner.sweep_count <= sweep_before and
-               (time.time() - t_wait) < 1.5):
-            time.sleep(0.02)
-
-        # Re-scan and turn toward clearest side
-        sector_map = self.scanner.get_sector_map()
-        left_dists  = [d for a, d, c in sector_map if a < -5]
-        right_dists = [d for a, d, c in sector_map if a > 5]
-        left_avg  = sum(left_dists)  / max(1, len(left_dists))
-        right_avg = sum(right_dists) / max(1, len(right_dists))
+        # Re-scan after reverse
+        scan = self.scanner.scan_for_direction()
+        left_avg  = scan['left_avg']
+        right_avg = scan['right_avg']
 
         if left_avg >= right_avg:
             turn_dir = 'left'
@@ -1920,16 +2005,11 @@ class AutonomousController:
             _log.info("RECOVERY_TANK_TURN_POST_REV RIGHT left_avg=%.1f right_avg=%.1f",
                       left_avg, right_avg)
         self.motor.tank_turn(turn_dir, TANK_TURN_SPEED)
-
         time.sleep(RECOVERY_TURN_DURATION)
         self.motor.coast()
         time.sleep(0.1)
 
-        self.imu.reset_heading()
-        self._target_heading = 0.0
-        self._heading_at_swerve_start = 0.0
-        self._stuck_cycles = 0
-        self._stuck_heading_ref = 0.0
+        self._reset_nav_state()
         self._last_boxed_recovery_time = time.time()
         self._set_state(State.DRIVING)
 
@@ -1938,13 +2018,11 @@ class AutonomousController:
     def _do_ir_stuck_recovery(self, stuck_side):
         """Recovery when a single IR sensor fires — car is stuck on one side.
 
-        The IR sensor detected an obstacle right against the car body,
-        meaning the car physically cannot turn away.  Strategy:
+        Strategy:
           1. Brake
-          2. Reverse briefly to create clearance
-          3. Wait for a fresh laser scan
-          4. Drive forward with maximum swerve AWAY from the stuck side
-             (100,0 or 0,100 wheel speed)
+          2. Blind reverse briefly to create clearance
+          3. Laser scan for best direction
+          4. Tank turn AWAY from the stuck side
 
         stuck_side: 'left' or 'right'
         """
@@ -1952,38 +2030,24 @@ class AutonomousController:
         self.motor.brake()
         time.sleep(0.15)
 
-        # Reverse briefly to create clearance
-        rd, _ = self.sonar.read()
-        if rd < 0 or rd > REAR_CLEAR_CM:
-            _log.info("IR_STUCK_REVERSE side=%s speed=%d dur=%.1fs rear=%.1f",
-                      stuck_side, REVERSE_SPEED, IR_STUCK_REVERSE_DUR, rd)
-            self.motor.reverse_straight(REVERSE_SPEED)
-            t0 = time.time()
-            while time.time() - t0 < IR_STUCK_REVERSE_DUR and self._running:
-                rd2, rfb = self.sonar.read()
-                if 0 < rd2 < REAR_STOP_CM:
-                    _log.warning("IR_STUCK_REVERSE_ABORT rear=%.1f", rd2)
-                    break
-                time.sleep(0.05)
-            self.motor.brake()
-            time.sleep(0.1)
-        else:
-            _log.warning("IR_STUCK_NO_REVERSE rear=%.1f – rear blocked", rd)
+        # Blind reverse briefly to create clearance
+        _log.info("IR_STUCK_BLIND_REVERSE side=%s speed=%d dur=%.1fs",
+                  stuck_side, BLIND_REVERSE_SPEED, IR_STUCK_REVERSE_DUR)
+        self.motor.reverse_straight(BLIND_REVERSE_SPEED)
+        time.sleep(IR_STUCK_REVERSE_DUR)
+        self.motor.brake()
+        time.sleep(0.1)
 
-        # Wait for fresh scan
-        sweep_before = self.scanner.sweep_count
-        t_wait = time.time()
-        while (self.scanner.sweep_count <= sweep_before and
-               (time.time() - t_wait) < 1.0):
-            time.sleep(0.02)
+        # Laser scan to confirm best escape direction
+        scan = self.scanner.scan_for_direction()
+        _log.info("IR_STUCK_SCAN dir=%s L=%.1f R=%.1f",
+                  scan['direction'], scan['left_avg'], scan['right_avg'])
 
         # Tank turn away from the stuck side
         if stuck_side == 'left':
-            # Obstacle on left → tank turn right
             _log.info("IR_STUCK_TANK_RIGHT after reverse")
             self.motor.tank_turn('right', TANK_TURN_SPEED)
         else:
-            # Obstacle on right → tank turn left
             _log.info("IR_STUCK_TANK_LEFT after reverse")
             self.motor.tank_turn('left', TANK_TURN_SPEED)
 
@@ -1991,11 +2055,7 @@ class AutonomousController:
         self.motor.coast()
         time.sleep(0.1)
 
-        self.imu.reset_heading()
-        self._target_heading = 0.0
-        self._heading_at_swerve_start = 0.0
-        self._stuck_cycles = 0
-        self._stuck_heading_ref = 0.0
+        self._reset_nav_state()
         self._last_boxed_recovery_time = time.time()
         self._set_state(State.DRIVING)
 
@@ -2004,52 +2064,28 @@ class AutonomousController:
     def _do_ir_both_blocked_recovery(self):
         """Recovery when BOTH IR sensors fire — front is completely blocked.
 
-        Laser data is IGNORED for the blocking decision (IR overrides).
         Strategy:
           1. Brake
-          2. Reverse for full REVERSE_DURATION (sonar-safe)
-          3. Wait for a fresh laser scan
-          4. Pivot toward the clearest side (100,0 or 0,100)
+          2. Blind reverse (short timed burst — no rear sensor)
+          3. Laser scan for clearest side
+          4. Tank turn toward clearest side
         """
         self._set_state(State.BOXED_IN)
         self.motor.brake()
         time.sleep(0.2)
 
-        # Reverse — rear must be clear
-        rd, _ = self.sonar.read()
-        if rd < 0 or rd > REAR_CLEAR_CM:
-            _log.info("IR_BOTH_BLOCKED_REVERSE speed=%d dur=%.1fs rear=%.1f",
-                      REVERSE_SPEED, REVERSE_DURATION, rd)
-            self.motor.reverse_straight(REVERSE_SPEED)
-            t0 = time.time()
-            while time.time() - t0 < REVERSE_DURATION and self._running:
-                rd2, rfb = self.sonar.read()
-                if 0 < rd2 < REAR_STOP_CM:
-                    _log.warning("IR_BOTH_REVERSE_ABORT rear=%.1f", rd2)
-                    break
-                time.sleep(0.05)
-            self.motor.brake()
-            time.sleep(0.1)
-        else:
-            _log.warning("IR_BOTH_BLOCKED_NO_REVERSE rear=%.1f – "
-                         "rear blocked, fully stuck", rd)
-            self.motor.coast()
-            self._running = False
-            return
+        # Blind reverse
+        _log.info("IR_BOTH_BLOCKED_BLIND_REVERSE speed=%d dur=%.1fs",
+                  BLIND_REVERSE_SPEED, BLIND_REVERSE_DURATION)
+        self.motor.reverse_straight(BLIND_REVERSE_SPEED)
+        time.sleep(BLIND_REVERSE_DURATION)
+        self.motor.brake()
+        time.sleep(0.2)
 
-        # Wait for fresh scan after reversing
-        sweep_before = self.scanner.sweep_count
-        t_wait = time.time()
-        while (self.scanner.sweep_count <= sweep_before and
-               (time.time() - t_wait) < 1.5):
-            time.sleep(0.02)
-
-        # Scan to find clearest side and pivot toward it
-        sector_map = self.scanner.get_sector_map()
-        left_dists  = [d for a, d, c in sector_map if a < -5]
-        right_dists = [d for a, d, c in sector_map if a > 5]
-        left_avg  = sum(left_dists)  / max(1, len(left_dists))
-        right_avg = sum(right_dists) / max(1, len(right_dists))
+        # Laser scan for best direction
+        scan = self.scanner.scan_for_direction()
+        left_avg  = scan['left_avg']
+        right_avg = scan['right_avg']
 
         # Tank turn toward clearest side
         if left_avg >= right_avg:
@@ -2066,18 +2102,14 @@ class AutonomousController:
         self.motor.coast()
         time.sleep(0.1)
 
-        self.imu.reset_heading()
-        self._target_heading = 0.0
-        self._heading_at_swerve_start = 0.0
-        self._stuck_cycles = 0
-        self._stuck_heading_ref = 0.0
+        self._reset_nav_state()
         self._last_boxed_recovery_time = time.time()
         self._set_state(State.DRIVING)
 
     # ── CRASH recovery ───────────────────────────────────────────────────
 
-    def _do_crash_recovery(self, rear_dist):
-        """Handle crash event: brake, assess, reverse if possible."""
+    def _do_crash_recovery(self):
+        """Handle crash event: brake, blind reverse, laser scan, turn."""
         self._set_state(State.CRASH_RECOVERY)
 
         _log.info("CRASH_RECOVERY_START – braking, waiting 1 s")
@@ -2096,37 +2128,18 @@ class AutonomousController:
                   imu_snap["accel"].get("y", 0),
                   imu_snap["accel"].get("z", 0))
 
-        # Try to reverse away from the crash site
-        rd, _ = self.sonar.read()
-        if rd < 0 or rd > REAR_CLEAR_CM:
-            _log.info("CRASH_REVERSE speed=%d dur=%.1fs rear=%.1f",
-                      CRASH_REVERSE_SPEED, CRASH_REVERSE_DURATION, rd)
-            self.motor.reverse_straight(CRASH_REVERSE_SPEED)
-            t0 = time.time()
-            while time.time() - t0 < CRASH_REVERSE_DURATION and self._running:
-                rd2, _ = self.sonar.read()
-                if 0 < rd2 < REAR_STOP_CM:
-                    _log.warning("CRASH_REVERSE_ABORT rear=%.1f", rd2)
-                    break
-                time.sleep(0.05)
-            self.motor.brake()
-        else:
-            _log.warning("CRASH_NO_REVERSE rear_blocked=%.1f", rd)
-
+        # Blind reverse away from crash site
+        _log.info("CRASH_BLIND_REVERSE speed=%d dur=%.1fs",
+                  BLIND_REVERSE_SPEED, CRASH_REVERSE_DURATION)
+        self.motor.reverse_straight(BLIND_REVERSE_SPEED)
+        time.sleep(CRASH_REVERSE_DURATION)
+        self.motor.brake()
         time.sleep(0.3)
 
-        # Recovery turn after crash reverse — steer away from closest side
-        sweep_before = self.scanner.sweep_count
-        t_wait = time.time()
-        while (self.scanner.sweep_count <= sweep_before and
-               (time.time() - t_wait) < 1.0):
-            time.sleep(0.02)
-
-        sector_map = self.scanner.get_sector_map()
-        left_dists  = [d for a, d, c in sector_map if a < -5]
-        right_dists = [d for a, d, c in sector_map if a > 5]
-        left_avg  = sum(left_dists)  / max(1, len(left_dists))
-        right_avg = sum(right_dists) / max(1, len(right_dists))
+        # Laser scan for escape direction
+        scan = self.scanner.scan_for_direction()
+        left_avg  = scan['left_avg']
+        right_avg = scan['right_avg']
 
         turn_dur = 0.8  # shorter than boxed-in recovery turn
         if left_avg >= right_avg:
@@ -2140,14 +2153,23 @@ class AutonomousController:
         time.sleep(turn_dur)
         self.motor.coast()
 
+        self._reset_nav_state()
+        _log.info("CRASH_RECOVERY_DONE count=%d", self._crash_count)
+        self._set_state(State.DRIVING)
+
+    # ── Navigation state reset helper ────────────────────────────────────
+
+    def _reset_nav_state(self):
+        """Reset all navigation tracking state after a recovery event."""
         self.imu.reset_heading()
         self._target_heading = 0.0
         self._heading_at_swerve_start = 0.0
         self._stuck_cycles = 0
         self._stuck_heading_ref = 0.0
-
-        _log.info("CRASH_RECOVERY_DONE count=%d", self._crash_count)
-        self._set_state(State.DRIVING)
+        self._steering_from_scan = None
+        self._steer_direction = None
+        self._last_scan_time = 0.0
+        self._nav_target_heading = None
 
     # ── SHUTDOWN ─────────────────────────────────────────────────────────
 
@@ -2167,12 +2189,13 @@ class AutonomousController:
         _log.info("========================================================================")
         _log.info(
             "SHUTDOWN_COMPLETE  uptime=%.1fs  crashes=%d  "
-            "ir_left=%d  ir_right=%d  boxed_in=%d  cycles=%d",
+            "ir_left=%d  ir_right=%d  boxed_in=%d  scans=%d  cycles=%d",
             uptime,
             self._crash_count,
             self._ir_left_count,
             self._ir_right_count,
             self._boxed_in_count,
+            self._scan_trigger_count,
             self._cycle_count,
         )
         _log.info("========================================================================")
@@ -2221,11 +2244,7 @@ def _curses_main(stdscr, controller):
                 controller.resume()
             elif controller.state == State.BOXED_IN:
                 controller._running = True
-                controller.imu.reset_heading()
-                controller._target_heading = 0.0
-                controller._heading_at_swerve_start = 0.0
-                controller._stuck_cycles = 0
-                controller._stuck_heading_ref = 0.0
+                controller._reset_nav_state()
                 controller._last_boxed_recovery_time = time.time()
                 controller._set_state(State.DRIVING)
                 controller._drive_thread = threading.Thread(
@@ -2249,21 +2268,44 @@ def _curses_main(stdscr, controller):
         elif controller.state == State.PAUSED:
             state_col = COL_WARN
 
-        header = f"  AUTONOMOUS DRIVE  |  {controller.state.name}  |  " \
+        header = f"  AUTONOMOUS DRIVE (Sonar+Laser)  |  {controller.state.name}  |  " \
                  f"Cycles: {controller._cycle_count}"
         _safe(row, 0, header, COL_HDR)
         row += 2
 
-        # Sector map bar chart
+        # Front sonar distance (primary sensor)
+        fd = t.get("front_dist", -1)
+        front_col = (COL_OK if fd > LASER_TRIGGER_DIST
+                     else COL_WARN if fd > CRITICAL_DIST
+                     else COL_DANG)
+        _safe(row, 0, f"Front Sonar: {fd:.1f}cm", front_col)
+
+        # Laser scan status
+        scan_st = t.get("scan_status", "IDLE")
+        scan_col = COL_WARN if "DONE" in scan_st else COL_INFO
+        _safe(row, 28, f"Laser: {scan_st}  "
+              f"L={t.get('scan_left_avg', 0):.0f}cm  "
+              f"R={t.get('scan_right_avg', 0):.0f}cm  "
+              f"Scans={t.get('scan_trigger_count', 0)}", scan_col)
+        row += 2
+
+        # Sector map bar chart (from last scan — may be stale)
         sm = t.get("sector_map", [])
-        bar_max = 30
-        for angle, dist, conf in sm:
-            bar_len = int(min(dist, 120) / 120 * bar_max)
-            bar_char = "█" * bar_len
-            bar_empty = "░" * (bar_max - bar_len)
-            col = COL_OK if dist > WARN_DIST else (COL_WARN if dist > CRITICAL_DIST else COL_DANG)
-            label = f"{angle:+4d}° {dist:5.0f}cm "
-            _safe(row, 0, label + bar_char + bar_empty, col)
+        scan_fresh = len(sm) > 0 and any(c > 0 for _, _, c in sm)
+        if scan_fresh:
+            _safe(row, 0, "Last Laser Scan:", COL_INFO)
+            row += 1
+            bar_max = 30
+            for angle, dist, conf in sm:
+                bar_len = int(min(dist, 120) / 120 * bar_max)
+                bar_char = "\u2588" * bar_len
+                bar_empty = "\u2591" * (bar_max - bar_len)
+                col = COL_OK if dist > LASER_TRIGGER_DIST else (COL_WARN if dist > CRITICAL_DIST else COL_DANG)
+                label = f"{angle:+4d}\u00b0 {dist:5.0f}cm "
+                _safe(row, 0, label + bar_char + bar_empty, col)
+                row += 1
+        else:
+            _safe(row, 0, "Laser: idle (no scan data)", COL_INFO)
             row += 1
 
         row += 1
@@ -2271,12 +2313,13 @@ def _curses_main(stdscr, controller):
         # Speed / swerve / zone
         zone_name = t.get('avoidance_zone', 'CLEAR')
         zone_col = (COL_DANG if zone_name in ('CRITICAL', 'DANGER')
-                    else COL_WARN if zone_name == 'CAUTION' else COL_OK)
+                    else COL_WARN if zone_name in ('CAUTION', 'APPROACH')
+                    else COL_OK)
         tank_str = " TANK" if t.get('tank_turn', False) else ""
         _safe(row, 0,
               f"Speed: L={t.get('left_speed', 0):5.1f}"
               f"%  R={t.get('right_speed', 0):5.1f}"
-              f"%  |  Swerve: {t.get('swerve_angle', 0):+6.1f}°"
+              f"%  |  Swerve: {t.get('swerve_angle', 0):+6.1f}\u00b0"
               f"  SF={t.get('speed_factor', 1):.2f}"
               f"  Threat={t.get('threat_mag', 0):.2f}",
               COL_INFO)
@@ -2285,24 +2328,18 @@ def _curses_main(stdscr, controller):
         row += 1
 
         # IR status
-        ir_l_str = "■ LEFT"  if t.get("ir_left", False) else "□ left"
-        ir_r_str = "■ RIGHT" if t.get("ir_right", False) else "□ right"
+        ir_l_str = "\u25a0 LEFT"  if t.get("ir_left", False) else "\u25a1 left"
+        ir_r_str = "\u25a0 RIGHT" if t.get("ir_right", False) else "\u25a1 right"
         ir_l_col = COL_DANG if t.get("ir_left", False) else COL_OK
         ir_r_col = COL_DANG if t.get("ir_right", False) else COL_OK
         _safe(row, 0, f"IR: ", COL_INFO)
         _safe(row, 4, ir_l_str, ir_l_col)
         _safe(row, 15, ir_r_str, ir_r_col)
-
-        # Rear sonar
-        rd = t.get("rear_dist", -1)
-        rear_col = COL_OK if rd > REAR_CLEAR_CM else (COL_WARN if rd > REAR_STOP_CM else COL_DANG)
-        flr = " FLOOR" if t.get("rear_floor", 0) else ""
-        _safe(row, 30, f"Rear: {rd:.1f}cm{flr}", rear_col)
         row += 1
 
         # Heading
         _safe(row, 0,
-              f"Heading: {t.get('heading', 0):.1f}°  "
+              f"Heading: {t.get('heading', 0):.1f}\u00b0  "
               f"Gyro-Z: {t.get('gyro_z', 0):.1f}  "
               f"Lat-G: {t.get('lateral_g', 0):.3f}",
               COL_INFO)
