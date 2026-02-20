@@ -38,10 +38,10 @@ from enum import Enum, auto
 BASE_SPEED          = 45        # forward cruise PWM % (reduced from 40 for better reaction time)
 MAX_PWM_DUTY        = 70        # voltage cap  (7 V / 11.1 V × 100)
 PWM_FREQ            = 1000      # Hz
-REVERSE_SPEED       = 40
+REVERSE_SPEED       = 60
 REVERSE_DURATION    = 1.0       # seconds
 RECOVERY_TURN_DURATION = 1.5    # seconds of wide turn after reverse (was 1.0 — too short to reorient)
-CRASH_REVERSE_SPEED = 45
+CRASH_REVERSE_SPEED = 65
 CRASH_REVERSE_DURATION = 0.5
 DIRECTION_CHANGE_DWELL = 0.15   # seconds between fwd↔rev
 
@@ -57,12 +57,12 @@ WARN_DIST           = 80        # start swerving — increased from 60 for earli
 CRITICAL_DIST       = 40        # reduce speed — increased from 30 to slow down earlier
 ALL_BLOCKED_CM      = 22        # every forward sector is this close → boxed in (raised from 18)
 EMERGENCY_IR_DIST   = 0         # IR triggers (binary, active LOW)
-HARD_SWERVE_DIST    = 60        # force min swerve when forward obstacle nearer (was 55 — still not reacting early enough)
-MIN_FORCED_SWERVE   = 45        # minimum swerve degrees when forced (was 35 — not acute enough)
+HARD_SWERVE_DIST    = 70        # force min swerve when forward obstacle nearer (was 55 — still not reacting early enough)
+MIN_FORCED_SWERVE   = 60        # minimum swerve degrees when forced (was 35 — not acute enough)
 EMERGENCY_FWD_CM    = 30        # emergency max-swerve when centre sectors this close (was 25 — triggered too late)
 TANK_TURN_DIST      = 20        # cm (200mm) — full tank turn (spin in place) at this distance or less
 TANK_TURN_SPEED     = 45        # PWM % for each side during tank turn (raised from 40)
-SIDE_CLEAR_MIN_CM   = 20        # side must have at least this to be considered clear
+SIDE_CLEAR_MIN_CM   = 50        # side must have at least this to be considered clear
 CRITICAL_TANK_DURATION = 0.6    # seconds — minimum tank turn duration before re-scanning in CRITICAL
 CRITICAL_STUCK_LIMIT   = 5      # consecutive CRITICAL cycles without escape → boxed-in recovery
 CIRCLE_HEADING_LIMIT = 120      # degrees — trigger boxed-in if car rotates this much
@@ -79,11 +79,11 @@ IR_SWERVE_BOOST     = 65        # added degrees when IR fires  (was 55 — incre
 IR_CLOSE_MAX_SWERVE_CM = 25     # cm — full differential (100,0 / 0,100) below this distance
 IR_STUCK_REVERSE_DUR   = 0.5    # seconds to reverse when single IR fires
 SPEED_FLOOR_FACTOR  = 0.45      # minimum speed fraction near obstacles (was 0.55 — too fast near walls)
-INNER_WHEEL_MIN     = 0.12      # inner wheels keep 12% speed — stronger turn (was 0.20 — not enough differential)
+INNER_WHEEL_MIN     = 0.09      # inner wheels keep 12% speed — stronger turn (was 0.20 — not enough differential)
 SWERVE_SPEED_FLOOR  = 1.00      # outer wheel stays at full BASE_SPEED during swerve
 SWERVE_OUTER_BOOST  = 1.05      # slight boost to outer wheel  (was 1.15 — too aggressive differential)
-SWERVE_SMOOTH_ALPHA = 0.70      # EMA smoothing factor — raised from 0.60 for faster swerve response
-DANGER_OUTER_FLOOR  = 0.75      # outer wheel never below 75% in DANGER — maintain turn torque
+SWERVE_SMOOTH_ALPHA = 0.75      # EMA smoothing factor — raised from 0.60 for faster swerve response
+DANGER_OUTER_FLOOR  = 0.80      # outer wheel never below 75% in DANGER — maintain turn torque
 
 # Heading-rate damping — prevents persistent one-direction swerve (circling)
 HEADING_DAMP_START  = 30        # degrees — start damping after this much heading change
@@ -95,19 +95,20 @@ GYRO_KP             = 1.5
 GYRO_KI             = 0.0
 GYRO_KD             = 0.3
 
-# Crash detection (accelerometer)
-# NOTE: mpu6050 lib returns m/s², NOT g.  1 g ≈ 9.81 m/s².
+# Crash detection (accelerometer) — DYNAMIC threshold based on speed
+# At low speed impacts are softer, so the threshold should be lower.
 ACCEL_G             = 9.81      # m/s² per g
-CRASH_G             = 1.5       # g-force lateral impact threshold
-CRASH_MS2           = CRASH_G * ACCEL_G   # ~14.7 m/s² – actual comparison value
+CRASH_G_HIGH_SPEED  = 1.5       # g-force threshold at full speed (PWM >= 60)
+CRASH_G_LOW_SPEED   = 0.4       # g-force threshold at very low speed / crawl (PWM <= 20)
+CRASH_G_RANGE_PWM   = (20, 60)  # PWM range over which to interpolate
 MOVING_THRESHOLD_G  = 0.3       # detect if wheels spin but car is stuck
-CRASH_COOLDOWN      = 1.5       # seconds between consecutive crash events (reduced from 3.0 — missed 2nd impact)
+CRASH_COOLDOWN      = 1.5       # seconds between consecutive crash events
 
 # Navigation — proactive "navigate toward open space" approach
-NAVIGATE_DIST       = 80        # cm – start looking for best direction when fwd closer
+NAVIGATE_DIST       = 100        # cm – start looking for best direction when fwd closer
 BEST_DIR_ADVANTAGE  = 30        # cm – best direction must have this much more room than fwd
 TARGET_HEADING_TOL  = 12        # degrees – turn considered complete within this tolerance
-TURN_OUTER_SPEED    = 55        # PWM % for outer wheels during active heading turns (was 50)
+TURN_OUTER_SPEED    = 60        # PWM % for outer wheels during active heading turns (was 50)
 TURN_INNER_SPEED    = 10        # PWM % for inner wheels (was 15 — not enough differential to avoid obstacles)
 MIN_STEER_ANGLE     = 20        # degrees – below this, motors can't actually turn; drive straight
 CRUISE_CLEAR_DIST   = 120       # cm – when forward is this clear, just cruise straight
@@ -119,12 +120,26 @@ NAV_SMOOTH_ALPHA    = 0.3       # EMA smoothing for target heading updates (prev
 # ramp that gives immediate, proportional avoidance without waiting for
 # a PID heading loop to catch up.
 DODGE_START_CM      = 100       # cm — begin dodging (matches APPROACH_DIST)
-DODGE_HARD_CM       = 30        # cm — full hard turn (outer=MAX, inner≈0)
+DODGE_HARD_CM       = 40        # cm — full hard turn (outer=MAX, inner≈0)
 DODGE_OUTER_MAX     = MAX_PWM_DUTY   # 70 — outer wheel at max aggression
 DODGE_OUTER_MIN     = 50        # outer wheel at minimum aggression (gentle turn)
-DODGE_INNER_GENTLE  = 38        # inner wheel at minimum aggression
+DODGE_INNER_GENTLE  = 25        # inner wheel at minimum aggression
 DODGE_INNER_HARD    = 0         # inner wheel at max aggression
 DODGE_CLEAR_DELAY_S = 1.0       # seconds of CLEAR before resetting dodge direction
+
+# LM393 wheel encoder (rear-right wheel)
+ENCODER_PIN         = 26        # BCM GPIO 26 (physical pin 37)
+ENCODER_HOLES       = 20        # holes per revolution on encoder disc
+ENCODER_CALC_HZ     = 10        # RPM calculation rate (Hz)
+
+# Multi-sensor stuck detection (LM393 + sonar + MPU)
+# If wheel is spinning but sonar says same distance AND heading isn't
+# changing, the car is stuck on a blind-spot obstacle.
+BLINDSPOT_RPM_MIN       = 5.0   # RPM — wheel is considered spinning above this
+BLINDSPOT_SONAR_DELTA   = 5.0   # cm — sonar change must exceed this to count as moving
+BLINDSPOT_HEADING_DELTA = 3.0   # degrees — heading change must exceed this
+BLINDSPOT_WINDOW_S      = 1.5   # seconds — observation window
+BLINDSPOT_TRIGGER_S     = 1.0   # seconds of continuous stuck before triggering recovery
 
 # MPU resilience
 MPU_MAX_CONSEC_ERRORS = 10      # consecutive MPU read failures → switch to fallback mode
@@ -190,11 +205,12 @@ RL_IN1 = 10;  RL_IN2 = 7;   RL_ENA = 19
 RR_IN3 = 9;   RR_IN4 = 11;  RR_ENB = 18
 
 # Sensors
-IR_LEFT_PIN   = 5
-IR_RIGHT_PIN  = 6
+IR_LEFT_PIN    = 5
+IR_RIGHT_PIN   = 6
 SERVO_PIN      = 21
 FRONT_TRIG_PIN = 25
 FRONT_ECHO_PIN = 24
+# ENCODER_PIN  = 26  (defined in constants section above)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  STATE ENUM
@@ -313,6 +329,66 @@ except Exception as exc:
     HAS_IMU = False
     _imu = None
     _log.warning("MPU6050 unavailable: %s", exc)
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  WHEEL ENCODER  (LM393 optical encoder on rear-right wheel)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class WheelEncoder:
+    """LM393 optical speed sensor on rear-right wheel.
+
+    Uses GPIO interrupt to count pulses, calculates RPM in a background
+    thread.  Provides `rpm` property and `is_spinning` helper."""
+
+    def __init__(self):
+        self._pulse_count = 0
+        self._lock = threading.Lock()
+        self._rpm = 0.0
+        self._available = False
+        self._calc_interval = 1.0 / ENCODER_CALC_HZ
+
+        try:
+            GPIO.setup(ENCODER_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            GPIO.add_event_detect(ENCODER_PIN, GPIO.RISING,
+                                  callback=self._isr, bouncetime=1)
+            self._available = True
+            _log.info("ENCODER_INIT GPIO%d holes=%d calc_hz=%d",
+                      ENCODER_PIN, ENCODER_HOLES, ENCODER_CALC_HZ)
+        except Exception as exc:
+            _log.warning("ENCODER_INIT_FAIL: %s — wheel speed unavailable", exc)
+
+        self._thread = threading.Thread(target=self._calc_loop, daemon=True)
+        self._thread.start()
+
+    def _isr(self, channel):
+        """Interrupt service routine — rising edge from encoder."""
+        self._pulse_count += 1
+
+    def _calc_loop(self):
+        """Background thread: compute RPM from pulse count."""
+        while True:
+            time.sleep(self._calc_interval)
+            with self._lock:
+                pulses = self._pulse_count
+                self._pulse_count = 0
+            revolutions = pulses / max(1, ENCODER_HOLES)
+            self._rpm = revolutions * (60.0 / self._calc_interval)
+
+    @property
+    def rpm(self):
+        """Current wheel RPM (float)."""
+        return self._rpm
+
+    @property
+    def is_spinning(self):
+        """True if wheel is spinning above BLINDSPOT_RPM_MIN."""
+        return self._rpm >= BLINDSPOT_RPM_MIN
+
+    @property
+    def available(self):
+        """True if encoder hardware was successfully initialized."""
+        return self._available
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  LOW-LEVEL MOTOR DRIVER
@@ -576,7 +652,32 @@ class LaserScanner:
         self._pwm.ChangeDutyCycle(0)
         return d
 
+    def scan_for_direction_async(self):
+        """Start a scan in a background thread.  Returns immediately.
+        The drive loop keeps dodging with the last known direction
+        while the scan runs.  Result is picked up via
+        `last_scan_result` / `is_scanning`."""
+        if self._scanning:
+            return  # already in progress
+        self._scanning = True
+        t = threading.Thread(target=self._do_scan_work, daemon=True)
+        t.start()
+
+    def _do_scan_work(self):
+        """Actual scan logic — runs in background thread."""
+        result = self._scan_for_direction_sync()
+        # Store result atomically
+        self._last_scan_result = result
+        self._last_scan_time = time.time()
+        self._scan_count += 1
+        self._scanning = False
+
     def scan_for_direction(self):
+        """Synchronous scan (blocking).  Used by recovery routines
+        that need an immediate result."""
+        return self._scan_for_direction_sync()
+
+    def _scan_for_direction_sync(self):
         """Two-phase on-demand scan to find the clearest escape direction.
 
         Phase 1 (quick): Read 5 key angles [-60, -30, 0, +30, +60]
@@ -676,15 +777,12 @@ class LaserScanner:
             'phase': phase,
         }
 
-        self._last_scan_result = result
-        self._last_scan_time = time.time()
-        self._scan_count += 1
         self._scanning = False
 
         _log.info("SCAN_RESULT dir=%s best_angle=%.0f L=%.1f R=%.1f "
                   "fwd=%.1f phase=%d count=%d (%.0fms total)",
                   direction, best_angle, left_avg, right_avg,
-                  fwd_dist, phase, self._scan_count,
+                  fwd_dist, phase, self._scan_count + 1,
                   (time.time() - t_start) * 1000)
 
         return result
@@ -858,7 +956,7 @@ class IMU:
         self._gz_offset = 0.0        # gyro-Z bias
         self._accel_baseline = {"x": 0.0, "y": 0.0, "z": 9.81}
         self._accel_noise = {"x": 0.05, "y": 0.05, "z": 0.2}
-        self._crash_threshold_ms2 = CRASH_MS2
+        self._crash_threshold_ms2 = CRASH_G_HIGH_SPEED * ACCEL_G
         self._calibrated = False
         self._last_time = time.time()
 
@@ -929,7 +1027,7 @@ class IMU:
                                for k, v in self._accel_baseline.items()},
             "accel_noise": {k: round(v, 4)
                             for k, v in self._accel_noise.items()},
-            "crash_threshold_g": CRASH_G,
+            "crash_threshold_g": CRASH_G_HIGH_SPEED,
             "crash_threshold_ms2": round(self._crash_threshold_ms2, 2),
             "note": "accel values are m/s2 (not g)",
         }
@@ -999,6 +1097,7 @@ class IMU:
         crash = lateral_ms2 > self._crash_threshold_ms2
 
         return {
+            "crash_threshold_g": round(self._crash_threshold_ms2 / ACCEL_G, 2),
             "heading": self._heading,
             "dt": dt,
             "accel": accel,
@@ -1335,6 +1434,7 @@ class AutonomousController:
         self.ir      = IRSensors()
         self.sonar   = FrontSonar()
         self.imu     = IMU()
+        self.encoder = WheelEncoder()
 
         # Counters
         self._crash_count = 0
@@ -1369,6 +1469,12 @@ class AutonomousController:
         # Slalom-style dodge state
         self._dodge_direction = 0         # -1=left, 0=none, 1=right
         self._last_dodge_time = 0.0       # timestamp of last heading increment
+
+        # Blindspot stuck detection (LM393 + sonar + MPU)
+        self._blindspot_start_time = 0.0  # when blindspot condition first detected
+        self._blindspot_ref_dist = 0.0    # sonar distance when window started
+        self._blindspot_ref_heading = 0.0 # heading when window started
+        self._blindspot_active = False    # True while blindspot condition holds
 
         # Drive thread
         self._drive_thread = None
@@ -1425,6 +1531,10 @@ class AutonomousController:
         self._nav_smoothed_best = 0.0
         self._mpu_fallback_mode = False
         self._fallback_cycles = 0
+        self._blindspot_active = False
+        self._blindspot_ref_dist = 0.0
+        self._blindspot_ref_heading = 0.0
+        self._blindspot_start_time = 0.0
 
         self._set_state(State.DRIVING)
         _log.info("DRIVING_START base_speed=%d", BASE_SPEED)
@@ -1456,6 +1566,10 @@ class AutonomousController:
             self._nav_smoothed_best = 0.0
             self._mpu_fallback_mode = False
             self._fallback_cycles = 0
+            self._blindspot_active = False
+            self._blindspot_ref_dist = 0.0
+            self._blindspot_ref_heading = 0.0
+            self._blindspot_start_time = 0.0
             self._set_state(State.DRIVING)
             self._drive_thread = threading.Thread(target=self._drive_loop,
                                                    daemon=True)
@@ -1514,7 +1628,19 @@ class AutonomousController:
             prev_ir_l = ir_l
             prev_ir_r = ir_r
 
-            # ── 2. crash detection ───────────────────────────────────
+            # ── 2. dynamic crash threshold based on current speed ─
+            #    At low speed, impacts are softer → lower threshold.
+            #    Interpolate between CRASH_G_LOW_SPEED and CRASH_G_HIGH_SPEED
+            #    based on effective PWM (average of left+right wheel speeds).
+            current_pwm = (left_spd + right_spd) / 2.0 if cycle > 1 else BASE_SPEED
+            pwm_lo, pwm_hi = CRASH_G_RANGE_PWM
+            pwm_ratio = max(0.0, min(1.0,
+                (current_pwm - pwm_lo) / max(1, pwm_hi - pwm_lo)))
+            dynamic_crash_g = (CRASH_G_LOW_SPEED +
+                (CRASH_G_HIGH_SPEED - CRASH_G_LOW_SPEED) * pwm_ratio)
+            self.imu._crash_threshold_ms2 = dynamic_crash_g * ACCEL_G
+
+            # ── 3. crash detection ───────────────────────────────────
             if (imu_data["crash"] and
                     self.state == State.DRIVING and
                     (t_start - self._last_crash_time) > CRASH_COOLDOWN):
@@ -1533,7 +1659,7 @@ class AutonomousController:
                 self._do_crash_recovery()
                 continue
 
-            # ── 3. state-dependent behaviour ─────────────────────────
+            # ── 4. state-dependent behaviour ─────────────────────────
             if self.state == State.DRIVING:
 
                 # MPU status tracking
@@ -1670,17 +1796,37 @@ class AutonomousController:
                               AvoidanceZone.CAUTION,
                               AvoidanceZone.APPROACH):
 
-                    # ── 1. Trigger laser scan if cooldown elapsed ─────
-                    if (t_start - self._last_scan_time) > SCAN_COOLDOWN_S:
-                        scan_label = zone.name
-                        _log.info("%s_SCAN front_dist=%.1f",
-                                  scan_label, front_dist)
-                        scan_result = self.scanner.scan_for_direction()
+                    # ── 1. Pick up completed async scan result FIRST ─
+                    #    Must happen BEFORE triggering a new scan,
+                    #    otherwise the trigger immediately sets
+                    #    _scanning=True and the pickup never fires.
+                    #    Also reject stale scan data (>SECTOR_STALE_S old)
+                    #    to avoid reusing results from a previous obstacle.
+                    if (not self.scanner.is_scanning
+                            and self.scanner.last_scan_result
+                            and self.scanner.last_scan_time > self._last_scan_time
+                            and (t_start - self.scanner.last_scan_time) < SECTOR_STALE_S):
+                        scan_result = self.scanner.last_scan_result
                         self._steering_from_scan = scan_result
-                        self._last_scan_time = time.time()
+                        self._last_scan_time = self.scanner.last_scan_time
+                        _log.info(
+                            "SCAN_PICKUP dir=%s L=%.1f R=%.1f",
+                            scan_result['direction'],
+                            scan_result['left_avg'],
+                            scan_result['right_avg'])
+
+                    # ── 1b. Trigger ASYNC laser scan if cooldown elapsed
+                    if ((t_start - self._last_scan_time) > SCAN_COOLDOWN_S
+                            and not self.scanner.is_scanning):
+                        scan_label = zone.name
+                        _log.info("%s_SCAN_ASYNC front_dist=%.1f",
+                                  scan_label, front_dist)
+                        self.scanner.scan_for_direction_async()
                         self._scan_trigger_count += 1
 
                     # ── 2. Set dodge direction from scan or keep memory ─
+                    prev_dodge_dir = self._dodge_direction
+
                     if scan_result:
                         left_avg = scan_result['left_avg']
                         right_avg = scan_result['right_avg']
@@ -1692,11 +1838,37 @@ class AutonomousController:
                             self._dodge_direction = -1
                         elif direction == 'right':
                             self._dodge_direction = 1
-                        # 'forward' keeps existing dodge_direction
+                        elif direction == 'forward':
+                            # Laser says forward is clear, but sonar may
+                            # disagree.  If the sonar still shows an
+                            # obstacle ahead, pick the side with more room
+                            # instead of keeping a potentially stale dodge
+                            # direction.
+                            if front_dist < WARN_DIST:
+                                if left_avg >= right_avg:
+                                    self._dodge_direction = -1
+                                else:
+                                    self._dodge_direction = 1
+                                _log.info(
+                                    "SCAN_FWD_OVERRIDE front=%.1f "
+                                    "L=%.1f R=%.1f → dodge %s",
+                                    front_dist, left_avg, right_avg,
+                                    'left' if self._dodge_direction == -1
+                                    else 'right')
 
                     # Default dodge direction if never set
                     if self._dodge_direction == 0:
                         self._dodge_direction = 1  # default right
+
+                    # Set heading reference only on dodge ENTRY or
+                    # direction change — NOT every cycle (was breaking
+                    # circle detection because delta was always ~0).
+                    if prev_dodge_dir != self._dodge_direction:
+                        self._heading_at_swerve_start = imu_heading
+                        _log.info(
+                            "DODGE_DIR_CHANGE %d→%d hdg=%.1f",
+                            prev_dodge_dir, self._dodge_direction,
+                            imu_heading)
 
                     # ── 3. Proximity-proportional aggression ──────────
                     # Linear ramp: 0.0 at DODGE_START_CM → 1.0 at DODGE_HARD_CM
@@ -1728,7 +1900,6 @@ class AutonomousController:
                     if self._dodge_direction == -1:
                         swerve_angle = -swerve_angle
 
-                    self._heading_at_swerve_start = imu_heading
                     self._last_dodge_time = t_start
 
                     _log.debug(
@@ -1747,6 +1918,12 @@ class AutonomousController:
                     self._steering_from_scan = None
                     self._steer_direction = None
                     self._nav_target_heading = None
+
+                    # Mark old scanner result as consumed so it won't be
+                    # picked up again when approaching a NEW obstacle.
+                    if (self.scanner.last_scan_time
+                            and self.scanner.last_scan_time > self._last_scan_time):
+                        self._last_scan_time = self.scanner.last_scan_time
 
                     # Reset dodge direction after delay
                     if (self._dodge_direction != 0 and
@@ -1802,6 +1979,47 @@ class AutonomousController:
                     self._stuck_cycles = 0
                     self._stuck_heading_ref = imu_heading
 
+                # ── Blindspot stuck detection (LM393+sonar+MPU) ─────
+                # Wheel spinning but car not moving (sonar+heading constant)
+                if self.encoder.available and self.encoder.is_spinning:
+                    dist_delta = abs(front_dist - self._blindspot_ref_dist)
+                    hdg_delta = abs(imu_heading - self._blindspot_ref_heading)
+                    if (dist_delta < BLINDSPOT_SONAR_DELTA and
+                            hdg_delta < BLINDSPOT_HEADING_DELTA):
+                        # Condition holds — clock it
+                        if not self._blindspot_active:
+                            self._blindspot_active = True
+                            self._blindspot_start_time = t_start
+                            _log.debug(
+                                "BLINDSPOT_START rpm=%.1f front=%.1f "
+                                "hdg=%.1f",
+                                self.encoder.rpm, front_dist,
+                                imu_heading)
+                        elif (t_start - self._blindspot_start_time >=
+                              BLINDSPOT_TRIGGER_S):
+                            # Stuck confirmed!
+                            self._blindspot_active = False
+                            self._boxed_in_count += 1
+                            _log.warning(
+                                "BLINDSPOT_STUCK rpm=%.1f front=%.1f "
+                                "dist_delta=%.1f hdg_delta=%.1f "
+                                "count=%d",
+                                self.encoder.rpm, front_dist,
+                                dist_delta, hdg_delta,
+                                self._boxed_in_count)
+                            self._do_boxed_in_recovery()
+                            continue
+                    else:
+                        # Car is actually moving — reset window
+                        self._blindspot_active = False
+                        self._blindspot_ref_dist = front_dist
+                        self._blindspot_ref_heading = imu_heading
+                else:
+                    # Wheel not spinning or encoder unavailable — reset
+                    self._blindspot_active = False
+                    self._blindspot_ref_dist = front_dist
+                    self._blindspot_ref_heading = imu_heading
+
                 # ── Circle detection ─────────────────────────────────
                 heading_delta = abs(imu_heading - self._heading_at_swerve_start)
                 if heading_delta > CIRCLE_HEADING_LIMIT and front_dist < WARN_DIST:
@@ -1855,6 +2073,12 @@ class AutonomousController:
                     scan_direction=self._steer_direction or "",
                     best_angle=round(best_angle, 1),
                     best_dist=round(best_dist, 1),
+                    encoder_rpm=round(self.encoder.rpm, 1),
+                    encoder_spinning=self.encoder.is_spinning,
+                    encoder_available=self.encoder.available,
+                    blindspot_stuck=self._blindspot_active,
+                    crash_threshold_g=round(
+                        self.imu._crash_threshold_ms2 / ACCEL_G, 2),
                 )
 
             # ── 4. comprehensive sensor log ──────────────────────────
@@ -1863,7 +2087,8 @@ class AutonomousController:
                     "CYCLE=%d st=%s zone=%s spd=[%.1f,%.1f] swerve=%.1f "
                     "sf=%.2f threat=%.2f front=%.1f tank=%s "
                     "ir=[%d,%d] scan=%s "
-                    "hdg=%.1f gz=%.2f lat_g=%.3f",
+                    "hdg=%.1f gz=%.2f lat_g=%.3f "
+                    "enc_rpm=%.1f enc_spin=%s blind=%s crash_g=%.2f",
                     cycle,
                     self.state.name,
                     self._telem.get("avoidance_zone", "?"),
@@ -1879,6 +2104,10 @@ class AutonomousController:
                     imu_data["heading"],
                     imu_data["gyro"].get("z", 0),
                     imu_data["lateral_g"],
+                    self.encoder.rpm,
+                    self.encoder.is_spinning,
+                    self._blindspot_active,
+                    self.imu._crash_threshold_ms2 / ACCEL_G,
                 )
 
             # ── 5. pace the loop ─────────────────────────────────────
@@ -2182,6 +2411,10 @@ class AutonomousController:
         self._critical_stuck_cycles = 0
         self._dodge_direction = 0
         self._last_dodge_time = 0.0
+        self._blindspot_active = False
+        self._blindspot_ref_dist = 0.0
+        self._blindspot_ref_heading = 0.0
+        self._blindspot_start_time = 0.0
         self._steering_from_scan = None
         self._steer_direction = None
         self._last_scan_time = 0.0
