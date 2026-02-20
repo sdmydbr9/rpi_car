@@ -38,11 +38,11 @@ from enum import Enum, auto
 BASE_SPEED          = 45        # forward cruise PWM % (reduced from 40 for better reaction time)
 MAX_PWM_DUTY        = 70        # voltage cap  (7 V / 11.1 V × 100)
 PWM_FREQ            = 1000      # Hz
-REVERSE_SPEED       = 60
-REVERSE_DURATION    = 1.0       # seconds
-RECOVERY_TURN_DURATION = 1.5    # seconds of wide turn after reverse (was 1.0 — too short to reorient)
-CRASH_REVERSE_SPEED = 65
-CRASH_REVERSE_DURATION = 0.5
+REVERSE_SPEED       = 70
+REVERSE_DURATION    = 1.2       # seconds (was 1.0 — not enough distance gained)
+RECOVERY_TURN_DURATION = 1.8    # seconds of wide turn after reverse (was 1.5 — still not reorienting enough)
+CRASH_REVERSE_SPEED = 70
+CRASH_REVERSE_DURATION = 0.6
 DIRECTION_CHANGE_DWELL = 0.15   # seconds between fwd↔rev
 
 # Per-wheel trims  (calibrated to make the car go straight)
@@ -61,11 +61,11 @@ HARD_SWERVE_DIST    = 70        # force min swerve when forward obstacle nearer 
 MIN_FORCED_SWERVE   = 60        # minimum swerve degrees when forced (was 35 — not acute enough)
 EMERGENCY_FWD_CM    = 30        # emergency max-swerve when centre sectors this close (was 25 — triggered too late)
 TANK_TURN_DIST      = 20        # cm (200mm) — full tank turn (spin in place) at this distance or less
-TANK_TURN_SPEED     = 45        # PWM % for each side during tank turn (raised from 40)
+TANK_TURN_SPEED     = 55        # PWM % for each side during tank turn (was 45 — not enough torque to rotate)
 SIDE_CLEAR_MIN_CM   = 50        # side must have at least this to be considered clear
-CRITICAL_TANK_DURATION = 0.6    # seconds — minimum tank turn duration before re-scanning in CRITICAL
+CRITICAL_TANK_DURATION = 0.8    # seconds — minimum tank turn duration before re-scanning (was 0.6 — too short)
 CRITICAL_STUCK_LIMIT   = 5      # consecutive CRITICAL cycles without escape → boxed-in recovery
-CIRCLE_HEADING_LIMIT = 120      # degrees — trigger boxed-in if car rotates this much
+CIRCLE_HEADING_LIMIT = 90       # degrees — trigger boxed-in if car rotates this much (was 120 — caught too late)
 # Stuck detection — car not turning despite close obstacles
 STUCK_HEADING_THRESH = 5.0      # degrees — max heading change to count as "not turning"
 STUCK_CYCLE_LIMIT    = 50       # cycles (~1.0s) — trigger recovery after this many stuck cycles (raised from 35; corrected servo should prevent most stuck)
@@ -77,9 +77,9 @@ SWERVE_MIN_DYNAMIC  = 30        # minimum dynamic swerve angle (at APPROACH_DIST
 SWERVE_CAUTION_MAX  = 75        # max swerve at CAUTION-DANGER boundary — aggressive before DANGER
 IR_SWERVE_BOOST     = 65        # added degrees when IR fires  (was 55 — increased for harder swerve)
 IR_CLOSE_MAX_SWERVE_CM = 25     # cm — full differential (100,0 / 0,100) below this distance
-IR_STUCK_REVERSE_DUR   = 0.5    # seconds to reverse when single IR fires
+IR_STUCK_REVERSE_DUR   = 0.7    # seconds to reverse when single IR fires (was 0.5 — not enough clearance)
 SPEED_FLOOR_FACTOR  = 0.45      # minimum speed fraction near obstacles (was 0.55 — too fast near walls)
-INNER_WHEEL_MIN     = 0.09      # inner wheels keep 12% speed — stronger turn (was 0.20 — not enough differential)
+INNER_WHEEL_MIN     = 0.05      # inner wheels keep 5% speed — max differential for sharpest turns (was 0.09)
 SWERVE_SPEED_FLOOR  = 1.00      # outer wheel stays at full BASE_SPEED during swerve
 SWERVE_OUTER_BOOST  = 1.05      # slight boost to outer wheel  (was 1.15 — too aggressive differential)
 SWERVE_SMOOTH_ALPHA = 0.75      # EMA smoothing factor — raised from 0.60 for faster swerve response
@@ -115,17 +115,25 @@ CRUISE_CLEAR_DIST   = 120       # cm – when forward is this clear, just cruise
 NAV_SMOOTH_ALPHA    = 0.3       # EMA smoothing for target heading updates (prevents oscillation)
 
 # Proximity-proportional dodge — direct wheel speed mapping
-# At DODGE_START_CM the car begins a gentle swerve; by DODGE_HARD_CM the
-# outer wheel is at MAX and inner wheel is near 0.  This is a linear
-# ramp that gives immediate, proportional avoidance without waiting for
-# a PID heading loop to catch up.
+# Tesla-style: gentle curve at far distances, hard swerve only very close.
+# Uses QUADRATIC aggression so the car drives mostly forward at moderate
+# distances, curving gently, and only does extreme swerve close to obstacles.
+# Heading-based attenuation prevents circling: after turning enough degrees,
+# the dodge eases off so the car straightens out and resumes forward motion.
 DODGE_START_CM      = 100       # cm — begin dodging (matches APPROACH_DIST)
-DODGE_HARD_CM       = 40        # cm — full hard turn (outer=MAX, inner≈0)
+DODGE_HARD_CM       = 30        # cm — full hard turn (was 40 — too early for max aggression)
 DODGE_OUTER_MAX     = MAX_PWM_DUTY   # 70 — outer wheel at max aggression
-DODGE_OUTER_MIN     = 50        # outer wheel at minimum aggression (gentle turn)
-DODGE_INNER_GENTLE  = 25        # inner wheel at minimum aggression
-DODGE_INNER_HARD    = 0         # inner wheel at max aggression
-DODGE_CLEAR_DELAY_S = 1.0       # seconds of CLEAR before resetting dodge direction
+DODGE_OUTER_MIN     = 48        # outer wheel at minimum aggression (gentle curve)
+DODGE_INNER_GENTLE  = 35        # inner wheel at gentle dodge (was 15 — car needs forward thrust!)
+DODGE_INNER_HARD    = 5         # inner wheel at max aggression (was 0 — never full tank turn in dodge)
+DODGE_CLEAR_DELAY_S = 0.5       # seconds of CLEAR before resetting dodge direction (was 1.0)
+
+# Heading-based dodge attenuation — prevents circling
+# After turning DODGE_HEADING_EASE degrees, dodge starts reducing.
+# After DODGE_HEADING_MAX degrees, dodge is fully attenuated (car goes straight).
+DODGE_HEADING_EASE  = 35        # degrees — start easing off dodge
+DODGE_HEADING_MAX   = 70        # degrees — force straighten, dodge has gone too far
+DODGE_STRAIGHT_CYCLES = 25      # ~0.5s of straight driving after heading-based attenuation
 
 # LM393 wheel encoder (rear-right wheel)
 ENCODER_PIN         = 26        # BCM GPIO 26 (physical pin 37)
@@ -170,14 +178,14 @@ QUICK_SCAN_ANGLES   = [-60, -30, 0, 30, 60]   # Phase 1: quick 5-angle check
 AMBIGUITY_THRESH_CM = 15        # if |left_avg - right_avg| < this → do full sweep
 
 # Blind reverse (no rear sensor)
-BLIND_REVERSE_SPEED    = 30     # PWM % — reduced for safety (blind)
-BLIND_REVERSE_DURATION = 0.5    # seconds — short burst
+BLIND_REVERSE_SPEED    = 50     # PWM % — raised from 30, car barely moved at old value
+BLIND_REVERSE_DURATION = 0.7    # seconds — raised from 0.5, needs longer burst to gain clearance
 
 # Reverse-before-turn thresholds (boxed-in recovery)
 REVERSE_BEFORE_TURN_DIST  = 45  # cm — reverse first if front is closer than this during recovery
 REPEATED_STUCK_REVERSE    = True  # always reverse on 2nd+ consecutive boxed-in
-REVERSE_ESCALATE_STEP     = 0.3 # extra seconds of reverse per consecutive boxed-in event
-REVERSE_MAX_DURATION      = 2.0 # cap total reverse duration
+REVERSE_ESCALATE_STEP     = 0.5 # extra seconds of reverse per consecutive boxed-in event (was 0.3 — too conservative)
+REVERSE_MAX_DURATION      = 2.5 # cap total reverse duration (was 2.0)
 REVERSE_CHECK_INTERVAL    = 0.1 # seconds — how often to poll front sonar while reversing
 REVERSE_MIN_CLEARANCE_CM  = 50  # cm — keep reversing until front sonar shows at least this
 
@@ -1469,6 +1477,7 @@ class AutonomousController:
         # Slalom-style dodge state
         self._dodge_direction = 0         # -1=left, 0=none, 1=right
         self._last_dodge_time = 0.0       # timestamp of last heading increment
+        self._dodge_straight_counter = 0  # cycles of forced straight after heading attenuation
 
         # Blindspot stuck detection (LM393 + sonar + MPU)
         self._blindspot_start_time = 0.0  # when blindspot condition first detected
@@ -1871,11 +1880,41 @@ class AutonomousController:
                             imu_heading)
 
                     # ── 3. Proximity-proportional aggression ──────────
-                    # Linear ramp: 0.0 at DODGE_START_CM → 1.0 at DODGE_HARD_CM
-                    aggression = ((DODGE_START_CM - front_dist) /
-                                  max(1, DODGE_START_CM - DODGE_HARD_CM))
-                    aggression = max(0.0, min(1.0, aggression))
+                    # QUADRATIC ramp: gentle at far distances, steep near
+                    # obstacles.  At 70cm: linear=0.43, quadratic=0.18.
+                    # This keeps the car driving mostly forward at medium
+                    # range instead of doing near-tank-turns.
+                    linear_aggr = ((DODGE_START_CM - front_dist) /
+                                   max(1, DODGE_START_CM - DODGE_HARD_CM))
+                    linear_aggr = max(0.0, min(1.0, linear_aggr))
+                    aggression = linear_aggr * linear_aggr  # quadratic
 
+                    # ── 3b. Heading-based attenuation ─────────────────
+                    # After turning DODGE_HEADING_EASE degrees, start
+                    # reducing dodge.  Prevents circling: the car has
+                    # already pointed away from the obstacle.
+                    heading_turned = abs(
+                        imu_heading - self._heading_at_swerve_start)
+                    if heading_turned > DODGE_HEADING_MAX:
+                        # Force straighten: car has turned too far
+                        aggression = 0.0
+                        self._dodge_straight_counter = DODGE_STRAIGHT_CYCLES
+                        if heading_turned > DODGE_HEADING_MAX + 5:
+                            # Reset heading ref so next dodge is fresh
+                            self._heading_at_swerve_start = imu_heading
+                    elif heading_turned > DODGE_HEADING_EASE:
+                        # Ease off proportionally
+                        ease = 1.0 - ((heading_turned - DODGE_HEADING_EASE) /
+                                      max(1, DODGE_HEADING_MAX - DODGE_HEADING_EASE))
+                        ease = max(0.0, min(1.0, ease))
+                        aggression *= ease
+
+                    # ── 3c. Forced straight-ahead after attenuation ───
+                    if self._dodge_straight_counter > 0:
+                        self._dodge_straight_counter -= 1
+                        aggression = 0.0
+
+                    # ── 3d. Compute wheel speeds ─────────────────────
                     # Outer wheel ramps up, inner wheel ramps down
                     outer_spd = (DODGE_OUTER_MIN +
                         (DODGE_OUTER_MAX - DODGE_OUTER_MIN) * aggression)
@@ -1891,7 +1930,7 @@ class AutonomousController:
                         right_spd = outer_spd
 
                     # Speed factor & threat for telemetry
-                    speed_factor = 1.0 - 0.5 * aggression   # 1.0 → 0.5
+                    speed_factor = 1.0 - 0.4 * aggression   # 1.0 → 0.6
                     effective_speed = (left_spd + right_spd) / 2.0
                     threat_mag = aggression
 
@@ -1905,12 +1944,14 @@ class AutonomousController:
                     _log.debug(
                         "FSM_DODGE zone=%s front=%.1f dodge_dir=%d "
                         "aggr=%.2f outer=%.1f inner=%.1f "
-                        "spd=[%.1f,%.1f] L=%.1f R=%.1f",
+                        "spd=[%.1f,%.1f] L=%.1f R=%.1f "
+                        "hdg_turn=%.1f",
                         zone.name, front_dist,
                         self._dodge_direction, aggression,
                         outer_spd, inner_spd,
                         left_spd, right_spd,
-                        left_avg, right_avg)
+                        left_avg, right_avg,
+                        heading_turned)
 
                 # ── CLEAR (>100cm): cruise straight ──────────────────
                 else:
@@ -1918,6 +1959,7 @@ class AutonomousController:
                     self._steering_from_scan = None
                     self._steer_direction = None
                     self._nav_target_heading = None
+                    self._dodge_straight_counter = 0
 
                     # Mark old scanner result as consumed so it won't be
                     # picked up again when approaching a NEW obstacle.
@@ -1930,6 +1972,12 @@ class AutonomousController:
                             (t_start - self._last_dodge_time) >
                             DODGE_CLEAR_DELAY_S):
                         self._dodge_direction = 0
+                        # Adopt current heading as target so PID doesn't
+                        # try to steer back toward the old heading
+                        # (which would circle back to the obstacle).
+                        self._target_heading = imu_heading
+                        self.imu.reset_heading()
+                        self._target_heading = 0.0
 
                     dt = imu_data["dt"]
 
@@ -1938,6 +1986,8 @@ class AutonomousController:
                         correction = self.imu.pid_correction(
                             self._target_heading, dt)
                         swerve_angle = correction * 0.3
+                        # Clamp to prevent wild swerve from PID windup
+                        swerve_angle = max(-30.0, min(30.0, swerve_angle))
                         left_spd, right_spd = differential_speeds(
                             BASE_SPEED, swerve_angle)
                     else:
@@ -2411,6 +2461,7 @@ class AutonomousController:
         self._critical_stuck_cycles = 0
         self._dodge_direction = 0
         self._last_dodge_time = 0.0
+        self._dodge_straight_counter = 0
         self._blindspot_active = False
         self._blindspot_ref_dist = 0.0
         self._blindspot_ref_heading = 0.0
