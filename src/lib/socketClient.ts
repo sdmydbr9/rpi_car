@@ -263,6 +263,7 @@ let narrationConfigSyncCallback: ((data: NarrationConfig) => void) | null = null
 let narrationKeyResultCallback: ((data: NarrationKeyResult) => void) | null = null;
 let narrationTextCallback: ((data: { text: string; timestamp: number }) => void) | null = null;
 let narrationToggleResponseCallback: ((data: { status: string; enabled: boolean; message?: string }) => void) | null = null;
+let narrationSpeakingDoneCallback: (() => void) | null = null;
 
 /**
  * Subscribe to narration config sync events (sent on connect)
@@ -306,6 +307,20 @@ export function onNarrationText(callback: (data: { text: string; timestamp: numb
 export function onNarrationToggleResponse(callback: (data: { status: string; enabled: boolean; message?: string }) => void): void {
   narrationToggleResponseCallback = callback;
   // Don't re-register the socket listener here — it's registered once at connect time
+}
+
+/**
+ * Subscribe to narration_speaking_done — emitted by the Pi after Kokoro audio playback finishes
+ */
+export function onNarrationSpeakingDone(callback: () => void): void {
+  narrationSpeakingDoneCallback = callback;
+  if (socket) {
+    socket.off('narration_speaking_done');
+    socket.on('narration_speaking_done', () => {
+      console.log('[Socket] 🎙️ Narration speaking done (Pi-side playback finished)');
+      if (narrationSpeakingDoneCallback) narrationSpeakingDoneCallback();
+    });
+  }
 }
 
 /**
@@ -790,6 +805,7 @@ export default {
   onNarrationKeyResult,
   onNarrationText,
   onNarrationToggleResponse,
+  onNarrationSpeakingDone,
   emitNarrationValidateKey,
   emitNarrationConfigUpdate,
   emitNarrationToggle,

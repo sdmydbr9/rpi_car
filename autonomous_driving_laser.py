@@ -30,6 +30,16 @@ import json
 from collections import deque
 from enum import Enum, auto
 
+from pico_sensor_reader import (
+    init_pico_reader,
+    get_gyro_z         as pico_get_gyro_z,
+    get_accel_xyz      as pico_get_accel_xyz,
+    get_laser_distance_mm as pico_get_laser_mm,
+    get_ir_sensors     as pico_get_ir,
+    get_rpm            as pico_get_rpm,
+    get_sensor_packet  as pico_get_sensor_packet,
+)
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  TUNEABLE CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -137,8 +147,8 @@ DODGE_HEADING_EASE  = 55        # degrees — start easing off dodge (was 35 —
 DODGE_HEADING_MAX   = 110       # degrees — force straighten (was 70 — too restrictive for dynamic swerve)
 DODGE_STRAIGHT_CYCLES = 8       # ~0.16s of straight driving after heading-based attenuation (was 25 — too long)
 
-# LM393 wheel encoder (rear-right wheel)
-ENCODER_PIN         = 26        # BCM GPIO 26 (physical pin 37)
+# LM393 wheel encoder (rear-right wheel) — now on Pico GPIO 10 (via UART bridge)
+# Legacy Pi pin: was BCM GPIO 26 (physical pin 37); now Pico GPIO 10 (pin 14)
 ENCODER_HOLES       = 20        # holes per revolution on encoder disc
 ENCODER_CALC_HZ     = 10        # RPM calculation rate (Hz)
 
@@ -227,17 +237,20 @@ FL_IN1 = 17;  FL_IN2 = 27;  FL_ENA = 12
 # Front-right motor
 FR_IN3 = 23;  FR_IN4 = 22;  FR_ENB = 13
 # Rear-left motor
-RL_IN1 = 10;  RL_IN2 = 7;   RL_ENA = 5
+RL_IN1 = 9;   RL_IN2 = 11;  RL_ENA = 26
 # Rear-right motor
-RR_IN3 = 9;   RR_IN4 = 11;  RR_ENB = 6
+RR_IN3 = 10;  RR_IN4 = 7;   RR_ENB = 16
 
 # Sensors
-IR_LEFT_PIN    = 5
-IR_RIGHT_PIN   = 6
+# IR_LEFT  — moved to Pico GPIO 8  (was Pi BCM GPIO 5)
+# IR_RIGHT — moved to Pico GPIO 9  (was Pi BCM GPIO 6)
+# ENCODER  — moved to Pico GPIO 10 (was Pi BCM GPIO 26)
+# MPU6050  — moved to Pico I2C     (was Pi I2C 0x68)
+# VL53L0X  — moved to Pico I2C     (was Pi I2C 0x29)
+# ⚑ All sensors above are read via pico_sensor_reader over UART
 SERVO_PIN      = 20
 FRONT_TRIG_PIN = 25
 FRONT_ECHO_PIN = 24
-# ENCODER_PIN  = 26  (defined in constants section above)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  STATE ENUM
@@ -338,83 +351,55 @@ except ImportError:
         @classmethod
         def PWM(cls, pin, freq): return _MockPWM(pin, freq)
 
-try:
-    import board, busio, adafruit_vl53l0x
-    _i2c = busio.I2C(board.SCL, board.SDA)
-    _tof = adafruit_vl53l0x.VL53L0X(_i2c)
-    HAS_TOF = True
-except Exception as exc:
-    HAS_TOF = False
-    _tof = None
-    _log.warning("VL53L0X unavailable: %s", exc)
+# ── Pico sensor bridge (replaces direct I2C for MPU6050 and VL53L0X) ─────────
+# VL53L0X and MPU6050 are now physically connected to the Pico W and their
+# data arrives via UART JSON packets.  No Pi-side I2C needed.
+_pico = init_pico_reader()
 
-try:
-    from mpu6050 import mpu6050 as _mpu6050_lib
-    _imu = _mpu6050_lib(0x68)
-    HAS_IMU = True
-except Exception as exc:
-    HAS_IMU = False
-    _imu = None
-    _log.warning("MPU6050 unavailable: %s", exc)
+def _pico_ready():
+    """True if the Pico bridge is connected and delivering fresh packets."""
+    return _pico is not None and _pico.is_fresh(max_age_s=3.0)
+
+# These flags remain True: data comes from Pico, not direct I2C.
+# They guard fall-through paths; real availability is checked via _pico_ready().
+HAS_TOF = True   # VL53L0X laser  — via Pico UART
+HAS_IMU = True   # MPU6050        — via Pico UART
+_tof = None      # legacy name — no direct I2C object
+_imu = None      # legacy name — no direct I2C object
+_log.info("PICO_BRIDGE_INIT port=%s", _pico.port if _pico else "NONE")
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  WHEEL ENCODER  (LM393 optical encoder on rear-right wheel)
+#  WHEEL ENCODER  (LM393 encoder — now read from Pico sensor bridge)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class WheelEncoder:
-    """LM393 optical speed sensor on rear-right wheel.
+    """LM393 wheel-speed encoder — data sourced from Pico bridge via UART.
 
-    Uses GPIO interrupt to count pulses, calculates RPM in a background
-    thread.  Provides `rpm` property and `is_spinning` helper."""
+    The encoder is physically wired to Pico GPIO 10 (was Pi BCM 26).
+    RPM is computed on the Pico and transmitted in every JSON packet.
+    Same public interface as the old GPIO-interrupt version."""
 
     def __init__(self):
-        self._pulse_count = 0
-        self._lock = threading.Lock()
-        self._rpm = 0.0
-        self._available = False
-        self._calc_interval = 1.0 / ENCODER_CALC_HZ
-
-        try:
-            GPIO.setup(ENCODER_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-            GPIO.add_event_detect(ENCODER_PIN, GPIO.RISING,
-                                  callback=self._isr, bouncetime=1)
-            self._available = True
-            _log.info("ENCODER_INIT GPIO%d holes=%d calc_hz=%d",
-                      ENCODER_PIN, ENCODER_HOLES, ENCODER_CALC_HZ)
-        except Exception as exc:
-            _log.warning("ENCODER_INIT_FAIL: %s — wheel speed unavailable", exc)
-
-        self._thread = threading.Thread(target=self._calc_loop, daemon=True)
-        self._thread.start()
-
-    def _isr(self, channel):
-        """Interrupt service routine — rising edge from encoder."""
-        self._pulse_count += 1
-
-    def _calc_loop(self):
-        """Background thread: compute RPM from pulse count."""
-        while True:
-            time.sleep(self._calc_interval)
-            with self._lock:
-                pulses = self._pulse_count
-                self._pulse_count = 0
-            revolutions = pulses / max(1, ENCODER_HOLES)
-            self._rpm = revolutions * (60.0 / self._calc_interval)
+        self._available = _pico is not None
+        if self._available:
+            _log.info("ENCODER_INIT via Pico bridge  holes=%d", ENCODER_HOLES)
+        else:
+            _log.warning("ENCODER_INIT_FAIL: Pico bridge unavailable — wheel speed unavailable")
 
     @property
     def rpm(self):
-        """Current wheel RPM (float)."""
-        return self._rpm
+        """Current wheel RPM from Pico bridge (float)."""
+        return pico_get_rpm() or 0.0
 
     @property
     def is_spinning(self):
         """True if wheel is spinning above BLINDSPOT_RPM_MIN."""
-        return self._rpm >= BLINDSPOT_RPM_MIN
+        return self.rpm >= BLINDSPOT_RPM_MIN
 
     @property
     def available(self):
-        """True if encoder hardware was successfully initialized."""
-        return self._available
+        """True if Pico bridge is connected and delivering fresh data."""
+        return self._available and _pico_ready()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -655,12 +640,12 @@ class LaserScanner:
 
     @staticmethod
     def _read_laser_cm():
-        """Read VL53L0X distance in cm, or -1 on error."""
-        if not HAS_TOF or _tof is None:
-            return -1
+        """Read VL53L0X distance in cm via Pico bridge, or -1 on error.
+        The sensor is physically on the Pico; the servo angles it and the
+        Pi reads the result from the latest UART packet."""
         try:
-            mm = _tof.range
-            if mm is None or mm > 2000:
+            mm = pico_get_laser_mm()
+            if mm is None or mm < 0 or mm > 2000:
                 return -1
             cm = round(mm / 10.0, 1)
             if cm < FLOOR_REJECT_CM:
@@ -860,21 +845,22 @@ class LaserScanner:
             pass
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  IR OBSTACLE SENSORS
+#  IR OBSTACLE SENSORS  (now read from Pico sensor bridge)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class IRSensors:
+    """IR obstacle sensors — data sourced from Pico bridge via UART.
+
+    Sensors are physically wired to Pico GPIO 8 (left) and GPIO 9 (right).
+    Legacy Pi BCM GPIO 5 / 6 are no longer used."""
+
     def __init__(self):
-        GPIO.setup(IR_LEFT_PIN, GPIO.IN)
-        GPIO.setup(IR_RIGHT_PIN, GPIO.IN)
-        _log.info("IR_INIT left=GPIO%d right=GPIO%d (active LOW)",
-                  IR_LEFT_PIN, IR_RIGHT_PIN)
+        _log.info("IR_INIT via Pico bridge (left=Pico_GPIO8, right=Pico_GPIO9, active LOW)")
 
     def read(self):
         """Returns (left_obstacle: bool, right_obstacle: bool).
-        Active LOW: GPIO 0 = obstacle present."""
-        l = not GPIO.input(IR_LEFT_PIN)
-        r = not GPIO.input(IR_RIGHT_PIN)
+        Returns (False, False) if Pico bridge is unavailable."""
+        l, r = pico_get_ir()
         return l, r
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -996,12 +982,13 @@ class IMU:
 
     def calibrate(self):
         """Collect CALIBRATION_SAMPLES to compute offsets and noise floor.
-        Car MUST be stationary during calibration."""
-        if not HAS_IMU:
-            _log.warning("IMU_CALIBRATE skipped – no MPU6050")
+        Car MUST be stationary during calibration.
+        Samples are read from the Pico sensor bridge via UART."""
+        if not _pico_ready():
+            _log.warning("IMU_CALIBRATE skipped – Pico bridge not available")
             return {"status": "no_imu"}
 
-        _log.info("IMU_CALIBRATE collecting %d samples …",
+        _log.info("IMU_CALIBRATE collecting %d samples via Pico bridge …",
                   CALIBRATION_SAMPLES)
 
         gz_samples = []
@@ -1011,12 +998,14 @@ class IMU:
 
         for i in range(CALIBRATION_SAMPLES):
             try:
-                g = _imu.get_gyro_data()
-                a = _imu.get_accel_data()
-                gz_samples.append(g["z"])
-                ax_samples.append(a["x"])
-                ay_samples.append(a["y"])
-                az_samples.append(a["z"])
+                pkt = pico_get_sensor_packet()
+                if pkt is None:
+                    time.sleep(CALIBRATION_INTERVAL)
+                    continue
+                gz_samples.append(pkt.gyro_z)
+                ax_samples.append(pkt.accel_x)
+                ay_samples.append(pkt.accel_y)
+                az_samples.append(pkt.accel_z)
             except Exception as exc:
                 _log.debug("IMU_CALIBRATE sample %d error: %s", i, exc)
             time.sleep(CALIBRATION_INTERVAL)
@@ -1082,13 +1071,16 @@ class IMU:
             }
 
         try:
-            accel = _imu.get_accel_data()
-            gyro = _imu.get_gyro_data()
+            pkt = pico_get_sensor_packet()
+            if pkt is None:
+                raise RuntimeError("No Pico packet available")
+            accel = {"x": pkt.accel_x, "y": pkt.accel_y, "z": pkt.accel_z}
+            gyro  = {"x": pkt.gyro_x,  "y": pkt.gyro_y,  "z": pkt.gyro_z}
         except Exception as exc:
             self._consecutive_errors += 1
-            # Print to console so user sees MPU issues in real-time
+            # Print to console so user sees Pico issues in real-time
             if self._consecutive_errors == 1 or self._consecutive_errors % 5 == 0:
-                print(f"\n⚠ MPU6050 READ ERROR #{self._consecutive_errors}: {exc}")
+                print(f"\n⚠ PICO BRIDGE READ ERROR #{self._consecutive_errors}: {exc}")
             _log.error("MPU_READ_ERROR count=%d err=%s",
                        self._consecutive_errors, exc)
             # DON'T update heading – wait for next valid signal from MPU

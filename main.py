@@ -49,7 +49,7 @@ DIST_DIR = "dist"
 # --- MOTOR PINS (BCM Numbering) — Dual L298N, 4WD ---
 # Managed by CarSystem in motor.py — listed here for wiring reference only.
 # Driver 1 (Front): FL_IN1=17, FL_IN2=27, FL_ENA=12, FR_IN3=23, FR_IN4=22, FR_ENB=13
-# Driver 2 (Rear):  RL_IN1=10, RL_IN2=7,  RL_ENA=5,  RR_IN3=9,  RR_IN4=11, RR_ENB=6
+# Driver 2 (Rear):  RL_IN1=9,  RL_IN2=11, RL_ENA=26, RR_IN3=10, RR_IN4=7,  RR_ENB=16
 
 # --- SONAR SENSOR PINS (BCM Numbering) ---
 # Front Sonar: TRIG → Pin 22 (GPIO 25), ECHO → Pin 18 (GPIO 24)
@@ -403,6 +403,15 @@ def _on_narration_text(text: str):
 
 narration_engine.set_callback(_on_narration_text)
 
+def _on_narration_done():
+    """Callback when Pi-side audio playback finishes."""
+    car_state["narration_speaking"] = False
+    with app.app_context():
+        socketio.emit('narration_speaking_done', {'timestamp': time.time()})
+    print("🎙️ [Narration] Playback done — speaking state cleared")
+
+narration_engine.set_done_callback(_on_narration_done)
+
 def _on_narration_error(error_msg: str):
     """Callback when narration encounters an error."""
     with app.app_context():
@@ -696,13 +705,15 @@ car_state = {
     "slalom_sign": 0,               # Dodge direction: -1=left, 0=none, 1=right
     # 🚨 SENSOR HEALTH STATUS
     "sensor_status": {
-        "front_sonar": "OK",  # OK, WARNING, FAILED
-        "rear_sonar": "OK",
+        "front_sonar": "OK",    # HC-SR04 ultrasonic on Pi GPIO 25/24
+        "laser": "OK",          # VL53L0X laser rangefinder via Pico
         "left_ir": "OK",
         "right_ir": "OK",
         "mpu6050": "OK",
         "pico_bridge": "OK",
         "camera": "OK",
+        "voltage_sensor": "OK",  # ADS1115 battery voltage ADC
+        "speaker_amp": "OK",     # MAX98357 I2S amplifier + speaker
     },
     "service_light_active": False,  # True if any sensor has error/warning
     # 📷 CAMERA / VISION / OBJECT DETECTION
@@ -791,12 +802,14 @@ def check_sensor_health():
     """
     sensor_status = {
         "front_sonar": "OK",
-        "rear_sonar": "OK",
+        "laser": "OK",
         "left_ir": "OK",
         "right_ir": "OK",
         "mpu6050": "OK",
         "pico_bridge": "OK",
         "camera": "OK",
+        "voltage_sensor": "OK",
+        "speaker_amp": "OK",
     }
     
     has_error = False
@@ -826,24 +839,39 @@ def check_sensor_health():
         except Exception:
             pico_packet = None
 
-    # ── 3. Check Front Laser (VL53L0X via Pico) ──
+    # ── 3. Check Laser Rangefinder (VL53L0X via Pico) ──
     try:
         if pico_fresh and pico_packet is not None:
             if pico_packet.laser_mm <= 0:
-                sensor_status["front_sonar"] = "FAILED"
+                sensor_status["laser"] = "FAILED"
                 has_error = True
             else:
-                sensor_status["front_sonar"] = "OK"
+                sensor_status["laser"] = "OK"
         else:
             # Pico not fresh — laser unavailable
+            sensor_status["laser"] = "FAILED"
+            has_error = True
+    except Exception:
+        sensor_status["laser"] = "FAILED"
+        has_error = True
+
+    # ── 3b. Check Front Sonar (HC-SR04 on Pi GPIO 25/24) ──
+    try:
+        if hasattr(sensor_system, '_rear_sonar_available') and sensor_system._rear_sonar_available:
+            # HC-SR04 GPIO init succeeded — try a quick ping
+            dist = sensor_system.get_rear_sonar_distance()
+            if dist > 0:
+                sensor_status["front_sonar"] = "OK"
+            else:
+                # Hardware present but reading failed (no echo)
+                sensor_status["front_sonar"] = "WARNING"
+                has_error = True
+        else:
             sensor_status["front_sonar"] = "FAILED"
             has_error = True
     except Exception:
         sensor_status["front_sonar"] = "FAILED"
         has_error = True
-
-    # Rear sonar removed — always mark OK (no hardware to fail)
-    sensor_status["rear_sonar"] = "OK"
 
     # ── 4. Check IR Sensors (via Pico) ──
     try:
@@ -902,6 +930,45 @@ def check_sensor_health():
         sensor_status["camera"] = "FAILED"
         has_error = True
     
+    # ── 8. Check Voltage Sensor (ADS1115 ADC via Pico) ──
+    try:
+        batt_v = car_state.get("battery_voltage", -1)
+        if batt_v > 0:
+            sensor_status["voltage_sensor"] = "OK"
+        elif pico_fresh:
+            # Pico alive but no valid voltage reading
+            sensor_status["voltage_sensor"] = "WARNING"
+            has_error = True
+        else:
+            sensor_status["voltage_sensor"] = "FAILED"
+            has_error = True
+    except Exception:
+        sensor_status["voltage_sensor"] = "FAILED"
+        has_error = True
+
+    # ── 9. Check Speaker + Amplifier (MAX98357 I2S) ──
+    try:
+        import subprocess
+        # Check if ALSA audio output device is available
+        result = subprocess.run(
+            ['aplay', '-l'],
+            capture_output=True, timeout=3
+        )
+        if result.returncode == 0 and len(result.stdout) > 0:
+            # Check for any playback device in the output
+            output = result.stdout.decode(errors='ignore')
+            if 'card' in output.lower():
+                sensor_status["speaker_amp"] = "OK"
+            else:
+                sensor_status["speaker_amp"] = "FAILED"
+                has_error = True
+        else:
+            sensor_status["speaker_amp"] = "FAILED"
+            has_error = True
+    except Exception:
+        sensor_status["speaker_amp"] = "FAILED"
+        has_error = True
+
     # Update car_state with sensor status
     car_state["sensor_status"] = sensor_status
     car_state["service_light_active"] = has_error
@@ -2665,6 +2732,9 @@ def telemetry_broadcast():
                 real_rpm = round(pwm * 2.2, 1)
                 real_speed_mpm = round(pwm * 2.2 * WHEEL_CIRCUMFERENCE_M, 2)
             
+            # 📡 Get fresh accelerometer data from Pico
+            accel_x, accel_y, accel_z = pico_get_accel_xyz()
+            
             telemetry_data = {
                 "rpm": real_rpm,
                 "speed_mpm": real_speed_mpm,
@@ -2692,6 +2762,10 @@ def telemetry_broadcast():
                 "sonar_enabled": car_state["sonar_enabled"],
                 "mpu6050_enabled": car_state["mpu6050_enabled"],
                 "rear_sonar_enabled": car_state["rear_sonar_enabled"],
+                # 🧭 MPU6050 Accelerometer telemetry
+                "accel_x": accel_x,
+                "accel_y": accel_y,
+                "accel_z": accel_z,
                 # 🧭 MPU6050 Gyro telemetry
                 "gyro_z": car_state["gyro_z"],
                 "pid_correction": car_state["pid_correction"],
@@ -2754,6 +2828,9 @@ def telemetry():
         real_rpm = round(pwm * 2.2, 1)
         real_speed_mpm = round(pwm * 2.2 * WHEEL_CIRCUMFERENCE_M, 2)
     
+    # 📡 Get fresh accelerometer data from Pico
+    accel_x, accel_y, accel_z = pico_get_accel_xyz()
+    
     return jsonify({
         "rpm": real_rpm,
         "speed_mpm": real_speed_mpm,
@@ -2768,6 +2845,10 @@ def telemetry():
         "temperature": get_cpu_temperature(),
         "cpu_clock": get_cpu_clock(),
         "gpu_clock": get_gpu_clock(),
+        # 🧭 MPU6050 Accelerometer telemetry
+        "accel_x": accel_x,
+        "accel_y": accel_y,
+        "accel_z": accel_z,
         # 🤖 Autonomous driving telemetry
         "autonomous_mode": car_state["autonomous_mode"],
         "autonomous_state": car_state["autonomous_state"],

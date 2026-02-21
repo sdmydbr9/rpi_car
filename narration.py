@@ -9,11 +9,138 @@ import threading
 import time
 import cv2
 import numpy as np
+import os
+import shutil
+import subprocess
+import tempfile
+import requests
 from tts_local import get_tts_synthesizer
 from kokoro_client import get_kokoro_client
 
 # ==========================================
-# 🔑 API KEY VALIDATION
+# � KOKORO LOUDNESS PLAYBACK HELPER
+# ==========================================
+
+def _play_kokoro_with_volume(
+    ip_address: str,
+    text: str,
+    voice: str,
+    speed: float = 1.0,
+    volume: float = 8.0,
+) -> bool:
+    """
+    Request MP3 from Kokoro API, then decode and play with an aggressive
+    loudness chain (compression + normalisation) via sox -> aplay.
+    Falls back to kokoro_client.synthesize_and_stream when sox/aplay is unavailable.
+    """
+    base_url = f"http://{ip_address}"
+    mp3_path = None
+    try:
+        response = requests.post(
+            f"{base_url}/v1/audio/speech",
+            json={
+                "model": "kokoro",
+                "input": text,
+                "voice": voice,
+                "response_format": "mp3",
+                "speed": speed,
+            },
+            stream=True,
+            timeout=(5, 30),
+        )
+        if response.status_code != 200:
+            print(f"❌ [Narration] Kokoro API error: HTTP {response.status_code}")
+            return False
+
+        with tempfile.NamedTemporaryFile(prefix="kokoro_narr_", suffix=".mp3", delete=False) as tmp:
+            mp3_path = tmp.name
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    tmp.write(chunk)
+
+        sox_bin = shutil.which("sox")
+        aplay_bin = shutil.which("aplay")
+        mpg123_bin = shutil.which("mpg123")
+
+        if mpg123_bin and sox_bin and aplay_bin:
+            wav_path = f"{mp3_path}.wav"
+            decode = subprocess.run(
+                [mpg123_bin, "-q", "-w", wav_path, mp3_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=60,
+            )
+            if decode.returncode != 0 or not os.path.exists(wav_path):
+                err = decode.stderr.decode(errors="ignore").strip()
+                print(f"❌ [Narration] mpg123 decode failed: {err}")
+                return False
+
+            sox_cmd = [
+                sox_bin,
+                "-v", str(max(0.1, volume)),
+                wav_path,
+                "-t", "wav", "-",
+                "highpass", "100",
+                "compand", "0.01,0.20",
+                "6:-90,-70,-40,-18,-20,-8,-5,-2",
+                "-2", "-90", "0.05",
+                "gain", "-n", "-0.1",
+            ]
+
+            sox_proc = subprocess.Popen(
+                sox_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            aplay_proc = subprocess.Popen(
+                [aplay_bin, "-D", "default", "-"],
+                stdin=sox_proc.stdout,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            if sox_proc.stdout is not None:
+                sox_proc.stdout.close()
+
+            aplay_err = aplay_proc.communicate(timeout=180)[1]
+            sox_err = sox_proc.communicate(timeout=180)[1]
+
+            try:
+                os.remove(wav_path)
+            except OSError:
+                pass
+
+            if aplay_proc.returncode != 0:
+                print(f"❌ [Narration] aplay failed: {aplay_err.decode(errors='ignore').strip()}")
+                return False
+            if sox_proc.returncode != 0:
+                print(f"❌ [Narration] sox failed: {sox_err.decode(errors='ignore').strip()}")
+                return False
+            return True
+
+        # Fallback: basic mpg123 streaming (no loudness boost)
+        print("⚠️ [Narration] sox/aplay not found — falling back to kokoro_client streaming")
+        kokoro = get_kokoro_client()
+        return kokoro.synthesize_and_stream(ip_address=ip_address, text=text, voice=voice, speed=speed)
+
+    except subprocess.TimeoutExpired:
+        print("❌ [Narration] Playback timed out")
+        return False
+    except requests.RequestException as e:
+        print(f"❌ [Narration] Kokoro request failed: {e}")
+        return False
+    except Exception as e:
+        print(f"❌ [Narration] Kokoro playback error: {e}")
+        return False
+    finally:
+        if mp3_path and os.path.exists(mp3_path):
+            try:
+                os.remove(mp3_path)
+            except OSError:
+                pass
+
+
+# ==========================================
+# �🔑 API KEY VALIDATION
 # ==========================================
 
 def validate_key(api_key: str) -> bool:
@@ -202,12 +329,15 @@ class NarrationEngine:
         self._vision_system = None
         self._on_narration_text = None  # callback(text: str)
         self._on_narration_error = None  # callback(error: str)
+        self._on_narration_done = None   # callback() — fired after audio playback finishes
         self._lock = threading.Lock()
         self._play_local_tts = True  # Always play audio on Pi's headphone jack by default
         # Kokoro TTS configuration
         self._kokoro_enabled = False
         self._kokoro_ip: str = ""
         self._kokoro_voice: str = ""
+        self._kokoro_speed: float = 1.0
+        self._kokoro_volume: float = 8.0  # Aggressive loudness multiplier
     
     def configure(self, api_key: str, model_name: str,
                   interval: float = 90.0, prompt: str = DEFAULT_PROMPT):
@@ -225,17 +355,27 @@ class NarrationEngine:
         status = "enabled" if enabled else "disabled"
         print(f"🔊 [Narration] Local TTS playback {status}")
     
-    def set_kokoro_config(self, ip_address: str | None, voice: str | None):
+    def set_kokoro_config(
+        self,
+        ip_address: str | None,
+        voice: str | None,
+        speed: float = 1.0,
+        volume: float = 8.0,
+    ):
         """Configure Kokoro TTS (remote FastAPI server).
-        
+
         Pass None for either parameter to disable Kokoro.
+        speed:  speech rate multiplier (default 1.0)
+        volume: sox loudness multiplier — higher = louder (default 8.0)
         """
         with self._lock:
             if ip_address and voice:
                 self._kokoro_enabled = True
                 self._kokoro_ip = ip_address
                 self._kokoro_voice = voice
-                print(f"🎤 [Narration] Kokoro enabled - IP: {ip_address}, Voice: {voice}")
+                self._kokoro_speed = max(0.1, speed)
+                self._kokoro_volume = max(0.1, volume)
+                print(f"🎤 [Narration] Kokoro enabled - IP: {ip_address}, Voice: {voice}, speed={speed}, volume={volume}")
             else:
                 self._kokoro_enabled = False
                 self._kokoro_ip = ""
@@ -255,7 +395,11 @@ class NarrationEngine:
     def set_error_callback(self, callback):
         """Set the callback for narration error output."""
         self._on_narration_error = callback
-    
+
+    def set_done_callback(self, callback):
+        """Set the callback fired after each audio playback completes."""
+        self._on_narration_done = callback
+
     @property
     def is_running(self) -> bool:
         return self._running
@@ -298,6 +442,8 @@ class NarrationEngine:
                     kokoro_enabled = self._kokoro_enabled
                     kokoro_ip = self._kokoro_ip
                     kokoro_voice = self._kokoro_voice
+                    kokoro_speed = self._kokoro_speed
+                    kokoro_volume = self._kokoro_volume
                     play_local_tts = self._play_local_tts
                 
                 # Capture frame
@@ -320,23 +466,30 @@ class NarrationEngine:
                     consecutive_errors = 0
                     print(f"⏱️ [Narration] Response in {elapsed:.1f}s")
                     
-                    # Play audio - try Kokoro first, fallback to local TTS
+                    # Play audio on the car — try Kokoro (with loudness pipeline)
+                    # first, fallback to local TTS if unavailable/failed
                     kokoro_success = False
                     if kokoro_enabled and kokoro_ip and kokoro_voice:
-                        # Try Kokoro first
-                        print(f"🎤 [Narration] Attempting Kokoro TTS at {kokoro_ip}...")
-                        kokoro = get_kokoro_client()
-                        kokoro_success = kokoro.synthesize_and_stream(
-                            kokoro_ip, text, kokoro_voice
+                        print(f"🎤 [Narration] Playing via Kokoro loudness pipeline at {kokoro_ip}...")
+                        kokoro_success = _play_kokoro_with_volume(
+                            ip_address=kokoro_ip,
+                            text=text,
+                            voice=kokoro_voice,
+                            speed=kokoro_speed,
+                            volume=kokoro_volume,
                         )
                         if not kokoro_success:
-                            print(f"⚠️  [Narration] Kokoro synthesis failed, falling back to local TTS")
-                    
+                            print(f"⚠️  [Narration] Kokoro playback failed, falling back to local TTS")
+
                     # Fallback to local TTS if Kokoro not enabled or failed
                     if not kokoro_success and play_local_tts:
                         print(f"🔊 [Narration] Using local TTS...")
                         tts = get_tts_synthesizer()
                         tts.speak(text)
+
+                    # Signal that audio playback is done
+                    if self._on_narration_done:
+                        self._on_narration_done()
                 elif not text:
                     consecutive_errors += 1
                     print(f"⚠️  [Narration] Empty response (attempt {consecutive_errors})")

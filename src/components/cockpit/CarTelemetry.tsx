@@ -1,9 +1,11 @@
 import { useState } from "react";
+
 import { Rocket, RotateCcw } from "lucide-react";
 import { ServiceLight, type SensorStatus } from "./ServiceLight";
 import { Speedometer, type SpeedUnit } from "./Speedometer";
 import { Gauge } from "./Gauge";
 import { BatteryGauge } from "./BatteryGauge";
+import { AccelerometerHUD } from "./AccelerometerHUD";
 
 interface CarTelemetryProps {
   steeringAngle: number;
@@ -24,6 +26,9 @@ interface CarTelemetryProps {
   isEngineRunning?: boolean;
   sensors?: SensorStatus[];
   requiresService?: boolean;
+  accelX?: number;
+  accelY?: number;
+  accelZ?: number;
 }
 
 export const CarTelemetry = ({
@@ -45,6 +50,9 @@ export const CarTelemetry = ({
   isEngineRunning = false,
   sensors = [],
   requiresService = false,
+  accelX = 0,
+  accelY = 0,
+  accelZ = 0,
 }: CarTelemetryProps) => {
   const [launchActive, setLaunchActive] = useState(false);
   const [donutActive, setDonutActive] = useState(false);
@@ -63,6 +71,10 @@ export const CarTelemetry = ({
 
   return (
     <div className="flex flex-col items-center justify-center h-full p-0.5 overflow-auto gap-1" data-scrollable="true" style={{ touchAction: 'pan-y' }}>
+      {/* HUD Row: MPU6050 Accelerometer */}
+      <div className="w-full flex justify-center mb-0.5">
+        <AccelerometerHUD x={accelX} y={accelY} z={accelZ} />
+      </div>
       {/* First Row: Temperature, CPU, GPU, Battery Gauges - Smaller */}
       <div className="flex gap-1 justify-center flex-wrap items-end">
         <Gauge 
@@ -176,11 +188,12 @@ export const CarTelemetry = ({
               width="14"
               height="28"
               rx="2"
-              className={`transition-all ${throttle || brake ? 'fill-destructive/80' : 'fill-card'}`}
-              stroke={throttle || brake ? "hsl(var(--destructive))" : "hsl(var(--border))"}
+              className="transition-all"
+              fill="hsl(var(--card))"
+              stroke={throttle || brake ? "rgb(20, 184, 166)" : "rgb(107, 114, 128)"}
               strokeWidth="1"
               style={{
-                filter: throttle || brake ? 'drop-shadow(0 0 4px hsl(var(--destructive)))' : 'none'
+                filter: throttle || brake ? 'drop-shadow(0 0 4px rgb(20, 184, 166))' : 'none'
               }}
             />
             
@@ -191,11 +204,12 @@ export const CarTelemetry = ({
               width="14"
               height="28"
               rx="2"
-              className={`transition-all ${throttle || brake ? 'fill-destructive/80' : 'fill-card'}`}
-              stroke={throttle || brake ? "hsl(var(--destructive))" : "hsl(var(--border))"}
+              className="transition-all"
+              fill="hsl(var(--card))"
+              stroke={throttle || brake ? "rgb(20, 184, 166)" : "rgb(107, 114, 128)"}
               strokeWidth="1"
               style={{
-                filter: throttle || brake ? 'drop-shadow(0 0 4px hsl(var(--destructive)))' : 'none'
+                filter: throttle || brake ? 'drop-shadow(0 0 4px rgb(20, 184, 166))' : 'none'
               }}
             />
             
@@ -214,18 +228,16 @@ export const CarTelemetry = ({
           {/* Round Action Buttons - Service Button Style */}
           <button
             onClick={handleLaunch}
-            className={`
+            className="
               absolute -left-[2.5vw] sm:-left-8 top-1/2 -translate-y-1/2
-              w-[8vw] h-[8vw] max-w-10 max-h-10 rounded-full border-2 flex flex-col items-center justify-center
+              w-[8vw] h-[8vw] max-w-10 max-h-10 rounded-full border flex flex-col items-center justify-center
               transition-all duration-100 touch-feedback
-              ${launchActive 
-                ? 'border-primary text-primary bg-transparent scale-95' 
-                : 'border-primary/60 text-primary bg-transparent hover:border-primary'
-              }
-            `}
+            "
             style={{
               outline: 'none',
-              boxShadow: launchActive ? '0 0 8px rgb(0, 184, 163), inset 0 0 8px rgba(0, 184, 163, 0.1)' : 'none'
+              border: '1px solid rgb(20, 184, 166)',
+              color: launchActive ? 'rgb(20, 184, 166)' : 'rgb(107, 114, 128)',
+              backgroundColor: 'transparent'
             }}
           >
             <Rocket className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
@@ -234,18 +246,16 @@ export const CarTelemetry = ({
           
           <button
             onClick={handleDonut}
-            className={`
+            className="
               absolute -right-[2.5vw] sm:-right-8 top-1/2 -translate-y-1/2
-              w-[8vw] h-[8vw] max-w-10 max-h-10 rounded-full border-2 flex flex-col items-center justify-center
+              w-[8vw] h-[8vw] max-w-10 max-h-10 rounded-full border flex flex-col items-center justify-center
               transition-all duration-100 touch-feedback
-              ${donutActive 
-                ? 'border-accent text-accent bg-transparent scale-95' 
-                : 'border-accent/60 text-accent bg-transparent hover:border-accent'
-              }
-            `}
+            "
             style={{
               outline: 'none',
-              boxShadow: donutActive ? '0 0 8px hsl(var(--accent)), inset 0 0 8px rgba(var(--accent), 0.1)' : 'none'
+              border: '1px solid rgb(20, 184, 166)',
+              color: donutActive ? 'rgb(20, 184, 166)' : 'rgb(107, 114, 128)',
+              backgroundColor: 'transparent'
             }}
           >
             <RotateCcw className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
@@ -253,7 +263,7 @@ export const CarTelemetry = ({
           </button>
 
           {/* Service Light beside Donut button */}
-          <div className="absolute -right-[-5vw] sm:-right-12 top-1/2 -translate-y-1/2">
+          <div className="absolute -right-[-10vw] sm:-right-24 top-1/2 -translate-y-1/2">
             <ServiceLight 
               sensors={sensors}
               requiresService={requiresService}
@@ -278,12 +288,12 @@ export const CarTelemetry = ({
       
       {/* Status Indicators */}
       <div className="flex gap-2 text-[6px] sm:text-[8px] racing-text">
-        <div className={`flex items-center gap-0.5 ${throttle ? 'text-primary text-glow-teal' : 'text-muted-foreground'}`}>
-          <div className={`w-1 h-1 sm:w-1.5 sm:h-1.5 rounded-full ${throttle ? 'bg-primary' : 'bg-muted'}`} />
+        <div className="flex items-center gap-0.5" style={{ color: throttle ? 'rgb(20, 184, 166)' : 'rgb(107, 114, 128)' }}>
+          <div className="w-1 h-1 sm:w-1.5 sm:h-1.5 rounded-full" style={{ backgroundColor: throttle ? 'rgb(20, 184, 166)' : 'rgb(107, 114, 128)' }} />
           PWR
         </div>
-        <div className={`flex items-center gap-0.5 ${brake ? 'text-destructive text-glow-red' : 'text-muted-foreground'}`}>
-          <div className={`w-1 h-1 sm:w-1.5 sm:h-1.5 rounded-full ${brake ? 'bg-destructive' : 'bg-muted'}`} />
+        <div className="flex items-center gap-0.5" style={{ color: brake ? 'rgb(20, 184, 166)' : 'rgb(107, 114, 128)' }}>
+          <div className="w-1 h-1 sm:w-1.5 sm:h-1.5 rounded-full" style={{ backgroundColor: brake ? 'rgb(20, 184, 166)' : 'rgb(107, 114, 128)' }} />
           BRK
         </div>
       </div>

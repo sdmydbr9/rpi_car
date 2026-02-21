@@ -424,8 +424,8 @@ class CarSystem:
     FR_IN3 = 23;  FR_IN4 = 22;  FR_ENB = 13   # Front-Right (direction pins swapped)
 
     # ── Pin assignments (BCM) ─── Driver 2: REAR ────
-    RL_IN1 = 10;  RL_IN2 = 7;   RL_ENA = 5    # Rear-Left
-    RR_IN3 = 9;   RR_IN4 = 11;  RR_ENB = 6    # Rear-Right  (direction pins swapped)
+    RL_IN1 = 9;   RL_IN2 = 11;  RL_ENA = 26   # Rear-Left
+    RR_IN3 = 10;  RR_IN4 = 7;   RR_ENB = 16   # Rear-Right  (direction pins swapped)
 
     # IR sensors moved to Pico sensor bridge (UART) — no longer on Pi GPIO.
     # Legacy pin numbers kept for reference only: LEFT_IR was 5, RIGHT_IR was 6.

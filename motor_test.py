@@ -70,17 +70,15 @@ FR_IN3 = 23
 FR_IN4 = 22
 FR_ENB = 13
 
-RL_IN1 = 10
-RL_IN2 = 7
-# --- UPDATED PINS ---
-RL_ENA = 5   # Was 19
-# --------------------
+# --- SWAPPED REAR PINS TO MATCH PHYSICAL WIRING ---
+RL_IN1 = 9
+RL_IN2 = 11
+RL_ENA = 26
 
-RR_IN3 = 9
-RR_IN4 = 11
-# --- UPDATED PINS ---
-RR_ENB = 6   # Was 18
-# --------------------
+RR_IN3 = 10
+RR_IN4 = 7
+RR_ENB = 16
+# --------------------------------------------------
 
 ALL_DIR_PINS = [FL_IN1, FL_IN2, FR_IN3, FR_IN4, RL_IN1, RL_IN2, RR_IN3, RR_IN4]
 ALL_EN_PINS = [FL_ENA, FR_ENB, RL_ENA, RR_ENB]

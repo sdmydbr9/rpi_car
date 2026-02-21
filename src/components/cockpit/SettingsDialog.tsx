@@ -876,8 +876,7 @@ export const SettingsDialog = ({
                 {/* ───────── SENSORS ───────── */}
                 <CollapsibleGroup title="📡 SENSORS" defaultOpen={false}>
                   {[
-                    { label: 'Front Sonar', enabled: isSonarEnabled, onToggle: onSonarToggle, required: true },
-                    { label: 'Rear Sonar', enabled: isRearSonarEnabled, onToggle: onRearSonarToggle, required: false },
+                    { label: 'Front Sonar (HC-SR04)', enabled: isSonarEnabled, onToggle: onSonarToggle, required: true },
                     { label: 'Left IR', enabled: isIREnabled, onToggle: onIRToggle, required: true },
                     { label: 'Right IR', enabled: isIREnabled, onToggle: onIRToggle, required: true },
                     { label: 'MPU6050', enabled: isMPU6050Enabled, onToggle: onMPU6050Toggle, required: true },

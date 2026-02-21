@@ -37,13 +37,15 @@ const convertSensorStatus = (
   oldStatus: Record<string, string>
 ): SensorStatus[] => {
   const sensorNameMap: Record<string, string> = {
-    front_sonar: 'Front Sonar',
-    rear_sonar: 'Rear Sonar',
+    front_sonar: 'Front Sonar (HC-SR04)',
+    laser: 'Laser (VL53L0X)',
     left_ir: 'Left IR',
     right_ir: 'Right IR',
     mpu6050: 'MPU6050',
     pico_bridge: 'PICO Bridge',
     camera: 'Camera',
+    voltage_sensor: 'Voltage (ADS1115)',
+    speaker_amp: 'Speaker + Amp',
   };
 
   const statusMap: Record<string, 'ok' | 'warning' | 'error'> = {
@@ -110,13 +112,15 @@ export const CockpitController = () => {
   const [autonomousTargetSpeed, setAutonomousTargetSpeed] = useState<number>(0);
   // Sensor health state
   const [sensors, setSensors] = useState<SensorStatus[]>([
-    { name: 'Front Sonar', status: 'ok' },
-    { name: 'Rear Sonar', status: 'ok' },
+    { name: 'Front Sonar (HC-SR04)', status: 'ok' },
+    { name: 'Laser (VL53L0X)', status: 'ok' },
     { name: 'Left IR', status: 'ok' },
     { name: 'Right IR', status: 'ok' },
     { name: 'MPU6050', status: 'ok' },
     { name: 'PICO Bridge', status: 'ok' },
     { name: 'Camera', status: 'ok' },
+    { name: 'Voltage (ADS1115)', status: 'ok' },
+    { name: 'Speaker + Amp', status: 'ok' },
   ]);
   const [requiresService, setRequiresService] = useState(false);
   const [tuning, setTuning] = useState<TuningConstants>(() => {
@@ -159,11 +163,15 @@ export const CockpitController = () => {
   const [cameraClosestConfidence, setCameraClosestConfidence] = useState(0);
   const [visionFps, setVisionFps] = useState(0);
   const [userWantsVision, setUserWantsVision] = useState(false);
-  // MPU6050 Gyro telemetry state
+  // MPU6050 Gyro/Accel telemetry state
   const [gyroZ, setGyroZ] = useState(0);
   const [pidCorrection, setPidCorrection] = useState(0);
   const [gyroAvailable, setGyroAvailable] = useState(false);
   const [gyroCalibrated, setGyroCalibrated] = useState(false);
+  // MPU6050 Accelerometer
+  const [accelX, setAccelX] = useState(0);
+  const [accelY, setAccelY] = useState(0);
+  const [accelZ, setAccelZ] = useState(0);
   // Slalom autopilot telemetry
   const [targetYaw, setTargetYaw] = useState(0);
   const [currentHeading, setCurrentHeading] = useState(0);
@@ -232,10 +240,9 @@ export const CockpitController = () => {
     setShowAudioUnlockPrompt(false);
   }, []);
 
-  // Wire ttsService speaking-state changes back into React state
+  // Wire narration_speaking_done (emitted by Pi after audio playback finishes)
   useEffect(() => {
-    ttsService.onSpeakingChange((speaking) => setNarrationSpeaking(speaking));
-    ttsService.onDone(() => socketClient.emitNarrationSpeakingDone());
+    socketClient.onNarrationSpeakingDone(() => setNarrationSpeaking(false));
   }, []);
 
   useEffect(() => {
@@ -426,26 +433,12 @@ export const CockpitController = () => {
       }
     });
 
-    // Subscribe to narration text events (AI descriptions) and play via browser TTS
+    // Subscribe to narration text events (AI descriptions)
+    // Audio is played on the car (Pi) only — browser shows the text overlay
     socketClient.onNarrationText((data) => {
       console.log(`🎙️ [CockpitController] Narration text received (${data.text?.length} chars): "${data.text?.slice(0, 80)}"`);
       setNarrationLastText(data.text);
-
-      // Always speak via TTS when image analysis is enabled
-      console.log(`🎙️ [CockpitController] ✅ TTS playback, ttsService.isUnlocked=${ttsService.isUnlocked}, ttsService.isSupported=${ttsService.isSupported}`);
-
-      // Show unlock prompt if TTS hasn't been unlocked yet via user gesture
-      if (!ttsService.isUnlocked) {
-        console.log('🎙️ [CockpitController] ⚠️ TTS NOT unlocked yet — showing unlock prompt');
-        setShowAudioUnlockPrompt(true);
-        setNarrationSpeaking(true);
-        return;
-      }
-
-      // Speak via the TTS service (handles cancel → delay → speak,
-      // voice selection, Chrome keep-alive, and GC protection)
-      console.log('🎙️ [CockpitController] Calling ttsService.speak()...');
-      ttsService.speak(data.text);
+      setNarrationSpeaking(true);
     });
 
     // Subscribe to narration toggle response (image analysis toggle)
@@ -536,18 +529,21 @@ export const CockpitController = () => {
       if (data.camera_closest_confidence !== undefined) setCameraClosestConfidence(data.camera_closest_confidence);
       if (data.vision_fps !== undefined) setVisionFps(data.vision_fps);
       if (data.camera_actual_fps !== undefined) setCameraActualFps(data.camera_actual_fps);
-      // Update MPU6050 gyro telemetry
+      // Update MPU6050 gyro/accel telemetry
       if (data.gyro_z !== undefined) setGyroZ(data.gyro_z);
       if (data.pid_correction !== undefined) setPidCorrection(data.pid_correction);
       if (data.gyro_available !== undefined) setGyroAvailable(data.gyro_available);
       if (data.gyro_calibrated !== undefined) setGyroCalibrated(data.gyro_calibrated);
+      if (data.accel_x !== undefined) setAccelX(data.accel_x);
+      if (data.accel_y !== undefined) setAccelY(data.accel_y);
+      if (data.accel_z !== undefined) setAccelZ(data.accel_z);
       // Update slalom autopilot telemetry
       if (data.target_yaw !== undefined) setTargetYaw(data.target_yaw);
       if (data.current_heading !== undefined) setCurrentHeading(data.current_heading);
       if (data.slalom_sign !== undefined) setSlalomSign(data.slalom_sign);
       // Update narration telemetry
       if (data.narration_enabled !== undefined) setImageAnalysisEnabled(data.narration_enabled);
-      if (data.narration_speaking !== undefined) setNarrationSpeaking(prev => prev || data.narration_speaking!);
+      if (data.narration_speaking !== undefined) setNarrationSpeaking(data.narration_speaking!);
       // Update live camera config from telemetry (for HUD badge only — does NOT touch tuning state)
       if (data.camera_resolution) setLiveCameraResolution(data.camera_resolution);
       if (data.camera_jpeg_quality !== undefined) setLiveCameraJpegQuality(data.camera_jpeg_quality);
@@ -812,7 +808,7 @@ export const CockpitController = () => {
     } else {
       // Check required sensors before enabling autopilot
       const disabledSensors: string[] = [];
-      if (!isSonarEnabled) disabledSensors.push('Front Sonar');
+      if (!isSonarEnabled) disabledSensors.push('Laser (VL53L0X)');
       if (!isIREnabled) {
         disabledSensors.push('Left IR');
         disabledSensors.push('Right IR');
@@ -1016,6 +1012,9 @@ export const CockpitController = () => {
               isEngineRunning={isEngineRunning}
               sensors={sensors}
               requiresService={requiresService}
+              accelX={accelX}
+              accelY={accelY}
+              accelZ={accelZ}
             />
           </div>
           
