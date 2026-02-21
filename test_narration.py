@@ -43,8 +43,8 @@ def _mask_key(api_key: str) -> str:
 
 def _play_kokoro_with_volume(ip_address: str, text: str, voice: str, speed: float, volume: float) -> bool:
     """
-    Request MP3 from Kokoro API, then play with:
-      sox -v <volume> -t mp3 <file> -t wav - | aplay -D default -
+    Request MP3 from Kokoro API, then decode and play with an aggressive
+    loudness chain (compression + normalization) via sox -> aplay.
     Falls back to kokoro_client.synthesize_and_stream when sox/aplay is unavailable.
     """
     base_url = f"http://{ip_address}"
@@ -77,15 +77,46 @@ def _play_kokoro_with_volume(ip_address: str, text: str, voice: str, speed: floa
         mpg123_bin = shutil.which("mpg123")
 
         if mpg123_bin and sox_bin and aplay_bin:
-            print(f"🔊 Playing via mpg123 -> sox gain x{volume:.2f} -> aplay")
-            mpg_proc = subprocess.Popen(
-                [mpg123_bin, "-q", "-w", "-", mp3_path],
-                stdout=subprocess.PIPE,
+            print(f"🔊 Playing via mpg123 -> aggressive sox loudness (x{volume:.2f}) -> aplay")
+            wav_path = f"{mp3_path}.wav"
+            decode = subprocess.run(
+                [mpg123_bin, "-q", "-w", wav_path, mp3_path],
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
+                timeout=60,
             )
+            if decode.returncode != 0 or not os.path.exists(wav_path):
+                err = decode.stderr.decode(errors="ignore").strip()
+                print(f"❌ mpg123 decode failed: {err}")
+                return False
+
+            # Aggressive speech loudness profile:
+            # - highpass removes low rumble
+            # - compand raises quieter speech parts
+            # - final gain -n pushes peak close to full scale
+            sox_cmd = [
+                sox_bin,
+                "-v",
+                str(max(0.1, volume)),
+                wav_path,
+                "-t",
+                "wav",
+                "-",
+                "highpass",
+                "100",
+                "compand",
+                "0.01,0.20",
+                "6:-90,-70,-40,-18,-20,-8,-5,-2",
+                "-2",
+                "-90",
+                "0.05",
+                "gain",
+                "-n",
+                "-0.1",
+            ]
+
             sox_proc = subprocess.Popen(
-                [sox_bin, "-v", str(volume), "-t", "wav", "-", "-t", "wav", "-"],
-                stdin=mpg_proc.stdout,
+                sox_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
@@ -96,15 +127,12 @@ def _play_kokoro_with_volume(ip_address: str, text: str, voice: str, speed: floa
                 stderr=subprocess.PIPE,
             )
 
-            # Parent process must close its copies to avoid pipe deadlocks.
-            if mpg_proc.stdout is not None:
-                mpg_proc.stdout.close()
+            # Parent process must close its copy to avoid pipe deadlocks.
             if sox_proc.stdout is not None:
                 sox_proc.stdout.close()
 
             aplay_err = aplay_proc.communicate(timeout=180)[1]
             sox_err = sox_proc.communicate(timeout=180)[1]
-            mpg_err = mpg_proc.communicate(timeout=180)[1]
 
             if aplay_proc.returncode != 0:
                 print(f"❌ aplay failed: {aplay_err.decode(errors='ignore').strip()}")
@@ -112,9 +140,10 @@ def _play_kokoro_with_volume(ip_address: str, text: str, voice: str, speed: floa
             if sox_proc.returncode != 0:
                 print(f"❌ sox failed: {sox_err.decode(errors='ignore').strip()}")
                 return False
-            if mpg_proc.returncode != 0:
-                print(f"❌ mpg123 failed: {mpg_err.decode(errors='ignore').strip()}")
-                return False
+            try:
+                os.remove(wav_path)
+            except OSError:
+                pass
             return True
 
         print("⚠️ sox/aplay not found, falling back to kokoro_client player")
@@ -167,8 +196,8 @@ def main() -> int:
     parser.add_argument(
         "--volume",
         type=float,
-        default=4.0,
-        help="Output loudness multiplier for sox (default: 4.0)",
+        default=8.0,
+        help="Aggressive loudness multiplier for sox chain (default: 8.0)",
     )
     parser.add_argument(
         "--resolution",

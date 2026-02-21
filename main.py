@@ -78,7 +78,7 @@ EMERGENCY_BRAKE_RATE = 5.0  # Emergency brake deceleration (faster stop on obsta
 FREQ = 1000         # PWM Frequency (Hz)
 
 # --- MOTOR PROTECTION ---
-from motor import MAX_PWM_DUTY  # Voltage-based PWM hard limit (~63 %)
+from motor import MAX_PWM_DUTY, PowerLimiter  # Voltage-based PWM hard limit
 STEER_RATE_LIMIT_PER_TICK = 10   # Max degrees steering change per 20 ms tick (500°/s)
 MIN_SPEED_FOR_GEAR_CHANGE = 5.0  # Max current_pwm to allow forward↔reverse gear switch
 BRAKE_DECEL_RATE = 3.0           # Brake ramp-down rate (%/tick) — ~150 %/s, ~670 ms to stop from 100
@@ -727,6 +727,10 @@ car_state = {
     # 🔋 Battery / Current (from Pico ADC)
     "battery_voltage": -1,                   # Battery voltage in V (from ADS1115 A0)
     "current_amps": -1,                      # Current draw in A (from ADS1115 A1)
+    # ⚡ Dynamic power limiter telemetry
+    "effective_max_duty": MAX_PWM_DUTY,       # Current dynamic duty cap (%)
+    "l298n_voltage_drop": 1.5,               # Estimated L298N driver drop (V)
+    "effective_motor_voltage": 0.0,           # Estimated motor-terminal voltage (V)
     # Camera configuration settings
     "camera_resolution": CAMERA_DEFAULT_RESOLUTION,  # Current resolution setting (WxH format, e.g. '640x480')
     "camera_jpeg_quality": CAMERA_JPEG_QUALITY,      # JPEG quality (1-100)
@@ -1185,9 +1189,9 @@ def physics_loop():
                         # Use speed limit (5-100%)
                         target = car_state["speed_limit"] if (gas and gear != "N") else 0
                     else:
-                        # Use gear-based speeds (original behavior)
-                        ranges = {"N": (0,0), "R": (0,min(80, MAX_PWM_DUTY)), "1": (0,min(40, MAX_PWM_DUTY)), "2": (40,min(60, MAX_PWM_DUTY)), "3": (min(60, MAX_PWM_DUTY),MAX_PWM_DUTY), "S": (min(60, MAX_PWM_DUTY),MAX_PWM_DUTY)}
-                        min_s, max_s = ranges.get(gear, (0,40))
+                        # Use gear-based speeds (voltage-aware dynamic ranges)
+                        ranges = car_system.power_limiter.gear_duty_ranges()
+                        min_s, max_s = ranges.get(gear, (0, 40))
                         target = max_s if (gas and gear != "N") else 0
                         if gas and current < min_s: current = min_s
                     
@@ -1206,8 +1210,8 @@ def physics_loop():
                             # Getting close - moderate speed (40% max)
                             target = min(target, 40)
                     
-                    # Hard voltage cap on any target
-                    target = min(target, MAX_PWM_DUTY)
+                    # Hard dynamic voltage cap on any target
+                    target = min(target, car_system.power_limiter.max_safe_duty)
                     
                     # Smooth Ramping
                     if current < target: current += ACCEL_RATE
@@ -1239,8 +1243,8 @@ def physics_loop():
             if car_state["speed_limit_enabled"]:
                 target = car_state["speed_limit"] if gas else 0
             else:
-                ranges = {"N": (0,0), "R": (0,min(80, MAX_PWM_DUTY)), "1": (0,min(40, MAX_PWM_DUTY)), "2": (40,min(60, MAX_PWM_DUTY)), "3": (min(60, MAX_PWM_DUTY),MAX_PWM_DUTY), "S": (min(60, MAX_PWM_DUTY),MAX_PWM_DUTY)}
-                min_s, max_s = ranges.get(gear, (0,40))
+                ranges = car_system.power_limiter.gear_duty_ranges()
+                min_s, max_s = ranges.get(gear, (0, 40))
                 target = max_s if gas else 0
                 if gas and current < min_s: current = min_s
             
@@ -1255,8 +1259,8 @@ def physics_loop():
                 elif sonar_distance < SONAR_CAUTION_DISTANCE:
                     target = min(target, 40)
             
-            # Hard voltage cap on any target
-            target = min(target, MAX_PWM_DUTY)
+            # Hard dynamic voltage cap on any target
+            target = min(target, car_system.power_limiter.max_safe_duty)
             
             # Smooth Ramping
             if current < target: current += ACCEL_RATE
@@ -2582,6 +2586,20 @@ def encoder_and_power_thread():
                     car_state["current_amps"] = round(curr_a, 2) if curr_a >= 0 else -1
                 except Exception:
                     car_state["current_amps"] = -1
+
+                # --- Update dynamic power limiter with fresh sensor data ---
+                bv = car_state["battery_voltage"]
+                ca = car_state["current_amps"]
+                car_system.update_power_state(
+                    bv if bv > 0 else -1,
+                    ca if ca >= 0 else 0.0
+                )
+                pl = car_system.power_limiter
+                car_state["effective_max_duty"] = round(pl.max_safe_duty, 1)
+                car_state["l298n_voltage_drop"] = round(pl.l298n_drop, 2)
+                car_state["effective_motor_voltage"] = round(
+                    pl.effective_motor_voltage(car_state["current_pwm"]), 2
+                )
         except Exception as e:
             print(f"❌ [Encoder/Power] Read error: {e}")
             time.sleep(interval)
@@ -2723,6 +2741,10 @@ def telemetry():
         # 🔋 Battery / power telemetry
         "battery_voltage": car_state.get("battery_voltage", -1),
         "current_amps": car_state.get("current_amps", -1),
+        # ⚡ Dynamic power limiter telemetry
+        "effective_max_duty": car_state.get("effective_max_duty", MAX_PWM_DUTY),
+        "l298n_voltage_drop": car_state.get("l298n_voltage_drop", 1.5),
+        "effective_motor_voltage": car_state.get("effective_motor_voltage", 0.0),
     })
 
 @app.route("/system/status")
