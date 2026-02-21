@@ -20,28 +20,18 @@ def main():
         print(f"\nError details: {e}")
         return
 
-    # 1b. TEST MPU6050 (Gyroscope)
+    # 1b. TEST MPU6050 (via Pico sensor bridge)
     try:
-        import smbus2 as _smbus
-    except ImportError:
-        try:
-            import smbus as _smbus
-        except ImportError:
-            _smbus = None
-
-    if _smbus:
-        try:
-            bus = _smbus.SMBus(1)
-            who = bus.read_byte_data(0x68, 0x75)
-            bus.close()
-            if who in (0x68, 0x72):
-                print(f"{'MPU6050':<15} | {'ID=0x' + format(who, '02X'):<15} | [OK] ✅")
-            else:
-                print(f"{'MPU6050':<15} | {'ID=0x' + format(who, '02X'):<15} | [WARNING] ⚠️")
-        except Exception as e:
-            print(f"{'MPU6050':<15} | {'No Response':<15} | [FAILED] ❌")
-    else:
-        print(f"{'MPU6050':<15} | {'No smbus lib':<15} | [SKIPPED] ⚠️")
+        from pico_sensor_reader import init_pico_reader, get_gyro_z
+        pico = init_pico_reader('/dev/ttyS0')
+        time.sleep(1)  # wait for first packet
+        if pico.is_connected():
+            gz = get_gyro_z()
+            print(f"{'MPU6050':<15} | {'gz=' + format(gz, '.1f') + '°/s':<15} | [OK] ✅ (Pico bridge)")
+        else:
+            print(f"{'MPU6050':<15} | {'No Pico data':<15} | [FAILED] ❌")
+    except Exception as e:
+        print(f"{'MPU6050':<15} | {'Pico error':<15} | [FAILED] ❌  {e}")
 
     # 2. TEST FRONT SONAR
     dist_front = car.get_sonar_distance()

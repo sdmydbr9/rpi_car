@@ -35,10 +35,10 @@ from enum import Enum, auto
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Motor / PWM
-BASE_SPEED          = 45        # forward cruise PWM % (reduced from 40 for better reaction time)
-MAX_PWM_DUTY        = 70        # voltage cap  (7 V / 11.1 V × 100)
+BASE_SPEED          = 40       # forward cruise PWM % (reduced from 40 for better reaction time)
+MAX_PWM_DUTY        = 60        # voltage cap  (7 V / 11.1 V × 100)
 PWM_FREQ            = 1000      # Hz
-REVERSE_SPEED       = 70
+REVERSE_SPEED       = 50
 REVERSE_DURATION    = 1.2       # seconds (was 1.0 — not enough distance gained)
 RECOVERY_TURN_DURATION = 1.8    # seconds of wide turn after reverse (was 1.5 — still not reorienting enough)
 CRASH_REVERSE_SPEED = 70
@@ -52,29 +52,29 @@ RL_TRIM = 1.00
 RR_TRIM = 1.00
 
 # Obstacle distances (cm)
-APPROACH_DIST       = 100       # pre-emptive laser scan trigger — map area before reaching CAUTION
-WARN_DIST           = 80        # start swerving — increased from 60 for earlier reaction
-CRITICAL_DIST       = 40        # reduce speed — increased from 30 to slow down earlier
-ALL_BLOCKED_CM      = 22        # every forward sector is this close → boxed in (raised from 18)
+APPROACH_DIST       = 100       # pre-emptive laser scan trigger — raised from 120 for much earlier scanning/swerving
+WARN_DIST           = 50       # start moderate swerving — raised from 90 for earlier swerve reaction
+CRITICAL_DIST       = 30        # hard swerve zone — increased from 40 so hard turns start earlier
+ALL_BLOCKED_CM      = 15        # every forward sector is this close → boxed in (raised from 18)
 EMERGENCY_IR_DIST   = 0         # IR triggers (binary, active LOW)
-HARD_SWERVE_DIST    = 70        # force min swerve when forward obstacle nearer (was 55 — still not reacting early enough)
-MIN_FORCED_SWERVE   = 60        # minimum swerve degrees when forced (was 35 — not acute enough)
-EMERGENCY_FWD_CM    = 30        # emergency max-swerve when centre sectors this close (was 25 — triggered too late)
-TANK_TURN_DIST      = 20        # cm (200mm) — full tank turn (spin in place) at this distance or less
+HARD_SWERVE_DIST    = 30       # force min swerve when forward obstacle nearer (was 80 — start forced swerve much earlier)
+MIN_FORCED_SWERVE   = 60       # minimum swerve degrees when forced (was 60 — sharper forced swerve)
+EMERGENCY_FWD_CM    = 25        # emergency max-swerve when centre sectors this close (was 35 — react sooner)
+TANK_TURN_DIST      = 15        # cm — tank turn only as absolute last resort (was 20 — swerve should prevent reaching this)
 TANK_TURN_SPEED     = 55        # PWM % for each side during tank turn (was 45 — not enough torque to rotate)
 SIDE_CLEAR_MIN_CM   = 50        # side must have at least this to be considered clear
 CRITICAL_TANK_DURATION = 0.8    # seconds — minimum tank turn duration before re-scanning (was 0.6 — too short)
-CRITICAL_STUCK_LIMIT   = 5      # consecutive CRITICAL cycles without escape → boxed-in recovery
-CIRCLE_HEADING_LIMIT = 90       # degrees — trigger boxed-in if car rotates this much (was 120 — caught too late)
+CRITICAL_STUCK_LIMIT   = 8      # consecutive CRITICAL cycles without escape → boxed-in recovery (was 5 — give swerve more time)
+CIRCLE_HEADING_LIMIT = 120      # degrees — trigger boxed-in if car rotates this much (raised from 90 — allow sharper swerves)
 # Stuck detection — car not turning despite close obstacles
 STUCK_HEADING_THRESH = 5.0      # degrees — max heading change to count as "not turning"
-STUCK_CYCLE_LIMIT    = 50       # cycles (~1.0s) — trigger recovery after this many stuck cycles (raised from 35; corrected servo should prevent most stuck)
-STUCK_MIN_FWD_CM     = 50       # cm — only count as stuck when forward obstacle is this close (was 35 — missed stuck at 42cm)
+STUCK_CYCLE_LIMIT    = 60       # cycles (~1.2s) — trigger recovery (raised from 50 — swerve should resolve before this)
+STUCK_MIN_FWD_CM     = 60       # cm — only count as stuck when forward obstacle is this close (was 50 — detect stuck earlier at new swerve distances)
 
 # Swerve geometry
 SWERVE_MAX_ANGLE    = 85        # max differential angle (degrees)  (was 70 — not acute enough, car still hit obstacles)
-SWERVE_MIN_DYNAMIC  = 30        # minimum dynamic swerve angle (at APPROACH_DIST) — gentle start
-SWERVE_CAUTION_MAX  = 75        # max swerve at CAUTION-DANGER boundary — aggressive before DANGER
+SWERVE_MIN_DYNAMIC  = 35        # minimum dynamic swerve angle (at APPROACH_DIST) — starts firmer (was 30)
+SWERVE_CAUTION_MAX  = 80        # max swerve at CAUTION-DANGER boundary — aggressive before DANGER (was 75)
 IR_SWERVE_BOOST     = 65        # added degrees when IR fires  (was 55 — increased for harder swerve)
 IR_CLOSE_MAX_SWERVE_CM = 25     # cm — full differential (100,0 / 0,100) below this distance
 IR_STUCK_REVERSE_DUR   = 0.7    # seconds to reverse when single IR fires (was 0.5 — not enough clearance)
@@ -86,9 +86,9 @@ SWERVE_SMOOTH_ALPHA = 0.75      # EMA smoothing factor — raised from 0.60 for 
 DANGER_OUTER_FLOOR  = 0.80      # outer wheel never below 75% in DANGER — maintain turn torque
 
 # Heading-rate damping — prevents persistent one-direction swerve (circling)
-HEADING_DAMP_START  = 30        # degrees — start damping after this much heading change
-HEADING_DAMP_FULL   = 120       # degrees — full damping at this heading change
-HEADING_DAMP_MAX    = 0.45      # max swerve reduction factor (0–1) — reduced from 0.70 to allow stronger swerves
+HEADING_DAMP_START  = 50        # degrees — start damping after this much heading change (was 30 — too early)
+HEADING_DAMP_FULL   = 150       # degrees — full damping at this heading change (was 120 — allow sharper turns)
+HEADING_DAMP_MAX    = 0.35      # max swerve reduction factor (0–1) — reduced from 0.45 to allow even stronger swerves
 
 # PID heading correction (gyro-Z)
 GYRO_KP             = 1.5
@@ -105,35 +105,37 @@ MOVING_THRESHOLD_G  = 0.3       # detect if wheels spin but car is stuck
 CRASH_COOLDOWN      = 1.5       # seconds between consecutive crash events
 
 # Navigation — proactive "navigate toward open space" approach
-NAVIGATE_DIST       = 100        # cm – start looking for best direction when fwd closer
+NAVIGATE_DIST       = 140        # cm – start looking for best direction when fwd closer (was 100 — match new APPROACH_DIST)
 BEST_DIR_ADVANTAGE  = 30        # cm – best direction must have this much more room than fwd
 TARGET_HEADING_TOL  = 12        # degrees – turn considered complete within this tolerance
 TURN_OUTER_SPEED    = 60        # PWM % for outer wheels during active heading turns (was 50)
 TURN_INNER_SPEED    = 10        # PWM % for inner wheels (was 15 — not enough differential to avoid obstacles)
 MIN_STEER_ANGLE     = 20        # degrees – below this, motors can't actually turn; drive straight
-CRUISE_CLEAR_DIST   = 120       # cm – when forward is this clear, just cruise straight
+CRUISE_CLEAR_DIST   = 160       # cm – when forward is this clear, just cruise straight (match new APPROACH_DIST)
 NAV_SMOOTH_ALPHA    = 0.3       # EMA smoothing for target heading updates (prevents oscillation)
 
 # Proximity-proportional dodge — direct wheel speed mapping
-# Tesla-style: gentle curve at far distances, hard swerve only very close.
-# Uses QUADRATIC aggression so the car drives mostly forward at moderate
-# distances, curving gently, and only does extreme swerve close to obstacles.
-# Heading-based attenuation prevents circling: after turning enough degrees,
-# the dodge eases off so the car straightens out and resumes forward motion.
-DODGE_START_CM      = 100       # cm — begin dodging (matches APPROACH_DIST)
-DODGE_HARD_CM       = 30        # cm — full hard turn (was 40 — too early for max aggression)
+# Dynamic swerve: SQUARE-ROOT aggression ramp means the car swerves
+# strongly from medium distances. At 100cm the car is already curving
+# noticeably; by 60cm it's in a hard turn well before reaching the
+# obstacle.  Stop/reverse should be extremely rare — only when truly
+# boxed in.
+# Heading-based attenuation prevents circling: after turning enough
+# degrees, the dodge eases off so the car straightens out.
+DODGE_START_CM      = 160       # cm — begin dodging very early (was 120 — too late)
+DODGE_HARD_CM       = 45        # cm — full hard turn at 45cm, well before tank-turn (was 25)
 DODGE_OUTER_MAX     = MAX_PWM_DUTY   # 70 — outer wheel at max aggression
-DODGE_OUTER_MIN     = 48        # outer wheel at minimum aggression (gentle curve)
-DODGE_INNER_GENTLE  = 35        # inner wheel at gentle dodge (was 15 — car needs forward thrust!)
-DODGE_INNER_HARD    = 5         # inner wheel at max aggression (was 0 — never full tank turn in dodge)
-DODGE_CLEAR_DELAY_S = 0.5       # seconds of CLEAR before resetting dodge direction (was 1.0)
+DODGE_OUTER_MIN     = 55        # outer wheel at minimum aggression (was 50 — more differential)
+DODGE_INNER_GENTLE  = 20        # inner wheel at gentle dodge (was 28 — sharper curves from the start)
+DODGE_INNER_HARD    = 3         # inner wheel at max aggression (was 5 — more differential for hard swerve)
+DODGE_CLEAR_DELAY_S = 0.3       # seconds of CLEAR before resetting dodge direction (was 0.5 — quicker reset)
 
 # Heading-based dodge attenuation — prevents circling
 # After turning DODGE_HEADING_EASE degrees, dodge starts reducing.
 # After DODGE_HEADING_MAX degrees, dodge is fully attenuated (car goes straight).
-DODGE_HEADING_EASE  = 35        # degrees — start easing off dodge
-DODGE_HEADING_MAX   = 70        # degrees — force straighten, dodge has gone too far
-DODGE_STRAIGHT_CYCLES = 25      # ~0.5s of straight driving after heading-based attenuation
+DODGE_HEADING_EASE  = 55        # degrees — start easing off dodge (was 35 — too early, prevented evasion)
+DODGE_HEADING_MAX   = 110       # degrees — force straighten (was 70 — too restrictive for dynamic swerve)
+DODGE_STRAIGHT_CYCLES = 8       # ~0.16s of straight driving after heading-based attenuation (was 25 — too long)
 
 # LM393 wheel encoder (rear-right wheel)
 ENCODER_PIN         = 26        # BCM GPIO 26 (physical pin 37)
@@ -148,6 +150,23 @@ BLINDSPOT_SONAR_DELTA   = 5.0   # cm — sonar change must exceed this to count 
 BLINDSPOT_HEADING_DELTA = 3.0   # degrees — heading change must exceed this
 BLINDSPOT_WINDOW_S      = 1.5   # seconds — observation window
 BLINDSPOT_TRIGGER_S     = 1.0   # seconds of continuous stuck before triggering recovery
+
+# ── Stall detection & throttle ramp (carpet / low battery) ───────────
+# Detects when motors are commanded but the car isn't physically moving,
+# then gradually increases PWM like pressing a gas pedal harder until
+# the car overcomes surface friction or low voltage.
+# Uses gyro-Z rate, heading change, sonar delta, and lateral-g as
+# indicators of actual physical movement.
+STALL_GZ_THRESH         = 3.0   # deg/s — gyro-Z below this = not rotating
+STALL_LAT_G_THRESH      = 0.10  # g — lateral accel below this = not accelerating
+STALL_HDG_DELTA_THRESH  = 1.5   # degrees — heading change below this over window = stuck
+STALL_SONAR_DELTA_THRESH = 3.0  # cm — sonar change below this over window = stuck
+STALL_MIN_CMD_PWM       = 15    # only detect stall when commanding at least this PWM
+STALL_DETECT_CYCLES     = 15    # cycles (~0.3s) — confirm stall before ramping
+STALL_RAMP_STEP         = 2.0   # PWM % added per cycle once stall is confirmed
+STALL_RAMP_MAX          = 25.0  # max total PWM boost (prevents runaway)
+STALL_RAMP_DECAY        = 0.5   # PWM % removed per cycle when car IS moving (gentle ease-off)
+STALL_LOG_INTERVAL      = 25    # log stall ramp status every N cycles
 
 # MPU resilience
 MPU_MAX_CONSEC_ERRORS = 10      # consecutive MPU read failures → switch to fallback mode
@@ -170,7 +189,7 @@ GRACE_SWEEPS        = 0         # was 2 — blinded car for ~1.5 s, causing coll
 # Front sonar (HC-SR04 — primary obstacle detector, static mount)
 FRONT_SONAR_HZ      = 10        # polling rate (higher than old rear sonar)
 FRONT_MIN_VALID_CM  = 3.0       # reject readings shorter than this (sensor noise)
-LASER_TRIGGER_DIST  = 100       # cm — sonar distance that activates laser scan (matches APPROACH_DIST)
+LASER_TRIGGER_DIST  = 120       # cm — sonar distance that activates laser scan (matches APPROACH_DIST)
 SCAN_COOLDOWN_S     = 1.5       # minimum seconds between laser scans
 
 # Laser on-demand scan (two-phase)
@@ -182,7 +201,7 @@ BLIND_REVERSE_SPEED    = 50     # PWM % — raised from 30, car barely moved at 
 BLIND_REVERSE_DURATION = 0.7    # seconds — raised from 0.5, needs longer burst to gain clearance
 
 # Reverse-before-turn thresholds (boxed-in recovery)
-REVERSE_BEFORE_TURN_DIST  = 45  # cm — reverse first if front is closer than this during recovery
+REVERSE_BEFORE_TURN_DIST  = 35  # cm — reverse first if front is closer than this during recovery (was 45 — should rarely reach here now)
 REPEATED_STUCK_REVERSE    = True  # always reverse on 2nd+ consecutive boxed-in
 REVERSE_ESCALATE_STEP     = 0.5 # extra seconds of reverse per consecutive boxed-in event (was 0.3 — too conservative)
 REVERSE_MAX_DURATION      = 2.5 # cap total reverse duration (was 2.0)
@@ -208,14 +227,14 @@ FL_IN1 = 17;  FL_IN2 = 27;  FL_ENA = 12
 # Front-right motor
 FR_IN3 = 23;  FR_IN4 = 22;  FR_ENB = 13
 # Rear-left motor
-RL_IN1 = 10;  RL_IN2 = 7;   RL_ENA = 19
+RL_IN1 = 10;  RL_IN2 = 7;   RL_ENA = 5
 # Rear-right motor
-RR_IN3 = 9;   RR_IN4 = 11;  RR_ENB = 18
+RR_IN3 = 9;   RR_IN4 = 11;  RR_ENB = 6
 
 # Sensors
 IR_LEFT_PIN    = 5
 IR_RIGHT_PIN   = 6
-SERVO_PIN      = 21
+SERVO_PIN      = 20
 FRONT_TRIG_PIN = 25
 FRONT_ECHO_PIN = 24
 # ENCODER_PIN  = 26  (defined in constants section above)
@@ -235,11 +254,11 @@ class State(Enum):
 
 class AvoidanceZone(Enum):
     """FSM obstacle avoidance zones — steering aggression scales with proximity."""
-    CLEAR    = auto()   # > APPROACH_DIST (100cm): cruise normally
-    APPROACH = auto()   # WARN_DIST .. APPROACH_DIST (80-100cm): pre-scan, gentle swerve
-    CAUTION  = auto()   # CRITICAL_DIST .. WARN_DIST (40-80cm): moderate->hard swerve
-    DANGER   = auto()   # TANK_TURN_DIST .. CRITICAL_DIST (20-40cm): hard swerve, minimal forward
-    CRITICAL = auto()   # ≤ TANK_TURN_DIST (20cm / 200mm): tank turn — spin in place
+    CLEAR    = auto()   # > APPROACH_DIST (160cm): cruise normally
+    APPROACH = auto()   # WARN_DIST .. APPROACH_DIST (110-160cm): pre-scan, gentle swerve
+    CAUTION  = auto()   # CRITICAL_DIST .. WARN_DIST (55-110cm): moderate->hard swerve
+    DANGER   = auto()   # TANK_TURN_DIST .. CRITICAL_DIST (15-55cm): hard swerve, minimal forward
+    CRITICAL = auto()   # ≤ TANK_TURN_DIST (15cm): tank turn — absolute last resort
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  LOGGING SETUP  →  slalom.logs
@@ -1485,6 +1504,13 @@ class AutonomousController:
         self._blindspot_ref_heading = 0.0 # heading when window started
         self._blindspot_active = False    # True while blindspot condition holds
 
+        # Stall detection & throttle ramp (carpet / low battery)
+        self._stall_cycles = 0            # consecutive cycles car appears stalled
+        self._stall_boost = 0.0           # current PWM boost being applied
+        self._stall_ref_heading = 0.0     # heading when stall window started
+        self._stall_ref_dist = 0.0        # sonar dist when stall window started
+        self._stall_log_counter = 0       # throttle logging frequency
+
         # Drive thread
         self._drive_thread = None
 
@@ -1544,6 +1570,11 @@ class AutonomousController:
         self._blindspot_ref_dist = 0.0
         self._blindspot_ref_heading = 0.0
         self._blindspot_start_time = 0.0
+        self._stall_cycles = 0
+        self._stall_boost = 0.0
+        self._stall_ref_heading = 0.0
+        self._stall_ref_dist = 0.0
+        self._stall_log_counter = 0
 
         self._set_state(State.DRIVING)
         _log.info("DRIVING_START base_speed=%d", BASE_SPEED)
@@ -1579,6 +1610,11 @@ class AutonomousController:
             self._blindspot_ref_dist = 0.0
             self._blindspot_ref_heading = 0.0
             self._blindspot_start_time = 0.0
+            self._stall_cycles = 0
+            self._stall_boost = 0.0
+            self._stall_ref_heading = 0.0
+            self._stall_ref_dist = 0.0
+            self._stall_log_counter = 0
             self._set_state(State.DRIVING)
             self._drive_thread = threading.Thread(target=self._drive_loop,
                                                    daemon=True)
@@ -1609,6 +1645,9 @@ class AutonomousController:
         prev_ir_r = False
         prev_swerve = 0.0          # for swerve smoothing (EMA)
         cycle = 0
+        left_spd = BASE_SPEED      # initialise so crash-threshold calc never sees unbound
+        right_spd = BASE_SPEED
+        IR_GRACE_CYCLES = 10       # ignore IR for first ~0.2 s (hand on car, sensor bounce)
 
         while self._running and self.state in (State.DRIVING,
                                                  State.BOXED_IN,
@@ -1686,7 +1725,11 @@ class AutonomousController:
                     _log.info("MPU_FALLBACK_DISABLED – MPU signal restored")
 
                 # ── Branch 1: IR emergency — reverse, scan, swerve ───
-                if ir_l and ir_r:
+                # Skip IR during startup grace period (hand placement,
+                # sensor bounce, etc.)
+                if cycle <= IR_GRACE_CYCLES:
+                    pass   # ignore IR
+                elif ir_l and ir_r:
                     _log.warning("IR_BOTH_BLOCKED ir=[%d,%d] – "
                                  "reversing + pivot", ir_l, ir_r)
                     self._do_ir_both_blocked_recovery()
@@ -1796,10 +1839,12 @@ class AutonomousController:
 
                 # ─────────────────────────────────────────────────────────────
                 # PROXIMITY-PROPORTIONAL DODGE (DANGER / CAUTION / APPROACH)
-                # Direct distance→wheel-speed mapping.  No PID heading loop.
-                # At 100 cm: gentle dodge (outer 50, inner 38)
-                # At  30 cm: FULL hard turn (outer MAX, inner 0)
-                # Below 30 cm: hold full hard turn until sonar clears.
+                # Direct distance→wheel-speed mapping using SQRT aggression.
+                # Swerve is strong from medium distances to avoid obstacles
+                # dynamically without stopping/reversing.
+                # At 120 cm: firm dodge (outer 63, inner 9)
+                # At  80 cm: hard swerve (outer 67, inner 5)
+                # At  45 cm: FULL hard turn (outer MAX, inner 3)
                 # ─────────────────────────────────────────────────────────────
                 elif zone in (AvoidanceZone.DANGER,
                               AvoidanceZone.CAUTION,
@@ -1880,14 +1925,19 @@ class AutonomousController:
                             imu_heading)
 
                     # ── 3. Proximity-proportional aggression ──────────
-                    # QUADRATIC ramp: gentle at far distances, steep near
-                    # obstacles.  At 70cm: linear=0.43, quadratic=0.18.
-                    # This keeps the car driving mostly forward at medium
-                    # range instead of doing near-tank-turns.
+                    # SQUARE-ROOT ramp: swerve is STRONG at medium
+                    # distances so the car dynamically curves away well
+                    # before reaching the obstacle.  At 100cm the car is
+                    # already turning noticeably; by 60cm it's in a hard
+                    # swerve.  This all-but-eliminates stop-and-reverse.
+                    #   100cm: linear=0.52, sqrt=0.72 → strong curve
+                    #    80cm: linear=0.70, sqrt=0.83 → hard swerve
+                    #    60cm: linear=0.87, sqrt=0.93 → near-max swerve
+                    #    45cm: linear=1.00, sqrt=1.00 → max hard turn
                     linear_aggr = ((DODGE_START_CM - front_dist) /
                                    max(1, DODGE_START_CM - DODGE_HARD_CM))
                     linear_aggr = max(0.0, min(1.0, linear_aggr))
-                    aggression = linear_aggr * linear_aggr  # quadratic
+                    aggression = math.sqrt(linear_aggr)  # sqrt — much stronger at medium range
 
                     # ── 3b. Heading-based attenuation ─────────────────
                     # After turning DODGE_HEADING_EASE degrees, start
@@ -2081,9 +2131,59 @@ class AutonomousController:
                     self._do_boxed_in_recovery()
                     continue
 
-                # Drive (skip if tank turn already applied)
+                # ── Stall detection & throttle ramp (carpet / low battery) ─
+                # If motors are commanded but IMU/sonar show no movement,
+                # gradually ramp up PWM like pressing the gas pedal harder.
                 if not use_tank:
-                    self.motor.forward_differential(left_spd, right_spd)
+                    cmd_avg = (left_spd + right_spd) / 2.0
+                    gz_abs = abs(imu_data.get("gyro", {}).get("z", 0))
+                    lat_g_val = imu_data.get("lateral_g", 0)
+                    hdg_delta_stall = abs(imu_heading - self._stall_ref_heading)
+                    dist_delta_stall = abs(front_dist - self._stall_ref_dist)
+
+                    car_is_moving = (
+                        gz_abs > STALL_GZ_THRESH or
+                        lat_g_val > STALL_LAT_G_THRESH or
+                        hdg_delta_stall > STALL_HDG_DELTA_THRESH or
+                        dist_delta_stall > STALL_SONAR_DELTA_THRESH or
+                        (self.encoder.available and self.encoder.is_spinning)
+                    )
+
+                    if cmd_avg >= STALL_MIN_CMD_PWM and not car_is_moving:
+                        self._stall_cycles += 1
+                        if self._stall_cycles >= STALL_DETECT_CYCLES:
+                            # Confirmed stall — ramp up boost
+                            self._stall_boost = min(
+                                self._stall_boost + STALL_RAMP_STEP,
+                                STALL_RAMP_MAX)
+                            self._stall_log_counter += 1
+                            if self._stall_log_counter >= STALL_LOG_INTERVAL:
+                                self._stall_log_counter = 0
+                                _log.info(
+                                    "STALL_RAMP boost=%.1f cycles=%d "
+                                    "gz=%.2f lat_g=%.3f hdg_d=%.1f "
+                                    "dist_d=%.1f cmd=[%.1f,%.1f]",
+                                    self._stall_boost, self._stall_cycles,
+                                    gz_abs, lat_g_val, hdg_delta_stall,
+                                    dist_delta_stall, left_spd, right_spd)
+                    else:
+                        # Car is moving — decay boost gently
+                        if self._stall_boost > 0:
+                            self._stall_boost = max(
+                                0.0,
+                                self._stall_boost - STALL_RAMP_DECAY)
+                            if self._stall_boost == 0.0:
+                                _log.info("STALL_RAMP_CLEARED after movement")
+                        # Reset stall window references
+                        self._stall_cycles = 0
+                        self._stall_ref_heading = imu_heading
+                        self._stall_ref_dist = front_dist
+                        self._stall_log_counter = 0
+
+                    # Apply boost to both wheels (capped by _set_duty at MAX_PWM_DUTY)
+                    boosted_left = left_spd + self._stall_boost
+                    boosted_right = right_spd + self._stall_boost
+                    self.motor.forward_differential(boosted_left, boosted_right)
 
                 # ── Update telemetry ─────────────────────────────────
                 scan_status = ("SCANNING" if self.scanner.is_scanning
@@ -2138,7 +2238,8 @@ class AutonomousController:
                     "sf=%.2f threat=%.2f front=%.1f tank=%s "
                     "ir=[%d,%d] scan=%s "
                     "hdg=%.1f gz=%.2f lat_g=%.3f "
-                    "enc_rpm=%.1f enc_spin=%s blind=%s crash_g=%.2f",
+                    "enc_rpm=%.1f enc_spin=%s blind=%s crash_g=%.2f "
+                    "stall_boost=%.1f",
                     cycle,
                     self.state.name,
                     self._telem.get("avoidance_zone", "?"),
@@ -2158,6 +2259,7 @@ class AutonomousController:
                     self.encoder.is_spinning,
                     self._blindspot_active,
                     self.imu._crash_threshold_ms2 / ACCEL_G,
+                    self._stall_boost,
                 )
 
             # ── 5. pace the loop ─────────────────────────────────────
@@ -2189,6 +2291,11 @@ class AutonomousController:
         self._set_state(State.BOXED_IN)
         self.motor.brake()
         time.sleep(0.2)
+
+        # Reset stall boost — recovery action will reposition the car
+        self._stall_boost = 0.0
+        self._stall_cycles = 0
+        self._stall_log_counter = 0
 
         # Read current front distance
         front_dist = self.sonar.read()
@@ -2322,6 +2429,10 @@ class AutonomousController:
         self.motor.brake()
         time.sleep(0.15)
 
+        # Reset stall boost
+        self._stall_boost = 0.0
+        self._stall_cycles = 0
+
         # Blind reverse briefly to create clearance
         _log.info("IR_STUCK_BLIND_REVERSE side=%s speed=%d dur=%.1fs",
                   stuck_side, BLIND_REVERSE_SPEED, IR_STUCK_REVERSE_DUR)
@@ -2403,6 +2514,11 @@ class AutonomousController:
     def _do_crash_recovery(self):
         """Handle crash event: brake, blind reverse, laser scan, turn."""
         self._set_state(State.CRASH_RECOVERY)
+
+        # Reset stall boost
+        self._stall_boost = 0.0
+        self._stall_cycles = 0
+        self._stall_log_counter = 0
 
         _log.info("CRASH_RECOVERY_START – braking, waiting 1 s")
         self.motor.brake()

@@ -5,7 +5,7 @@ import tty
 import termios
 
 # Setup GPIO
-SERVO_PIN = 21
+SERVO_PIN = 20
 GPIO.setwarnings(False)
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(SERVO_PIN, GPIO.OUT)

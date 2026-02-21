@@ -305,7 +305,7 @@
     </visual>
   </link>
   
-  <!-- Laser Scanner Revolute Joint (yaw ±60°, controlled by servo GPIO 21) -->
+  <!-- Laser Scanner Revolute Joint (yaw ±60°, controlled by servo GPIO 20) -->
   <joint name="laser_scanner_joint" type="revolute">
     <parent link="laser_servo_base"/>
     <child link="laser_scanner"/>
@@ -314,7 +314,7 @@
     <limit lower="-1.047197551" upper="1.047197551" effort="1.0" velocity="5.24"/>
   </joint>
   
-  <!-- Gazebo Ray Sensor Plugin for VL53L0X Laser Scanner (I2C, GPIO21 servo) -->
+  <!-- Gazebo Ray Sensor Plugin for VL53L0X Laser Scanner (I2C, GPIO20 servo) -->
   <gazebo reference="laser_scanner">
     <material>Gazebo/Red</material>
     <sensor name="laser_scanner_sensor" type="ray">

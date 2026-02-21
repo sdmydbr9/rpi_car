@@ -1,22 +1,21 @@
 """
-sensors.py — Laser Scanner (Servo + VL53L0X) + IR Obstacle Sensors
+sensors.py — Laser Scanner (Servo + VL53L0X via Pico) + IR Obstacle Sensors
 
 Hardware
 ────────
-  Servo (SG90)     GPIO 21  — 50 Hz PWM, duty 2–12 for 0–180°
-  VL53L0X          I2C 0x29 — time-of-flight laser, ~30–1200 mm effective
-  IR Left          GPIO 5   — active LOW (0 = obstacle)
-  IR Right         GPIO 6   — active LOW (0 = obstacle)
+  Servo (SG90)     GPIO 20  — 50 Hz PWM, duty 2–12 for 0–180° (stays on Pi)
+  VL53L0X          Pico I2C — time-of-flight laser via UART bridge
+  IR Left/Right    Pico GPIO — via UART bridge
+  Rear HC-SR04     GPIO 25/24 — stays on Pi
 
-The servo is mounted on the front of the rover with the VL53L0X on top.
+The servo is mounted on the front of the rover with the VL53L0X on top
+(VL53L0X is now read through the Pico sensor bridge).
 Together they act as a scanning LIDAR: the servo sweeps -60° to +60° in
 10° steps while the laser samples distance at each angle.
 
 User-space angles:  -60 (left)  …  0 (center)  …  +60 (right)
 Servo-space angles:  30           90              150
 Mapping: servo_angle = 90 + user_angle
-
-Replaces the removed HC-SR04 front & rear sonar modules.
 """
 
 try:
@@ -27,28 +26,30 @@ except (ImportError, RuntimeError):
 
 import time
 
-# ── VL53L0X (I2C laser) ──────────────────────────────
-_tof_available = False
-_tof = None
+# ── Pico sensor bridge (VL53L0X + IR now on Pico) ────────
 try:
-    import board
-    import busio
-    import adafruit_vl53l0x
-    _i2c = busio.I2C(board.SCL, board.SDA)
-    _tof = adafruit_vl53l0x.VL53L0X(_i2c)
-    _tof_available = True
-    print("🔴 VL53L0X: Connected (I2C 0x29)")
-except Exception as e:
-    print(f"⚠️  VL53L0X: Init failed — {e}")
+    from pico_sensor_reader import (
+        get_laser_distance_mm as _pico_laser_mm,
+        get_laser_distance_cm as _pico_laser_cm,
+        get_ir_sensors as _pico_ir,
+    )
+    _pico_available = True
+    print("🔴 VL53L0X + IR: Reading from Pico bridge (UART)")
+except ImportError:
+    _pico_available = False
+    _pico_laser_mm = lambda: -1
+    _pico_laser_cm = lambda: -1
+    _pico_ir = lambda: (False, False)
+    print("⚠️  Pico bridge unavailable — laser/IR will return defaults")
 
 # --- PIN CONFIGURATION ---
-SERVO_PIN = 21   # Servo PWM output
+SERVO_PIN = 20   # Servo PWM output (stays on Pi)
 
-# IR Obstacle Sensors
-IR_LEFT = 5      # Front Left
-IR_RIGHT = 6     # Front Right
+# IR Obstacle Sensors — now on Pico (kept as comments for reference)
+# IR_LEFT = 5     # was GPIO 5 on Pi
+# IR_RIGHT = 6    # was GPIO 6 on Pi
 
-# Rear HC-SR04 Ultrasonic Sonar
+# Rear HC-SR04 Ultrasonic Sonar (stays on Pi)
 REAR_TRIG = 25
 REAR_ECHO = 24
 
@@ -78,13 +79,11 @@ class SensorSystem:
         self._pwm = GPIO.PWM(SERVO_PIN, _SERVO_FREQ)
         self._pwm.start(0)
         self._servo_angle = _SERVO_CENTER  # current servo-space angle
-        self._laser_available = _tof_available
+        self._laser_available = _pico_available
 
-        # 3. IR Sensors
-        GPIO.setup(IR_LEFT, GPIO.IN)
-        GPIO.setup(IR_RIGHT, GPIO.IN)
+        # 3. IR Sensors — now on Pico, no Pi GPIO setup needed
 
-        # 4. Rear HC-SR04 Ultrasonic Sonar
+        # 4. Rear HC-SR04 Ultrasonic Sonar (stays on Pi)
         self._rear_sonar_available = False
         try:
             GPIO.setup(REAR_TRIG, GPIO.OUT)
@@ -131,11 +130,11 @@ class SensorSystem:
     # ──────────────────────────────────────────────────
 
     def read_laser_mm(self):
-        """Return raw VL53L0X reading in millimetres, or -1 on error."""
-        if not self._laser_available or _tof is None:
+        """Return VL53L0X reading in millimetres from Pico bridge, or -1 on error."""
+        if not self._laser_available:
             return -1
         try:
-            mm = _tof.range
+            mm = _pico_laser_mm()
             if mm is None or mm > 2000:   # out-of-range / saturated
                 return -1
             return mm
@@ -143,11 +142,16 @@ class SensorSystem:
             return -1
 
     def read_laser_cm(self):
-        """Return VL53L0X distance in centimetres, or -1 on error."""
-        mm = self.read_laser_mm()
-        if mm < 0:
+        """Return VL53L0X distance in centimetres from Pico bridge, or -1 on error."""
+        if not self._laser_available:
             return -1
-        return round(mm / 10.0, 1)
+        try:
+            cm = _pico_laser_cm()
+            if cm is None or cm < 0:
+                return -1
+            return cm
+        except Exception:
+            return -1
 
     def get_forward_distance(self):
         """Centre the servo and return forward distance in cm.
@@ -240,12 +244,14 @@ class SensorSystem:
     # ──────────────────────────────────────────────────
 
     def get_ir_status(self):
-        """Return (Left_Obstacle, Right_Obstacle) as booleans.
+        """Return (Left_Obstacle, Right_Obstacle) as booleans from Pico bridge.
 
         True = Obstacle Detected, False = Path Clear.
         """
-        left_detect = not GPIO.input(IR_LEFT)
-        right_detect = not GPIO.input(IR_RIGHT)
+        try:
+            left_detect, right_detect = _pico_ir()
+        except Exception:
+            left_detect, right_detect = False, False
         return left_detect, right_detect
 
     # ──────────────────────────────────────────────────

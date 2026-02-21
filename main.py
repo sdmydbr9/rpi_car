@@ -26,6 +26,17 @@ from autopilot_pid import AutoPilot, State
 from vision import VisionSystem
 from narration import NarrationEngine, validate_key as narration_validate_key, list_multimodal_models
 from kokoro_client import get_kokoro_client
+from pico_sensor_reader import (
+    init_pico_reader, get_gyro_z as pico_get_gyro_z,
+    get_accel_xyz as pico_get_accel_xyz,
+    get_laser_distance_cm as pico_get_laser_cm,
+    get_laser_distance_mm as pico_get_laser_mm,
+    get_ir_sensors as pico_get_ir,
+    get_rpm as pico_get_rpm,
+    get_battery_voltage as pico_get_battery_voltage,
+    get_current_sense as pico_get_current_sense,
+    get_sensor_packet as pico_get_sensor_packet,
+)
 
 # ==========================================
 # ⚙️ CONFIGURATION
@@ -38,23 +49,22 @@ DIST_DIR = "dist"
 # --- MOTOR PINS (BCM Numbering) — Dual L298N, 4WD ---
 # Managed by CarSystem in motor.py — listed here for wiring reference only.
 # Driver 1 (Front): FL_IN1=17, FL_IN2=27, FL_ENA=12, FR_IN3=23, FR_IN4=22, FR_ENB=13
-# Driver 2 (Rear):  RL_IN1=10, RL_IN2=7,  RL_ENA=19, RR_IN3=9,  RR_IN4=11, RR_ENB=18
+# Driver 2 (Rear):  RL_IN1=10, RL_IN2=7,  RL_ENA=5,  RR_IN3=9,  RR_IN4=11, RR_ENB=6
 
 # --- SONAR SENSOR PINS (BCM Numbering) ---
 # Front Sonar: TRIG → Pin 22 (GPIO 25), ECHO → Pin 18 (GPIO 24)
 SONAR_TRIG = 25  # GPIO 25 - Sonar Trigger
 SONAR_ECHO = 24  # GPIO 24 - Sonar Echo
 
-# --- IR OBSTACLE SENSORS (BCM Numbering) ---
-# Left Front IR: VCC → Pin 1, GND → Pin 9, OUT → Pin 29 (GPIO 5)
-# Right Front IR: VCC → Pin 17, GND → Pin 25, OUT → Pin 31 (GPIO 6)
-LEFT_IR = 5   # GPIO 5 - Left Front Obstacle Detection
-RIGHT_IR = 6  # GPIO 6 - Right Front Obstacle Detection
+# --- IR OBSTACLE SENSORS ---
+# IR sensors are now read from Pico sensor bridge (via UART)
+# Legacy Pi GPIO pins kept as comments for wiring reference:
+# Left Front IR: was GPIO 5, Right Front IR: was GPIO 6
 AVOID_SWERVE_ANGLE = 85  # Degrees to swerve when obstacle detected (increased for aggressive steering)
 
 # --- SPEED ENCODER (Rear-Right Wheel) ---
-# Optical encoder on rear-right wheel: Signal → Pin 37 (GPIO 26)
-ENCODER_PIN = 26        # BCM GPIO 26 (Physical Pin 37)
+# Encoder now read from Pico sensor bridge (via UART)
+# Legacy: was GPIO 26 on Pi, now on Pico GPIO 10
 ENCODER_HOLES = 20      # Holes per revolution on encoder disc
 WHEEL_DIAMETER_M = 0.065  # Wheel diameter in meters (65mm)
 import math
@@ -581,18 +591,20 @@ car_system = CarSystem()
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
 
-# Setup IR Sensor Pins (Input) — also done by CarSystem, but kept
-# here so the physics_loop's direct GPIO.input() reads work even
-# if CarSystem's definition ever changes.
-try:
-    GPIO.setup([LEFT_IR, RIGHT_IR], GPIO.IN)
-except Exception as e:
-    print(f"⚠️  IR sensor setup error: {e}")
+# IR sensors are now on the Pico — no GPIO.setup needed on the Pi.
 
-# Initialize Sensor System
+# Initialize Pico Sensor Bridge (UART)
+try:
+    pico_reader = init_pico_reader('/dev/ttyS0')
+    print("✅ Pico sensor bridge initialized (UART)")
+except Exception as e:
+    pico_reader = None
+    print(f"⚠️  Pico sensor bridge initialization error: {e}")
+
+# Initialize Sensor System (servo + rear sonar stay on Pi)
 try:
     sensor_system = SensorSystem()
-    print("✅ Sensor system initialized (Sonar + IR)")
+    print("✅ Sensor system initialized (Servo + Rear Sonar)")
 except Exception as e:
     print(f"⚠️  Sensor system initialization error: {e}")
     # Create dummy sensor system for testing
@@ -600,6 +612,10 @@ except Exception as e:
         def get_sonar_distance(self): return 100
         def get_rear_sonar_distance(self): return 100
         def get_ir_status(self): return False, False
+        def set_servo_angle(self, a): pass
+        def center_servo(self): pass
+        def scan_sweep(self, **kw): return []
+        def cleanup(self): pass
     sensor_system = DummySensorSystem()
 
 # ==========================================
@@ -617,10 +633,9 @@ def _get_rear_for_autopilot():
     return sensor_system.get_rear_sonar_distance()
 
 def _get_ir_for_autopilot():
-    """Read IR sensors: True = obstacle detected (active LOW, inverted)."""
+    """Read IR sensors from Pico bridge: True = obstacle detected."""
     try:
-        left  = not GPIO.input(LEFT_IR)
-        right = not GPIO.input(RIGHT_IR)
+        left, right = pico_get_ir()
     except Exception:
         left = False
         right = False
@@ -708,8 +723,10 @@ car_state = {
     # 🔄 Speed Encoder (Rear-Right Wheel)
     "encoder_rpm": 0.0,                  # Real RPM from encoder
     "encoder_speed_mpm": 0.0,            # Speed in meters per minute
-    "encoder_pulse_count": 0,            # Running pulse count (reset each calc)
     "encoder_available": False,          # True if encoder GPIO setup succeeded
+    # 🔋 Battery / Current (from Pico ADC)
+    "battery_voltage": -1,                   # Battery voltage in V (from ADS1115 A0)
+    "current_amps": -1,                      # Current draw in A (from ADS1115 A1)
     # Camera configuration settings
     "camera_resolution": CAMERA_DEFAULT_RESOLUTION,  # Current resolution setting (WxH format, e.g. '640x480')
     "camera_jpeg_quality": CAMERA_JPEG_QUALITY,      # JPEG quality (1-100)
@@ -742,9 +759,9 @@ HEARTBEAT_TIMEOUT = 5.0   # Declare client dead if no pong for 5 seconds
 laser_buffer = deque(maxlen=5)
 
 def get_smoothed_laser():
-    """Read forward laser and return a moving-average smoothed distance."""
+    """Read forward laser from Pico bridge and return a moving-average smoothed distance."""
     try:
-        raw = sensor_system.read_laser_cm()
+        raw = pico_get_laser_cm()
     except:
         raw = -1
     if raw > 0:
@@ -807,9 +824,8 @@ def check_sensor_health():
         has_error = True
     
     try:
-        # Check MPU6050 Gyroscope
+        # Check MPU6050 Gyroscope (via Pico bridge)
         if autopilot._gyro.available:
-            # Try a quick read to verify it's still responsive
             try:
                 autopilot._gyro.read_gyro_z()
                 sensor_status["mpu6050"] = "OK"
@@ -821,6 +837,17 @@ def check_sensor_health():
             has_error = True
     except Exception as e:
         sensor_status["mpu6050"] = "FAILED"
+        has_error = True
+
+    # Check Pico Bridge connection
+    try:
+        if pico_reader is not None and pico_reader.is_connected():
+            sensor_status["pico_bridge"] = "OK"
+        else:
+            sensor_status["pico_bridge"] = "FAILED"
+            has_error = True
+    except Exception:
+        sensor_status["pico_bridge"] = "FAILED"
         has_error = True
 
     try:
@@ -883,11 +910,9 @@ def physics_loop():
     smoothed_steer = 0.0     # Rate-limited steering angle (motor protection)
     
     while True:
-        # --- CHECK IR SENSORS ---
-        # IR sensors are active LOW: 0 = obstacle detected, 1 = no obstacle
+        # --- CHECK IR SENSORS (from Pico bridge) ---
         try:
-            left_obstacle = not GPIO.input(LEFT_IR)   # Invert so True = obstacle
-            right_obstacle = not GPIO.input(RIGHT_IR) # Invert so True = obstacle
+            left_obstacle, right_obstacle = pico_get_ir()
         except:
             left_obstacle = False
             right_obstacle = False
@@ -2523,57 +2548,48 @@ heartbeat_thread.start()
 print("💗 [Heartbeat] ✅ Heartbeat monitor started (interval: {:.1f}s, timeout: {:.1f}s)".format(HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT))
 
 # ==========================================
-# 🔄 SPEED ENCODER (Rear-Right Wheel)
+# 🔄 SPEED ENCODER + POWER TELEMETRY (from Pico bridge)
 # ==========================================
-_encoder_pulse_count = 0
-_encoder_lock = threading.Lock()
+# Encoder and ADC are now on the Pico — read via UART bridge.
+car_state["encoder_available"] = True  # Pico always provides RPM
+print("🔄 [Encoder] ✅ Speed encoder reading from Pico bridge")
 
-def _encoder_isr(channel):
-    """Interrupt Service Routine — called on each rising edge from encoder."""
-    global _encoder_pulse_count
-    _encoder_pulse_count += 1
-
-# Set up encoder GPIO
-try:
-    GPIO.setup(ENCODER_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    GPIO.add_event_detect(ENCODER_PIN, GPIO.RISING, callback=_encoder_isr, bouncetime=1)
-    car_state["encoder_available"] = True
-    print(f"🔄 [Encoder] ✅ Speed encoder initialized on GPIO {ENCODER_PIN} ({ENCODER_HOLES} holes/rev, {WHEEL_DIAMETER_M*1000:.0f}mm wheel)")
-except Exception as e:
-    car_state["encoder_available"] = False
-    print(f"⚠️  [Encoder] Failed to initialize speed encoder on GPIO {ENCODER_PIN}: {e}")
-    print("⚠️  [Encoder] Falling back to PWM-estimated speed values")
-
-def encoder_calculation_thread():
-    """Compute RPM and speed from encoder pulses every 200ms."""
-    global _encoder_pulse_count
-    interval = 0.2  # 200ms calculation interval
+def encoder_and_power_thread():
+    """Read RPM from Pico bridge every 200ms, battery/current every 1s."""
+    interval = 0.2  # 200ms for RPM
+    power_counter = 0  # count intervals; read power every 5th (= 1s)
     while True:
         try:
             time.sleep(interval)
-            # Atomically grab and reset pulse count
-            with _encoder_lock:
-                pulses = _encoder_pulse_count
-                _encoder_pulse_count = 0
-            
-            # Calculate RPM: (pulses / holes_per_rev) * (60 / interval)
-            revolutions = pulses / ENCODER_HOLES
-            rpm = revolutions * (60.0 / interval)
-            
-            # Calculate speed in meters per minute: RPM × circumference
+
+            # --- RPM from Pico ---
+            rpm = pico_get_rpm()
             speed_mpm = rpm * WHEEL_CIRCUMFERENCE_M
-            
             car_state["encoder_rpm"] = round(rpm, 1)
             car_state["encoder_speed_mpm"] = round(speed_mpm, 2)
-            car_state["encoder_pulse_count"] = pulses  # For debugging
+
+            # --- Battery / Current from Pico ADC (every ~1s) ---
+            power_counter += 1
+            if power_counter >= 5:
+                power_counter = 0
+                try:
+                    batt_v = pico_get_battery_voltage()
+                    car_state["battery_voltage"] = round(batt_v, 2) if batt_v >= 0 else -1
+                except Exception:
+                    car_state["battery_voltage"] = -1
+                try:
+                    curr_a = pico_get_current_sense()
+                    car_state["current_amps"] = round(curr_a, 2) if curr_a >= 0 else -1
+                except Exception:
+                    car_state["current_amps"] = -1
         except Exception as e:
-            print(f"❌ [Encoder] Calculation error: {e}")
+            print(f"❌ [Encoder/Power] Read error: {e}")
             time.sleep(interval)
 
-# Start encoder calculation thread
-encoder_thread = threading.Thread(target=encoder_calculation_thread, daemon=True)
+# Start encoder + power thread
+encoder_thread = threading.Thread(target=encoder_and_power_thread, daemon=True)
 encoder_thread.start()
-print("🔄 [Encoder] ✅ Encoder calculation thread started (200ms interval)")
+print("🔄 [Encoder] ✅ Encoder + power telemetry thread started (200ms interval)")
 
 # Start camera frame broadcaster (single producer, multi-consumer)
 if CAMERA_AVAILABLE:
@@ -2631,7 +2647,10 @@ def telemetry_broadcast():
                 "target_yaw": car_state.get("target_yaw", 0.0),
                 "current_heading": car_state.get("current_heading", 0.0),
                 "slalom_sign": car_state.get("slalom_sign", 0),
-                # 🚨 Sensor health status
+                # � Battery / power telemetry
+                "battery_voltage": car_state.get("battery_voltage", -1),
+                "current_amps": car_state.get("current_amps", -1),
+                # �🚨 Sensor health status
                 "sensor_status": car_state["sensor_status"],
                 "service_light_active": car_state["service_light_active"],
                 # 📷 Camera status
@@ -2700,7 +2719,10 @@ def telemetry():
         "autonomous_state": car_state["autonomous_state"],
         "autonomous_target_speed": car_state["autonomous_target_speed"],
         "sonar_distance": car_state["sonar_distance"],
-        "sonar_enabled": car_state["sonar_enabled"]
+        "sonar_enabled": car_state["sonar_enabled"],
+        # 🔋 Battery / power telemetry
+        "battery_voltage": car_state.get("battery_voltage", -1),
+        "current_amps": car_state.get("current_amps", -1),
     })
 
 @app.route("/system/status")

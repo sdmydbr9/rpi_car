@@ -202,8 +202,8 @@ class CarSystem:
     FR_IN3 = 23;  FR_IN4 = 22;  FR_ENB = 13   # Front-Right (direction pins swapped)
 
     # ── Pin assignments (BCM) ─── Driver 2: REAR ────
-    RL_IN1 = 10;  RL_IN2 = 7;   RL_ENA = 19   # Rear-Left
-    RR_IN3 = 9;   RR_IN4 = 11;  RR_ENB = 18   # Rear-Right  (direction pins swapped)
+    RL_IN1 = 10;  RL_IN2 = 7;   RL_ENA = 5    # Rear-Left
+    RR_IN3 = 9;   RR_IN4 = 11;  RR_ENB = 6    # Rear-Right  (direction pins swapped)
 
     LEFT_IR = 5;  RIGHT_IR = 6  # IR obstacle sensors
     PWM_FREQ = 1000        # Hz

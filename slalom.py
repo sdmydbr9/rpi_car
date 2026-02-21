@@ -17,8 +17,8 @@ except:
 # Motor Pins
 FL_IN1 = 17; FL_IN2 = 27; FL_ENA = 12
 FR_IN3 = 23; FR_IN4 = 22; FR_ENB = 13
-RL_IN1 = 10; RL_IN2 = 7;  RL_ENA = 19
-RR_IN3 = 9;  RR_IN4 = 11; RR_ENB = 18
+RL_IN1 = 10; RL_IN2 = 7;  RL_ENA = 5
+RR_IN3 = 9;  RR_IN4 = 11; RR_ENB = 6
 
 # Sensors
 TRIG_F = 25; ECHO_F = 24

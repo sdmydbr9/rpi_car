@@ -8,11 +8,13 @@ autopilot_pid.py — Laser-Scanner Autonomous Rover
   TURNING          Analyse sweep → pivot toward clearest direction.
   EMERGENCY_STOP   IR safety trigger or manual kill — all motors locked.
 
-Sensor Stack
+Sensor Stack (via Pico UART Bridge)
 ────────────
-  VL53L0X + Servo  GPIO 21, I2C 0x29 — scanning LIDAR (±60°, 10° steps)
-  MPU6050          I2C 0x68 — gyro Z-axis yaw rate for PID heading
-  IR Left/Right    GPIO 5/6 — close-range safety net
+  VL53L0X + Servo  Servo on Pi GPIO 20, VL53L0X on Pico I2C → UART bridge
+  MPU6050          Pico I2C 0x68 → UART bridge — gyro Z-axis yaw rate for PID
+  IR Left/Right    Pico GPIO — close-range safety net
+  LM393 Encoder    Pico GPIO — wheel RPM
+  ADS1115 ADC      Pico I2C 0x48 — battery voltage & current sensing
 
 Scan-then-Drive Logic
 ─────────────────────
@@ -85,78 +87,42 @@ class PIDController:
 
 class MPU6050Sensor:
     """
-    Reads Gyro Z-axis yaw rate from the MPU6050 over I2C.
+    Reads Gyro Z-axis yaw rate from the Pico sensor bridge (UART).
 
-    Tries the high-level `mpu6050` pip library first; falls back to raw
-    smbus register reads if the library is unavailable.
-
-    I2C Address: 0x68 (default)
-    Register Map:
-        0x6B  PWR_MGMT_1  — write 0x00 to wake from sleep
-        0x47  GYRO_ZOUT_H — high byte of Z-axis gyro
-        0x48  GYRO_ZOUT_L — low byte of Z-axis gyro
-        0x75  WHO_AM_I    — should read 0x68
+    The MPU6050 is now physically connected to the Pico which streams
+    data at 50 Hz over UART. This wrapper reads from pico_sensor_reader
+    and provides the same API as the original I2C-direct implementation.
     """
 
-    # Sensitivity for ±250 °/s range (default after reset)
-    _GYRO_SCALE = 131.0  # LSB per °/s
-
     def __init__(self, address=0x68, bus_number=1):
-        self._address = address
-        self._bus_number = bus_number
         self._offset_z = 0.0
         self._available = False
-        self._use_lib = False
-        self._sensor = None
-        self._bus = None
 
-        # ── Try high-level library first ──
+        # Try to connect via Pico sensor bridge
         try:
-            from mpu6050 import mpu6050 as MPU6050Lib
-            self._sensor = MPU6050Lib(self._address)
-            # Quick read to verify hardware is present
-            self._sensor.get_gyro_data()
-            self._use_lib = True
-            self._available = True
-            print("🧭 MPU6050: Connected (mpu6050 library)")
-            return
-        except Exception:
-            pass
+            from pico_sensor_reader import get_gyro_z, get_sensor_packet, _global_reader
+            self._pico_get_gyro_z = get_gyro_z
+            self._pico_get_packet = get_sensor_packet
 
-        # ── Fallback: raw smbus ──
-        try:
-            import smbus2 as smbus_mod
+            # Check if Pico reader is initialized and has data
+            if _global_reader is not None and _global_reader.is_connected():
+                self._available = True
+                print("🧭 MPU6050: Connected (via Pico bridge)")
+            else:
+                # Reader exists but no data yet — wait briefly
+                import time
+                time.sleep(0.5)
+                if _global_reader is not None and _global_reader.is_connected():
+                    self._available = True
+                    print("🧭 MPU6050: Connected (via Pico bridge)")
+                else:
+                    # Mark available anyway — data may arrive later
+                    self._available = True
+                    print("🧭 MPU6050: Pico bridge initialized (awaiting first packet)")
         except ImportError:
-            try:
-                import smbus as smbus_mod
-            except ImportError:
-                print("⚠️  MPU6050: No I2C library (install smbus2 or mpu6050)")
-                return
-
-        try:
-            self._bus = smbus_mod.SMBus(self._bus_number)
-            # Wake the sensor (clear sleep bit in PWR_MGMT_1)
-            self._bus.write_byte_data(self._address, 0x6B, 0x00)
-            time.sleep(0.05)
-            # Verify identity
-            who = self._bus.read_byte_data(self._address, 0x75)
-            if who not in (0x68, 0x72):  # MPU6050 or MPU6052
-                print(f"⚠️  MPU6050: Unexpected WHO_AM_I=0x{who:02X}")
-            self._available = True
-            print("🧭 MPU6050: Connected (raw smbus)")
+            print("⚠️  MPU6050: pico_sensor_reader not available")
         except Exception as e:
-            print(f"⚠️  MPU6050: I2C init failed — {e}")
-
-    # ── Raw register helpers ───────────────────
-
-    def _read_raw_gyro_z(self):
-        """Read signed 16-bit Gyro-Z from registers 0x47-0x48."""
-        high = self._bus.read_byte_data(self._address, 0x47)
-        low = self._bus.read_byte_data(self._address, 0x48)
-        value = (high << 8) | low
-        if value >= 0x8000:
-            value -= 0x10000
-        return value / self._GYRO_SCALE
+            print(f"⚠️  MPU6050: Pico bridge init failed — {e}")
 
     # ── Public API ─────────────────────────────
 
@@ -166,20 +132,16 @@ class MPU6050Sensor:
 
     def read_gyro_z(self):
         """
-        Return drift-corrected Z-axis yaw rate in °/s.
+        Return drift-corrected Z-axis yaw rate in °/s from Pico bridge.
 
         Positive = rotating clockwise (drifting right).
         Negative = rotating counter-clockwise (drifting left).
-        Returns 0.0 if sensor is unavailable or on I2C error.
+        Returns 0.0 if sensor is unavailable or on error.
         """
         if not self._available:
             return 0.0
         try:
-            if self._use_lib:
-                data = self._sensor.get_gyro_data()
-                raw = data['z']
-            else:
-                raw = self._read_raw_gyro_z()
+            raw = self._pico_get_gyro_z()
             return raw - self._offset_z
         except Exception:
             return 0.0
@@ -188,26 +150,26 @@ class MPU6050Sensor:
         """
         Measure gyro Z drift while the robot is stationary.
 
-        Reads at ~100 Hz for *duration* seconds, computes the mean bias,
-        and stores it as the zero offset.  The robot MUST be still.
+        Reads from Pico bridge at ~50 Hz for *duration* seconds,
+        computes the mean bias, and stores it as the zero offset.
+        The robot MUST be still.
         """
         if not self._available:
             print("🧭 MPU6050: Unavailable — skipping calibration (heading correction disabled)")
             return
 
+        import time
         print(f"🧭 [CALIBRATING] Stand still for {duration:.0f}s — measuring gyro drift...")
         samples = []
         start = time.time()
         while time.time() - start < duration:
             try:
-                if self._use_lib:
-                    data = self._sensor.get_gyro_data()
-                    samples.append(data['z'])
-                else:
-                    samples.append(self._read_raw_gyro_z())
+                gz = self._pico_get_gyro_z()
+                if gz != 0.0 or len(samples) > 0:  # skip initial zeros before first packet
+                    samples.append(gz)
             except Exception:
                 pass
-            time.sleep(0.01)  # ~100 Hz
+            time.sleep(0.02)  # ~50 Hz (match Pico output rate)
 
         if samples:
             self._offset_z = sum(samples) / len(samples)
