@@ -3,6 +3,7 @@ import { Rocket, RotateCcw } from "lucide-react";
 import { ServiceLight, type SensorStatus } from "./ServiceLight";
 import { Speedometer, type SpeedUnit } from "./Speedometer";
 import { Gauge } from "./Gauge";
+import { BatteryGauge } from "./BatteryGauge";
 
 interface CarTelemetryProps {
   steeringAngle: number;
@@ -15,6 +16,7 @@ interface CarTelemetryProps {
   temperature: number;
   cpuClock: number;
   gpuClock: number;
+  batteryVoltage: number;
   rpm: number;
   encoderAvailable?: boolean; // Whether real wheel encoder is providing RPM
   onLaunch: () => void;
@@ -35,6 +37,7 @@ export const CarTelemetry = ({
   temperature,
   cpuClock,
   gpuClock,
+  batteryVoltage,
   rpm,
   encoderAvailable = false,
   onLaunch,
@@ -60,7 +63,7 @@ export const CarTelemetry = ({
 
   return (
     <div className="flex flex-col items-center justify-center h-full p-0.5 overflow-auto gap-1" data-scrollable="true" style={{ touchAction: 'pan-y' }}>
-      {/* First Row: Temperature, CPU, GPU Gauges - Smaller */}
+      {/* First Row: Temperature, CPU, GPU, Battery Gauges - Smaller */}
       <div className="flex gap-1 justify-center flex-wrap items-end">
         <Gauge 
           value={temperature}
@@ -90,9 +93,11 @@ export const CarTelemetry = ({
           isEngineRunning={isEngineRunning}
           size="small"
         />
-        <ServiceLight 
-          sensors={sensors}
-          requiresService={requiresService}
+        <BatteryGauge 
+          percentage={Math.max(0, Math.min(100, (batteryVoltage / 13) * 100))}
+          voltage={batteryVoltage}
+          isEngineRunning={isEngineRunning}
+          size="small"
         />
       </div>
 
@@ -246,6 +251,14 @@ export const CarTelemetry = ({
             <RotateCcw className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
             <span className="text-[4px] sm:text-[6px] font-bold racing-text leading-none">DONUT</span>
           </button>
+
+          {/* Service Light beside Donut button */}
+          <div className="absolute -right-[-5vw] sm:-right-12 top-1/2 -translate-y-1/2">
+            <ServiceLight 
+              sensors={sensors}
+              requiresService={requiresService}
+            />
+          </div>
         </div>
 
         {/* Right: RPM Gauge - Larger */}

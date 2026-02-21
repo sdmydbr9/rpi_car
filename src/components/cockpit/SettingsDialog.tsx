@@ -241,6 +241,8 @@ interface SettingsDialogProps {
   onMPU6050Toggle?: () => void;
   onCameraToggle?: () => void;
   isAutopilotRunning?: boolean;
+  // Driver reset
+  onResetDriver?: () => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -506,6 +508,7 @@ export const SettingsDialog = ({
   onMPU6050Toggle,
   onCameraToggle,
   isAutopilotRunning = false,
+  onResetDriver,
 }: SettingsDialogProps) => {
   const [isOpen, setIsOpen] = useState(false);
   const [synced, setSynced] = useState(false);
@@ -829,6 +832,18 @@ export const SettingsDialog = ({
     onTuningChange(defaults);
     sendTuningToBackend(defaults);
   }, [backendDefaults, onTuningChange, sendTuningToBackend]);
+
+  const handleResetDriver = useCallback(() => {
+    if (confirm("Reset driver profile? You will be shown the onboarding screen again.")) {
+      localStorage.removeItem('driverData');
+      socketClient.emitResetDriverData();
+      toast.success("Driver profile reset! 🔄");
+      setIsOpen(false);
+      if (onResetDriver) {
+        onResetDriver();
+      }
+    }
+  }, [onResetDriver]);
 
   return (
     <>
@@ -1170,18 +1185,26 @@ export const SettingsDialog = ({
               </div>
 
               {/* Footer */}
-              <div className="flex gap-2 mt-2 pt-2 border-t border-border/50 flex-shrink-0">
+              <div className="flex flex-col gap-2 mt-2 pt-2 border-t border-border/50 flex-shrink-0">
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleResetDefaults}
+                    className="flex-1 py-1.5 px-3 rounded border border-border bg-muted/30 text-muted-foreground racing-text text-[10px] sm:text-xs hover:bg-muted/50 transition-colors touch-feedback"
+                  >
+                    RESET DEFAULTS
+                  </button>
+                  <button
+                    onClick={handleApplyAndClose}
+                    className="flex-1 py-1.5 px-3 rounded border border-primary bg-primary/20 text-primary racing-text text-[10px] sm:text-xs hover:bg-primary/30 transition-colors touch-feedback"
+                  >
+                    APPLY & CLOSE
+                  </button>
+                </div>
                 <button
-                  onClick={handleResetDefaults}
-                  className="flex-1 py-1.5 px-3 rounded border border-border bg-muted/30 text-muted-foreground racing-text text-[10px] sm:text-xs hover:bg-muted/50 transition-colors touch-feedback"
+                  onClick={handleResetDriver}
+                  className="w-full py-1.5 px-3 rounded border border-destructive/50 bg-destructive/10 text-destructive racing-text text-[10px] sm:text-xs hover:bg-destructive/20 transition-colors touch-feedback"
                 >
-                  RESET DEFAULTS
-                </button>
-                <button
-                  onClick={handleApplyAndClose}
-                  className="flex-1 py-1.5 px-3 rounded border border-primary bg-primary/20 text-primary racing-text text-[10px] sm:text-xs hover:bg-primary/30 transition-colors touch-feedback"
-                >
-                  APPLY & CLOSE
+                  RESET DRIVER PROFILE
                 </button>
               </div>
             </div>

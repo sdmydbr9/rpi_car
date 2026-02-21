@@ -65,6 +65,8 @@ export interface TelemetryData {
   // Speed Encoder telemetry
   speed_mpm?: number;
   encoder_available?: boolean;
+  // Battery telemetry
+  battery_voltage?: number;
 }
 
 /**
@@ -416,6 +418,65 @@ export function requestTuning(): void {
   }
 }
 
+// Driver Data callback
+export interface DriverData {
+  name: string;
+  age: number;
+}
+
+let driverDataCallback: ((data: DriverData) => void) | null = null;
+
+/**
+ * Subscribe to driver data sync events from the backend.
+ * Called when driver data is requested or on first connection.
+ */
+export function onDriverDataSync(callback: (data: DriverData) => void): void {
+  driverDataCallback = callback;
+  if (socket) {
+    socket.off('driver_data_sync');  // avoid duplicate listeners
+    socket.on('driver_data_sync', (data: DriverData) => {
+      console.log(`[Socket] 👤 Driver data received from backend:`, data);
+      if (driverDataCallback) driverDataCallback(data);
+    });
+  }
+}
+
+/**
+ * Save driver data to the backend
+ * @param name - Driver name
+ * @param age - Driver age
+ */
+export function emitSaveDriverData(name: string, age: number): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 👤 SAVING DRIVER DATA:`, { name, age });
+    socket.emit('save_driver_data', { name, age });
+  } else {
+    console.warn(`[UI Control] ⚠️ Cannot save driver data - socket not connected`);
+  }
+}
+
+/**
+ * Request driver data from the backend
+ */
+export function requestDriverData(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 👤 Requesting driver data from backend`);
+    socket.emit('request_driver_data', {});
+  }
+}
+
+/**
+ * Reset driver data on the backend
+ */
+export function emitResetDriverData(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 👤 RESETTING DRIVER DATA`);
+    socket.emit('reset_driver_data', {});
+  } else {
+    console.warn(`[UI Control] ⚠️ Cannot reset driver data - socket not connected`);
+  }
+}
+
 /**
  * Disconnect from the backend
  */
@@ -733,4 +794,9 @@ export default {
   emitNarrationConfigUpdate,
   emitNarrationToggle,
   emitNarrationSpeakingDone,
+  // Driver Data
+  onDriverDataSync,
+  emitSaveDriverData,
+  requestDriverData,
+  emitResetDriverData,
 };

@@ -7,13 +7,14 @@ import { GearShifter } from "./GearShifter";
 import { AutopilotTelemetry, type AutopilotStatus } from "./AutopilotTelemetry";
 import { Pedals } from "./Pedals";
 import { ImmersiveHUD } from "../ImmersiveHUD";
+import { OnboardingScreen } from "../OnboardingScreen";
 import * as socketClient from "../../lib/socketClient";
 import { ttsService } from "../../lib/ttsService";
 import type { AudioOutputDevice } from "../../lib/ttsService";
 import { useAutoAcceleration } from "../../hooks/useAutoAcceleration";
 import type { SensorStatus } from "./ServiceLight";
 import { DEFAULT_TUNING, type TuningConstants } from "./SettingsDialog";
-import type { CameraSpecs, NarrationConfig } from "../../lib/socketClient";
+import type { CameraSpecs, NarrationConfig, DriverData } from "../../lib/socketClient";
 import { toast } from "@/components/ui/sonner";
 
 interface ControlState {
@@ -28,6 +29,7 @@ interface ControlState {
   gpuClock: number; // GPU clock speed in MHz
   rpm: number; // RPM
   encoderAvailable: boolean; // Whether real encoder is available
+  batteryVoltage: number; // Battery voltage in V
 }
 
 // Helper function to convert old sensor format to new format
@@ -40,6 +42,7 @@ const convertSensorStatus = (
     left_ir: 'Left IR',
     right_ir: 'Right IR',
     mpu6050: 'MPU6050',
+    pico_bridge: 'PICO Bridge',
     camera: 'Camera',
   };
 
@@ -68,6 +71,7 @@ export const CockpitController = () => {
     gpuClock: 0,
     rpm: 0,
     encoderAvailable: false,
+    batteryVoltage: 0,
   });
   const [isConnected, setIsConnected] = useState(false);
   const [serverIp, setServerIp] = useState("");
@@ -111,6 +115,7 @@ export const CockpitController = () => {
     { name: 'Left IR', status: 'ok' },
     { name: 'Right IR', status: 'ok' },
     { name: 'MPU6050', status: 'ok' },
+    { name: 'PICO Bridge', status: 'ok' },
     { name: 'Camera', status: 'ok' },
   ]);
   const [requiresService, setRequiresService] = useState(false);
@@ -183,6 +188,35 @@ export const CockpitController = () => {
   const [narrationLastText, setNarrationLastText] = useState('');
   const [showAudioUnlockPrompt, setShowAudioUnlockPrompt] = useState(false);
   const [ttsUnlocked, setTtsUnlocked] = useState(false);
+  // Driver Data State
+  const [driverName, setDriverName] = useState<string | null>(() => {
+    try {
+      const saved = localStorage.getItem('driverData');
+      if (saved) {
+        const data = JSON.parse(saved);
+        return data.name || null;
+      }
+    } catch { /* ignore corrupt localStorage */ }
+    return null;
+  });
+  const [driverAge, setDriverAge] = useState<number | null>(() => {
+    try {
+      const saved = localStorage.getItem('driverData');
+      if (saved) {
+        const data = JSON.parse(saved);
+        return data.age || null;
+      }
+    } catch { /* ignore corrupt localStorage */ }
+    return null;
+  });
+  const [showOnboarding, setShowOnboarding] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('driverData');
+      return !saved;
+    } catch {
+      return true;
+    }
+  });
   const autoAccelIntervalRef = useRef<number | null>(null);
   const connectionTimeoutRef = useRef<number | null>(null);
   const autoConnectAttemptedRef = useRef(false);
@@ -340,6 +374,18 @@ export const CockpitController = () => {
       }
     });
 
+    // Subscribe to driver data sync from backend
+    socketClient.onDriverDataSync((data: DriverData) => {
+      console.log('👤 Driver data received from backend:', data);
+      setDriverName(data.name);
+      setDriverAge(data.age);
+      localStorage.setItem('driverData', JSON.stringify(data));
+      setShowOnboarding(false);
+    });
+
+    // Request driver data from backend when connected
+    socketClient.requestDriverData();
+
     // Re-apply persisted camera config to backend on connect
     try {
       const saved = localStorage.getItem('cameraConfig');
@@ -439,6 +485,7 @@ export const CockpitController = () => {
           cpuClock: isEngineRunning ? (data.cpu_clock ?? prev.cpuClock) : 0,
           gpuClock: isEngineRunning ? (data.gpu_clock ?? prev.gpuClock) : 0,
           rpm: isEngineRunning ? (data.rpm ?? prev.rpm) : 0,
+          batteryVoltage: data.battery_voltage ?? prev.batteryVoltage,
           encoderAvailable: data.encoder_available ?? prev.encoderAvailable,
           // DO NOT update throttle and brake from telemetry - these are user-controlled inputs
           // that must maintain their state while held
@@ -527,6 +574,32 @@ export const CockpitController = () => {
     setControlState(prev => ({ ...prev, steeringAngle: angle }));
     socketClient.emitSteering(Math.round(angle));
   }, [isEngineRunning]);
+
+  const handleOnboardingComplete = useCallback((name: string, age: number) => {
+    console.log('✅ Onboarding complete:', { name, age });
+    
+    // Save to localStorage
+    const driverData = { name, age };
+    localStorage.setItem('driverData', JSON.stringify(driverData));
+    
+    // Update state
+    setDriverName(name);
+    setDriverAge(age);
+    setShowOnboarding(false);
+    
+    // Send to backend if connected
+    if (socketClient.isConnected()) {
+      socketClient.emitSaveDriverData(name, age);
+    }
+    
+    toast.success(`Welcome, ${name}! 🏁`);
+  }, []);
+
+  const handleResetDriver = useCallback(() => {
+    setShowOnboarding(true);
+    setDriverName(null);
+    setDriverAge(null);
+  }, []);
 
   const handleThrottleChange = useCallback((active: boolean) => {
     console.log('🎮 Throttle changed:', active, { isEngineRunning, isConnected });
@@ -770,7 +843,7 @@ export const CockpitController = () => {
     socketClient.emitAutoAccelDisable();
     socketClient.emitThrottle(false);
     socketClient.emitBrake(true);
-    setControlState(prev => ({ ...prev, throttle: false, brake: false, speed: 0, speedMpm: 0, temperature: 0, cpuClock: 0, gpuClock: 0, rpm: 0 }));
+    setControlState(prev => ({ ...prev, throttle: false, brake: false, speed: 0, speedMpm: 0, temperature: 0, cpuClock: 0, gpuClock: 0, rpm: 0, batteryVoltage: 0 }));
     console.log('✅ Engine stopped');
   }, []);
 
@@ -803,6 +876,14 @@ export const CockpitController = () => {
 
   return (
     <>
+      {/* Onboarding Screen */}
+      {showOnboarding && (
+        <OnboardingScreen onComplete={handleOnboardingComplete} />
+      )}
+
+      {/* Main App UI (hidden during onboarding) */}
+      {!showOnboarding && (
+      <>
       {/* Audio Unlock Prompt - shown when narration text arrives but TTS hasn't been unlocked */}
       {showAudioUnlockPrompt && (
         <div 
@@ -868,6 +949,7 @@ export const CockpitController = () => {
       <div className="h-[100dvh] w-full flex flex-col overflow-hidden">
         {/* Header */}
         <Header 
+          driverName={driverName || "MACHINE"}
           isConnected={isConnected}
           tuning={tuning}
           onTuningChange={setTuning}
@@ -889,6 +971,7 @@ export const CockpitController = () => {
           onMPU6050Toggle={handleMPU6050Toggle}
           onCameraToggle={handleCameraToggle}
           isAutopilotRunning={isAutopilotRunning}
+          onResetDriver={handleResetDriver}
         />
         
         {/* Main Content - Fixed Layout (No Responsive Changes) */}
@@ -925,6 +1008,7 @@ export const CockpitController = () => {
               temperature={controlState.temperature}
               cpuClock={controlState.cpuClock}
               gpuClock={controlState.gpuClock}
+              batteryVoltage={controlState.batteryVoltage}
               rpm={controlState.rpm}
               encoderAvailable={controlState.encoderAvailable}
               onLaunch={handleLaunch}
@@ -992,6 +1076,8 @@ export const CockpitController = () => {
           />
         </div>
       </div>
+    </>
+      )}
     </>
   );
 };

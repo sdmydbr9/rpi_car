@@ -29,6 +29,7 @@ interface HeaderProps {
   onMPU6050Toggle?: () => void;
   onCameraToggle?: () => void;
   isAutopilotRunning?: boolean;
+  onResetDriver?: () => void;
 }
 
 export const Header = ({ 
@@ -55,6 +56,7 @@ export const Header = ({
   onMPU6050Toggle,
   onCameraToggle,
   isAutopilotRunning,
+  onResetDriver,
 }: HeaderProps) => {
   return (
     <header className="flex items-center justify-between px-1.5 sm:px-4 py-0.5 sm:py-1.5 border-b border-primary/30 bg-card/30 backdrop-blur-sm h-[6dvh] min-h-[1.75rem] max-h-10 flex-shrink-0">
@@ -84,7 +86,6 @@ export const Header = ({
       {/* Right: Driver Status + Settings */}
       <div className="flex items-center gap-1 sm:gap-3">
         <div className="flex items-center gap-0.5 sm:gap-2">
-          <span className="text-primary font-bold text-xs sm:text-base racing-text">{position}</span>
           <span className="text-foreground font-bold racing-text text-[10px] sm:text-sm hidden sm:inline">{driverName}</span>
         </div>
         {/* Unlock Audio Button - shown when image analysis is enabled but audio isn't unlocked */}
@@ -100,7 +101,7 @@ export const Header = ({
             </span>
           </button>
         )}
-        <SettingsDialog tuning={tuning} onTuningChange={onTuningChange} backendDefaults={backendDefaults} cameraSpecs={cameraSpecs} narrationConfig={narrationConfig} imageAnalysisEnabled={imageAnalysisEnabled} onImageAnalysisToggle={onImageAnalysisToggle} isIREnabled={isIREnabled} isSonarEnabled={isSonarEnabled} isMPU6050Enabled={isMPU6050Enabled} isRearSonarEnabled={isRearSonarEnabled} isCameraEnabled={isCameraEnabled} onIRToggle={onIRToggle} onSonarToggle={onSonarToggle} onRearSonarToggle={onRearSonarToggle} onMPU6050Toggle={onMPU6050Toggle} onCameraToggle={onCameraToggle} isAutopilotRunning={isAutopilotRunning} />
+        <SettingsDialog tuning={tuning} onTuningChange={onTuningChange} backendDefaults={backendDefaults} cameraSpecs={cameraSpecs} narrationConfig={narrationConfig} imageAnalysisEnabled={imageAnalysisEnabled} onImageAnalysisToggle={onImageAnalysisToggle} isIREnabled={isIREnabled} isSonarEnabled={isSonarEnabled} isMPU6050Enabled={isMPU6050Enabled} isRearSonarEnabled={isRearSonarEnabled} isCameraEnabled={isCameraEnabled} onIRToggle={onIRToggle} onSonarToggle={onSonarToggle} onRearSonarToggle={onRearSonarToggle} onMPU6050Toggle={onMPU6050Toggle} onCameraToggle={onCameraToggle} isAutopilotRunning={isAutopilotRunning} onResetDriver={onResetDriver} />
       </div>
     </header>
   );

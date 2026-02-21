@@ -72,11 +72,15 @@ FR_ENB = 13
 
 RL_IN1 = 10
 RL_IN2 = 7
-RL_ENA = 5
+# --- UPDATED PINS ---
+RL_ENA = 5   # Was 19
+# --------------------
 
 RR_IN3 = 9
 RR_IN4 = 11
-RR_ENB = 6
+# --- UPDATED PINS ---
+RR_ENB = 6   # Was 18
+# --------------------
 
 ALL_DIR_PINS = [FL_IN1, FL_IN2, FR_IN3, FR_IN4, RL_IN1, RL_IN2, RR_IN3, RR_IN4]
 ALL_EN_PINS = [FL_ENA, FR_ENB, RL_ENA, RR_ENB]
@@ -211,7 +215,7 @@ def main():
 
             if key in (" ", "x"):
                 stop_all(pwms)
-                print("\rAll motors stopped.                 ", end="", flush=True)
+                print("\rAll motors stopped.                  ", end="", flush=True)
                 continue
 
             if key in ("+", "="):

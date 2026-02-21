@@ -701,6 +701,7 @@ car_state = {
         "left_ir": "OK",
         "right_ir": "OK",
         "mpu6050": "OK",
+        "pico_bridge": "OK",
         "camera": "OK",
     },
     "service_light_active": False,  # True if any sensor has error/warning
@@ -784,8 +785,9 @@ def get_smoothed_sonar():
 
 def check_sensor_health():
     """
-    Periodically check sensor health and update car_state["sensor_status"]
-    Returns a dict with health status for each sensor
+    Periodically check sensor health and update car_state["sensor_status"].
+    Uses Pico bridge packet freshness to detect stale/dead sensors.
+    Returns a dict with health status for each sensor.
     """
     sensor_status = {
         "front_sonar": "OK",
@@ -793,43 +795,82 @@ def check_sensor_health():
         "left_ir": "OK",
         "right_ir": "OK",
         "mpu6050": "OK",
+        "pico_bridge": "OK",
         "camera": "OK",
     }
     
     has_error = False
-    
+
+    # ── 1. Check Pico Bridge connection & freshness ──
+    pico_fresh = False
     try:
-        # Check Front Laser (VL53L0X)
-        dist_front = sensor_system.read_laser_cm()
-        if dist_front == -1:
+        if pico_reader is not None and pico_reader.is_connected():
+            if pico_reader.is_fresh(max_age_s=3.0):
+                sensor_status["pico_bridge"] = "OK"
+                pico_fresh = True
+            else:
+                sensor_status["pico_bridge"] = "WARNING"
+                has_error = True
+        else:
+            sensor_status["pico_bridge"] = "FAILED"
+            has_error = True
+    except Exception:
+        sensor_status["pico_bridge"] = "FAILED"
+        has_error = True
+
+    # ── 2. Check Pico packet-level sensor data ──
+    pico_packet = None
+    if pico_fresh:
+        try:
+            pico_packet = pico_get_sensor_packet()
+        except Exception:
+            pico_packet = None
+
+    # ── 3. Check Front Laser (VL53L0X via Pico) ──
+    try:
+        if pico_fresh and pico_packet is not None:
+            if pico_packet.laser_mm <= 0:
+                sensor_status["front_sonar"] = "FAILED"
+                has_error = True
+            else:
+                sensor_status["front_sonar"] = "OK"
+        else:
+            # Pico not fresh — laser unavailable
             sensor_status["front_sonar"] = "FAILED"
             has_error = True
-        elif dist_front < 2:
-            sensor_status["front_sonar"] = "WARNING"
-            has_error = True
-        else:
-            sensor_status["front_sonar"] = "OK"
-    except Exception as e:
+    except Exception:
         sensor_status["front_sonar"] = "FAILED"
         has_error = True
-    
+
     # Rear sonar removed — always mark OK (no hardware to fail)
     sensor_status["rear_sonar"] = "OK"
-    
+
+    # ── 4. Check IR Sensors (via Pico) ──
     try:
-        # Check IR Sensors
-        left_blocked, right_blocked = sensor_system.get_ir_status()
-        # IR sensors are working if they return a boolean value
-        sensor_status["left_ir"] = "OK"
-        sensor_status["right_ir"] = "OK"
-    except Exception as e:
+        if pico_fresh and pico_packet is not None:
+            # IR sensors are on the Pico — if we have fresh data they're working
+            sensor_status["left_ir"] = "OK"
+            sensor_status["right_ir"] = "OK"
+        else:
+            # Pico stale/down — IR sensors unavailable
+            sensor_status["left_ir"] = "FAILED"
+            sensor_status["right_ir"] = "FAILED"
+            has_error = True
+    except Exception:
         sensor_status["left_ir"] = "FAILED"
         sensor_status["right_ir"] = "FAILED"
         has_error = True
-    
+
+    # ── 5. Check MPU6050 Gyroscope (via Pico bridge) ──
     try:
-        # Check MPU6050 Gyroscope (via Pico bridge)
-        if autopilot._gyro.available:
+        if pico_fresh and pico_packet is not None:
+            # Check if gyro values are plausible (not NaN/extreme)
+            if abs(pico_packet.gyro_z) < 2000:
+                sensor_status["mpu6050"] = "OK"
+            else:
+                sensor_status["mpu6050"] = "WARNING"
+                has_error = True
+        elif autopilot._gyro.available:
             try:
                 autopilot._gyro.read_gyro_z()
                 sensor_status["mpu6050"] = "OK"
@@ -839,30 +880,25 @@ def check_sensor_health():
         else:
             sensor_status["mpu6050"] = "FAILED"
             has_error = True
-    except Exception as e:
+    except Exception:
         sensor_status["mpu6050"] = "FAILED"
         has_error = True
 
-    # Check Pico Bridge connection
-    try:
-        if pico_reader is not None and pico_reader.is_connected():
-            sensor_status["pico_bridge"] = "OK"
-        else:
-            sensor_status["pico_bridge"] = "FAILED"
+    # ── 6. Check Pico error counter ──
+    if pico_fresh and pico_packet is not None and pico_packet.errors > 50:
+        # High error count on Pico indicates hardware issues
+        if sensor_status["pico_bridge"] == "OK":
+            sensor_status["pico_bridge"] = "WARNING"
             has_error = True
-    except Exception:
-        sensor_status["pico_bridge"] = "FAILED"
-        has_error = True
 
+    # ── 7. Check Camera ──
     try:
-        # Check Camera
         if not CAMERA_AVAILABLE or picam2 is None:
             sensor_status["camera"] = "FAILED"
             has_error = True
         else:
-            # Camera hardware is available
             sensor_status["camera"] = "OK"
-    except Exception as e:
+    except Exception:
         sensor_status["camera"] = "FAILED"
         has_error = True
     

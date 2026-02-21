@@ -427,7 +427,8 @@ class CarSystem:
     RL_IN1 = 10;  RL_IN2 = 7;   RL_ENA = 5    # Rear-Left
     RR_IN3 = 9;   RR_IN4 = 11;  RR_ENB = 6    # Rear-Right  (direction pins swapped)
 
-    LEFT_IR = 5;  RIGHT_IR = 6  # IR obstacle sensors
+    # IR sensors moved to Pico sensor bridge (UART) — no longer on Pi GPIO.
+    # Legacy pin numbers kept for reference only: LEFT_IR was 5, RIGHT_IR was 6.
     PWM_FREQ = 1000        # Hz
 
     # Convenience lists for bulk GPIO operations
@@ -447,11 +448,7 @@ class CarSystem:
         except Exception as e:
             print(f"⚠️  Motor pin setup failed: {e}")
 
-        # IR sensor pins
-        try:
-            GPIO.setup([self.LEFT_IR, self.RIGHT_IR], GPIO.IN)
-        except Exception as e:
-            print(f"⚠️  IR sensor pin setup failed: {e}")
+        # IR sensors are now read from Pico bridge — no Pi GPIO setup needed.
 
         # PWM channels — one per motor (4 total)
         try:
