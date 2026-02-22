@@ -122,7 +122,6 @@ class CarAudioManager:
         self._engine_running = False
         self._accelerating = False
         self._reversing = False
-        self._horn_warning = False
 
         # Initialize pygame mixer
         try:
@@ -192,18 +191,19 @@ class CarAudioManager:
                 self._horn_warning = False
                 self._stop_all_locked()
 
-    def update_runtime_state(self, accelerating: bool, reversing: bool, horn_warning: bool):
+    def update_runtime_state(self, accelerating: bool, reversing: bool):
         """Update audio state based on vehicle state."""
         with self._lock:
             self._accelerating = bool(accelerating)
             self._reversing = bool(reversing)
-            self._horn_warning = bool(horn_warning)
             self._update_audio_mix_locked()
 
     def play_horn(self):
-        """Play the horn sound once (stateless)."""
+        """Play the horn sound once (stateless, manual trigger)."""
         with self._lock:
             if "horn" in self._sounds:
+                # Ensure horn channel volume is set for manual play
+                self._horn_channel.set_volume(1.0)
                 if not self._horn_channel.get_busy():
                     self._horn_channel.play(self._sounds["horn"])
                     print("� Horn played!")
@@ -214,7 +214,6 @@ class CarAudioManager:
             self._engine_running = False
             self._accelerating = False
             self._reversing = False
-            self._horn_warning = False
             self._stop_all_locked()
             try:
                 pygame.mixer.quit()
@@ -273,11 +272,6 @@ class CarAudioManager:
         self._accel_channel.set_volume(accel_vol)
         self._idle_channel_a.set_volume(idle_vol)
         self._idle_channel_b.set_volume(idle_vol)
-
-        # --- Horn Logic ---
-        if self._horn_warning:
-            if not self._horn_channel.get_busy() and "horn" in self._sounds:
-                self._horn_channel.play(self._sounds["horn"])
 
     def _start_engine_sequence_locked(self):
         """Start the engine ignition sequence with crossfade to idle."""
