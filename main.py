@@ -1421,6 +1421,7 @@ def physics_loop():
         # Drive sound effects from real runtime state:
         # - acceleration while throttle is pressed in forward gears
         # - beeper while moving in reverse
+        # - horn warning during autopilot when obstacle is closer than 10cm
         engine_running = car_state.get("engine_running", False)
         accelerating_audio = (
             engine_running
@@ -1436,9 +1437,16 @@ def physics_loop():
             and car_state["current_pwm"] > 1.0
             and not car_state["is_braking"]
         )
+        # Horn warning: Only during autopilot when obstacle is very close (< 10cm)
+        horn_audio = (
+            car_state.get("autonomous_mode", False)
+            and car_state["sonar_enabled"]
+            and sonar_distance < 10
+        )
         car_audio.update_runtime_state(
             accelerating=accelerating_audio,
             reversing=reversing_audio,
+            horn_warning=horn_audio,
         )
 
         # --- 3. STEERING MIXER (The Magic) ---
