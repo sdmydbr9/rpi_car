@@ -48,6 +48,14 @@ export default function ControlScreen() {
     });
   }, []);
 
+  useEffect(() => {
+    // Subscribe to connection state changes (handles hotspot/no-internet scenarios)
+    socketClient.onConnectionStateChange((connected) => {
+      console.log(`[ControlScreen] Connection state changed: ${connected ? 'CONNECTED' : 'DISCONNECTED'}`);
+      setIsConnected(connected);
+    });
+  }, []);
+
   const handleConnect = async () => {
     try {
       await socketClient.connectToServer(serverIp);

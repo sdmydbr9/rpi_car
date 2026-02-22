@@ -12,7 +12,8 @@ from pico_sensor_reader import (
     get_current_sense,
     get_rpm,
     get_gyro_z,
-    get_accel_xyz
+    get_accel_xyz,
+    get_laser_distance_mm
 )
 
 # =================================================================
@@ -29,11 +30,12 @@ RR_IN3 = 10; RR_IN4 = 7;  RR_ENB = 16
 
 # --- SENSORS ---
 TRIG_F = 25; ECHO_F = 24
+SERVO_PIN = 20  # <--- NEW: Servo control pin
 
 # --- AGGRESSIVE TUNING ---
-MAX_SPEED = 100        # Turbo Speed 
-MIN_SPEED = 20         # Crawl Speed 
-RAMP_STEP = 35         # Very snappy motor response.
+MAX_SPEED = 100        
+MIN_SPEED = 20         
+RAMP_STEP = 35         
 
 # Trims
 TRIM_FL = 0.6; TRIM_FR = 0.6
@@ -66,6 +68,62 @@ curr_L = 0; curr_R = 0
 last_turn_dir = 1
 current_tr = 0.5  
 global_max_duty = 95.0 
+
+# =================================================================
+# 🎯 LASER TARGETING SYSTEM (Background Thread)
+# =================================================================
+
+class LaserTargetingSystem:
+    """ Rapidly ping-pongs a servo to check left/right flanks for escape routes. """
+    def __init__(self, pin):
+        self.pin = pin
+        GPIO.setup(self.pin, GPIO.OUT)
+        self.pwm = GPIO.PWM(self.pin, 50) # 50Hz for standard servos
+        self.pwm.start(0)
+        
+        self.left_clearance = 200.0
+        self.right_clearance = 200.0
+        self.active = False
+        self.running = True
+        
+        self.thread = threading.Thread(target=self._scan_loop, daemon=True)
+        self.thread.start()
+
+    def _set_angle(self, angle):
+        # 0 = Center, -45 = Left, +45 = Right
+        servo_deg = 90 - angle 
+        duty = 2.0 + (servo_deg / 18.0)
+        self.pwm.ChangeDutyCycle(duty)
+        time.sleep(0.15) # Give servo time to physically move
+        self.pwm.ChangeDutyCycle(0) # Stop jitter
+
+    def _get_laser_cm(self):
+        mm = get_laser_distance_mm()
+        if mm is None or mm < 0 or mm > 2000:
+            return 200.0 # Default to "clear" if out of range or error
+        return mm / 10.0
+
+    def _scan_loop(self):
+        while self.running:
+            if self.active:
+                # 1. Look Left
+                self._set_angle(-45)
+                self.left_clearance = self._get_laser_cm()
+                
+                # 2. Look Right
+                self._set_angle(45)
+                self.right_clearance = self._get_laser_cm()
+            else:
+                # Park at Center when road is clear
+                self._set_angle(0)
+                time.sleep(0.2) # Sleep longer when idle to save CPU
+                
+    def stop(self):
+        self.running = False
+        self.pwm.stop()
+
+# Initialize the laser scanner
+laser = LaserTargetingSystem(SERVO_PIN)
 
 # =================================================================
 # ⚡ DYNAMIC VOLTAGE COMPENSATION
@@ -144,22 +202,15 @@ def ramp_motors(target_L, target_R, direction):
 # =================================================================
 
 def calculate_dynamic_speed(dist):
-    """ Brakes much harder and earlier to kill momentum. """
     if dist > 150: return MAX_SPEED
     if dist < 40: return MIN_SPEED
-    # Linear slope between 40cm (20%) and 150cm (100%)
     return int(MIN_SPEED + (dist - 40) * ((MAX_SPEED - MIN_SPEED) / 110.0))
 
 def calculate_dynamic_turn_ratio(dist):
-    """ Anchor the inner wheel completely at close range! """
-    if dist <= 45:
-        return 0.0   # Dead stop the inner wheel for a harsh pivot
-    elif dist <= 90:
-        return 0.0 + (dist - 45) * (0.05 / 45.0) # 0.0 to 0.05
-    elif dist <= 150:
-        return 0.05 + (dist - 90) * (0.35 / 60.0) # 0.05 to 0.40
-    else:
-        return 0.6 
+    if dist <= 45: return 0.0   
+    elif dist <= 90: return 0.0 + (dist - 45) * (0.05 / 45.0) 
+    elif dist <= 150: return 0.05 + (dist - 90) * (0.35 / 60.0) 
+    else: return 0.6 
 
 def execute_soft_escape():
     global curr_L, curr_R, status_msg
@@ -174,11 +225,16 @@ def execute_soft_escape():
         ramp_motors(85, 85, -1)
         time.sleep(0.05)
 
-    status_msg = "🔄 SPINNING..."
+    status_msg = "🔄 TACTICAL SPIN..."
     ramp_motors(0, 0, 1) 
 
     target_spin = 95 
-    spin_dir = 0 if random.choice([True, False]) else 2
+    
+    # Use laser data to spin towards the clearest exit even while escaping!
+    if laser.right_clearance > laser.left_clearance:
+        spin_dir = 0 # Right
+    else:
+        spin_dir = 2 # Left
 
     for _ in range(8):
         ramp_motors(target_spin, target_spin, spin_dir)
@@ -196,6 +252,7 @@ def auto_pilot():
     while True:
         if not running:
             ramp_motors(0, 0, 1)
+            laser.active = False
             time.sleep(0.1)
             continue
 
@@ -206,38 +263,46 @@ def auto_pilot():
         except:
             ir_left, ir_right = False, False 
 
-        l_obs = ir_left
-        r_obs = ir_right
+        # 1. Activate Laser Scanner if obstacle in range
+        if dist < 150:
+            laser.active = True
+            # Dynamically pick the best escape route based on laser scans!
+            if laser.right_clearance > laser.left_clearance + 10: # 10cm bias to prevent nervous twitching
+                last_turn_dir = 1  # Turn Right
+            elif laser.left_clearance > laser.right_clearance + 10:
+                last_turn_dir = -1 # Turn Left
+        else:
+            laser.active = False
 
-        # 1. PANIC ZONE (Increased to 20cm)
-        if (l_obs and r_obs) or (dist < 20):
+        # 2. PANIC ZONE 
+        if (ir_left and ir_right) or (dist < 20):
             execute_soft_escape()
             continue
 
-        # 2. CALCULATE BASE THROTTLE & DYNAMIC TURN RATIO
+        # 3. CALCULATE BASE THROTTLE & DYNAMIC TURN RATIO
         throttle = calculate_dynamic_speed(dist)
         current_tr = calculate_dynamic_turn_ratio(dist)
 
-        # 3. AGGRESSIVE STEERING MODIFIERS
-        if l_obs:
-            status_msg = "⚡ SWERVE RIGHT"
+        # 4. AGGRESSIVE STEERING MODIFIERS
+        if ir_left:
+            status_msg = "⚡ SWERVE RIGHT (IR)"
             ramp_motors(MAX_SPEED, 0, 1)
             last_turn_dir = 1
 
-        elif r_obs:
-            status_msg = "⚡ SWERVE LEFT"
+        elif ir_right:
+            status_msg = "⚡ SWERVE LEFT (IR)"
             ramp_motors(0, MAX_SPEED, 1)
             last_turn_dir = -1
             
-        elif dist < 90: # Hard dodge starts way earlier!
+        elif dist < 90: 
             status_msg = f"⚡ HARD DODGE! (TR: {current_tr:.2f})"
             if last_turn_dir == 1: 
                 ramp_motors(MAX_SPEED, throttle * current_tr, 1)
             else: 
                 ramp_motors(throttle * current_tr, MAX_SPEED, 1)
 
-        elif dist < 150: # Pre-emptive steering starts very early
-            status_msg = f"⤵️ STEERING (TR: {current_tr:.2f})"
+        elif dist < 150: 
+            status_msg = f"⤵️ TACTICAL STEER (TR: {current_tr:.2f})"
             if last_turn_dir == 1: 
                 ramp_motors(throttle, throttle * current_tr, 1)
             else: 
@@ -262,14 +327,13 @@ def main(stdscr):
 
     while True:
         stdscr.erase()
-        stdscr.addstr(0, 0, "--- 🏎️  AGGRESSIVE SLALOM ROVER ---", curses.A_BOLD)
+        stdscr.addstr(0, 0, "--- 🏎️  TACTICAL SLALOM ROVER (SONAR + LASER) ---", curses.A_BOLD)
 
         # Telemetry variables
         v_batt = get_battery_voltage()
         amps = get_current_sense()
         rpm = get_rpm()
         gz = get_gyro_z()
-        ax, ay, az = get_accel_xyz()
 
         batt_display = v_batt if v_batt > 0 else 0.0
         amps_display = amps if amps > 0 else 0.0
@@ -279,14 +343,17 @@ def main(stdscr):
         stdscr.addstr(2, 0, f"THROTTLE: |{bar:<20}| {int(curr_L)}%")
         stdscr.addstr(3, 0, f"POWER:    {batt_display:.1f}V @ {amps_display:.1f}A | Hard Limit: {global_max_duty:.1f}% PWM")
         
-        # New Telemetry Data
         stdscr.addstr(4, 0, f"SPEED:    {rpm:.1f} RPM")
-        stdscr.addstr(5, 0, f"MPU6050:  Gyro-Z: {gz:>5.1f} °/s | Accel: X:{ax:>5.2f} Y:{ay:>5.2f} Z:{az:>5.2f} g")
+        stdscr.addstr(5, 0, f"MPU6050:  Gyro-Z: {gz:>5.1f} °/s")
+        
+        # Display what the Laser is seeing!
+        scan_state = "SCANNING..." if laser.active else "IDLE (Parked Center)"
+        stdscr.addstr(7, 0, f"LASER:    {scan_state} | L: {laser.left_clearance:.1f}cm | R: {laser.right_clearance:.1f}cm")
 
-        stdscr.addstr(7, 0, f"STATUS:   {status_msg}")
-        stdscr.addstr(9, 0, "[S] Start  [SPACE] Pause  [Q] Quit")
+        stdscr.addstr(9, 0, f"STATUS:   {status_msg}")
+        stdscr.addstr(11, 0, "[S] Start  [SPACE] Pause  [Q] Quit")
 
-        if running: stdscr.addstr(9, 40, "● ON AIR", curses.A_BLINK)
+        if running: stdscr.addstr(11, 40, "● ON AIR", curses.A_BLINK)
 
         key = stdscr.getch()
         if key == ord('q'): break
@@ -295,6 +362,7 @@ def main(stdscr):
         time.sleep(0.1)
 
     running = False
+    laser.stop()
     stop_all()
 
 def stop_all():

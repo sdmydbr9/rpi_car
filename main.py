@@ -26,6 +26,7 @@ from autopilot_pid import AutoPilot, State
 from vision import VisionSystem
 from narration import NarrationEngine, validate_key as narration_validate_key, list_multimodal_models
 from kokoro_client import get_kokoro_client
+from audio_manager import CarAudioManager
 from pico_sensor_reader import (
     init_pico_reader, get_gyro_z as pico_get_gyro_z,
     get_accel_xyz as pico_get_accel_xyz,
@@ -45,6 +46,7 @@ from pico_sensor_reader import (
 # --- PROJECT PATHS ---
 # The folder where the built website ends up
 DIST_DIR = "dist"
+SOUNDS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sounds")
 
 # --- MOTOR PINS (BCM Numbering) — Dual L298N, 4WD ---
 # Managed by CarSystem in motor.py — listed here for wiring reference only.
@@ -261,6 +263,13 @@ def check_and_build():
 
 # Run the check immediately
 check_and_build()
+
+# ==========================================
+# 🔊 CAR AUDIO SETUP
+# ==========================================
+CAR_AUDIO_DEVICE = os.environ.get("CAR_AUDIO_DEVICE", "default")
+car_audio = CarAudioManager(SOUNDS_DIR, audio_device=CAR_AUDIO_DEVICE)
+print(f"🔊 [Audio] Initialized (device={CAR_AUDIO_DEVICE}, sounds={SOUNDS_DIR})")
 
 # ==========================================
 # 📷 CAMERA DETECTION
@@ -687,6 +696,7 @@ car_state = {
     "speed_limit": 100,    # Manual speed limit (5-100), overrides gear speeds
     "speed_limit_enabled": False,  # Whether to use speed limit instead of gear
     "auto_accel_enabled": False,  # Auto-acceleration mode (client-side for throttle)
+    "engine_running": False,  # Engine start/stop state from UI power button
     "emergency_brake_active": False,  # Emergency brake: when ON, car cannot move
     "gear_before_ebrake": None,  # Store gear before emergency brake was activated
     "obstacle_state": "IDLE",  # Obstacle avoidance state: IDLE, STOPPED, STEERING
@@ -1378,6 +1388,37 @@ def physics_loop():
         # the wrong direction for one full 20 ms frame.
         gear = car_state["gear"]
 
+        # --- AUDIO STATE ---
+        # Drive sound effects from real runtime state:
+        # - acceleration while throttle is pressed in forward gears
+        # - beeper while moving in reverse
+        # - horn warning while obstacle is dangerously close (< 15 cm)
+        engine_running = car_state.get("engine_running", False)
+        accelerating_audio = (
+            engine_running
+            and gas
+            and not brake
+            and gear != "R"
+            and obstacle_state != "REVERSING"
+            and not car_state["is_braking"]
+        )
+        reversing_audio = (
+            engine_running
+            and gear == "R"
+            and car_state["current_pwm"] > 1.0
+            and not car_state["is_braking"]
+        )
+        horn_audio = (
+            engine_running
+            and car_state["sonar_enabled"]
+            and sonar_distance < SONAR_STOP_DISTANCE
+        )
+        car_audio.update_runtime_state(
+            accelerating=accelerating_audio,
+            reversing=reversing_audio,
+            horn_warning=horn_audio,
+        )
+
         # --- 3. STEERING MIXER (The Magic) ---
         # In autonomous mode, CarSystem handles GPIO directly — skip mixer.
         if car_state["autonomous_mode"]:
@@ -1929,6 +1970,8 @@ def on_disconnect():
         car_state["emergency_brake_active"] = True
         car_state["heartbeat_active"] = False
         car_state["current_pwm"] = 0
+        car_state["engine_running"] = False
+        car_audio.set_engine_running(False)
         print(f"🚨 [Heartbeat] ❌ ALL CLIENTS DISCONNECTED - EMERGENCY BRAKES ACTIVATED!")
 
 
@@ -1941,6 +1984,36 @@ def on_heartbeat_pong(data):
     car_state["heartbeat_active"] = True
     # Debug: Only print occasionally to avoid spam
     # print(f"💗 [Heartbeat] ✅ Heartbeat pong received from client {client_id}")
+
+
+@socketio.on('engine_start')
+def on_engine_start(data=None):
+    """Handle UI engine start button."""
+    car_state["engine_running"] = True
+    car_state["brake_pressed"] = False
+    car_state["is_braking"] = False
+    car_audio.set_engine_running(True)
+    print(f"\n⚙️ [UI Control] 🔊 ENGINE: STARTED")
+    emit('engine_response', {'status': 'ok', 'running': True})
+
+
+@socketio.on('engine_stop')
+def on_engine_stop(data=None):
+    """Handle UI engine stop button."""
+    car_state["engine_running"] = False
+    car_state["auto_accel_enabled"] = False
+    car_state["gas_pressed"] = False
+    car_state["brake_pressed"] = True
+    car_state["is_braking"] = True
+    car_state["current_pwm"] = 0
+    car_state["obstacle_state"] = "IDLE"
+    try:
+        car_system.brake()
+    except Exception:
+        pass
+    car_audio.set_engine_running(False)
+    print(f"\n⚙️ [UI Control] 🔊 ENGINE: STOPPED")
+    emit('engine_response', {'status': 'ok', 'running': False})
 
 
 @socketio.on('throttle')
@@ -2758,6 +2831,7 @@ def telemetry_broadcast():
                 "right_obstacle": car_state["right_obstacle"],
                 "gas_pressed": car_state["gas_pressed"],
                 "brake_pressed": car_state["brake_pressed"],
+                "engine_running": car_state["engine_running"],
                 "ir_enabled": car_state["ir_enabled"],
                 "heartbeat_active": car_state["heartbeat_active"],
                 "emergency_brake_active": car_state["emergency_brake_active"],
@@ -2852,6 +2926,7 @@ def telemetry():
         "turning": car_state["turning"],
         "left_obstacle": car_state["left_obstacle"],
         "right_obstacle": car_state["right_obstacle"],
+        "engine_running": car_state["engine_running"],
         "temperature": get_cpu_temperature(),
         "cpu_clock": get_cpu_clock(),
         "gpu_clock": get_gpu_clock(),
@@ -3023,6 +3098,7 @@ if __name__ == "__main__":
     finally:
         # Safety cleanup — car_system.cleanup() stops PWMs + releases GPIO
         _camera_broadcaster.stop()
+        car_audio.shutdown()
         narration_engine.stop()
         autopilot.stop()
         car_system.cleanup()

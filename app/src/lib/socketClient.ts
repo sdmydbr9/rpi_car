@@ -6,6 +6,9 @@ let socket: Socket | null = null;
 // Telemetry callback
 let telemetryCallback: ((data: TelemetryData) => void) | null = null;
 
+// Connection state callback - fired when socket connects/disconnects
+let connectionStateCallback: ((isConnected: boolean) => void) | null = null;
+
 export interface TelemetryData {
   rpm: number;
   speed: number;
@@ -48,6 +51,9 @@ export function connectToServer(serverIp: string, port: number = 5000): Promise<
 
     socket.on('connect', () => {
       console.log(`[Socket] Successfully connected to RC Car backend at ${url}`);
+      if (connectionStateCallback) {
+        connectionStateCallback(true);
+      }
       resolve();
     });
 
@@ -64,6 +70,9 @@ export function connectToServer(serverIp: string, port: number = 5000): Promise<
 
     socket.on('disconnect', () => {
       console.log(`[Socket] Disconnected from RC Car backend`);
+      if (connectionStateCallback) {
+        connectionStateCallback(false);
+      }
     });
 
     socket.on('heartbeat_ping', () => {
@@ -82,6 +91,10 @@ export function disconnectFromServer(): void {
 
 export function isConnected(): boolean {
   return socket?.connected || false;
+}
+
+export function onConnectionStateChange(callback: (isConnected: boolean) => void): void {
+  connectionStateCallback = callback;
 }
 
 export function onTelemetry(callback: (data: TelemetryData) => void): void {

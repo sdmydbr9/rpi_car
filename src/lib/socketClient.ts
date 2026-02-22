@@ -6,6 +6,9 @@ let socket: Socket | null = null;
 // Telemetry callback
 let telemetryCallback: ((data: TelemetryData) => void) | null = null;
 
+// Connection state callback - fired when socket connects/disconnects
+let connectionStateCallback: ((isConnected: boolean) => void) | null = null;
+
 export interface TelemetryData {
   rpm: number;
   speed: number;
@@ -18,6 +21,7 @@ export interface TelemetryData {
   right_obstacle: boolean;
   gas_pressed: boolean;
   brake_pressed: boolean;
+  engine_running?: boolean;
   ir_enabled: boolean;
   heartbeat_active?: boolean;
   emergency_brake_active?: boolean;
@@ -91,6 +95,9 @@ export function connectToServer(serverIp: string, port: number = 5000): Promise<
     socket.on('connect', () => {
       console.log(`[Socket] ✅ Successfully connected to RC Car backend at ${url}`);
       console.log(`[Socket] 📡 Socket ID: ${socket?.id}`);
+      if (connectionStateCallback) {
+        connectionStateCallback(true);
+      }
       resolve();
     });
 
@@ -111,6 +118,9 @@ export function connectToServer(serverIp: string, port: number = 5000): Promise<
 
     socket.on('disconnect', () => {
       console.log(`[Socket] ❌ Disconnected from RC Car backend`);
+      if (connectionStateCallback) {
+        connectionStateCallback(false);
+      }
     });
 
     socket.on('heartbeat_ping', () => {
@@ -511,6 +521,14 @@ export function isConnected(): boolean {
 }
 
 /**
+ * Subscribe to connection state changes (connect/disconnect events)
+ * @param callback - Function called with true on connect, false on disconnect
+ */
+export function onConnectionStateChange(callback: (isConnected: boolean) => void): void {
+  connectionStateCallback = callback;
+}
+
+/**
  * Get heartbeat status from server (True = heartbeat active, False = lost)
  */
 export function onHeartbeatStatus(callback: (active: boolean) => void): void {
@@ -541,6 +559,30 @@ export function emitThrottle(pressed: boolean): void {
     socket.emit('throttle', { value: pressed });
   } else {
     console.warn(`[UI Control] ⚠️ Cannot emit throttle - socket not connected`, { socket: !!socket, connected: socket?.connected });
+  }
+}
+
+/**
+ * Emit engine start event
+ */
+export function emitEngineStart(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎮 ENGINE: START`);
+    socket.emit('engine_start', {});
+  } else {
+    console.warn(`[UI Control] ⚠️ Cannot emit engine start - socket not connected`, { socket: !!socket, connected: socket?.connected });
+  }
+}
+
+/**
+ * Emit engine stop event
+ */
+export function emitEngineStop(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎮 ENGINE: STOP`);
+    socket.emit('engine_stop', {});
+  } else {
+    console.warn(`[UI Control] ⚠️ Cannot emit engine stop - socket not connected`, { socket: !!socket, connected: socket?.connected });
   }
 }
 
@@ -776,7 +818,10 @@ export default {
   connectToServer,
   disconnectFromServer,
   isConnected,
+  onConnectionStateChange,
   onTelemetry,
+  emitEngineStart,
+  emitEngineStop,
   emitThrottle,
   emitBrake,
   emitSteering,

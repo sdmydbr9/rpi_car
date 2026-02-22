@@ -245,6 +245,14 @@ export const CockpitController = () => {
     socketClient.onNarrationSpeakingDone(() => setNarrationSpeaking(false));
   }, []);
 
+  // Subscribe to socket connection state changes (handles hotspot/no-internet scenarios)
+  useEffect(() => {
+    socketClient.onConnectionStateChange((connected) => {
+      console.log(`🔌 [CockpitController] Connection state changed: ${connected ? '✅ CONNECTED' : '❌ DISCONNECTED'}`);
+      setIsConnected(connected);
+    });
+  }, []);
+
   useEffect(() => {
     const handleFirstInteraction = () => {
       unlockTTS();
@@ -349,6 +357,9 @@ export const CockpitController = () => {
       if (data.ir_enabled !== undefined) {
         setIsIREnabled(data.ir_enabled);
         localStorage.setItem('irEnabled', String(data.ir_enabled));
+      }
+      if (data.engine_running !== undefined) {
+        setIsEngineRunning(data.engine_running);
       }
       if (data.sonar_enabled !== undefined) {
         setIsSonarEnabled(data.sonar_enabled);
@@ -829,12 +840,14 @@ export const CockpitController = () => {
   const handleEngineStart = useCallback(() => {
     console.log('🔧 Engine START button clicked');
     setIsEngineRunning(true);
+    socketClient.emitEngineStart();
     console.log('✅ Engine started');
   }, []);
 
   const handleEngineStop = useCallback(() => {
     console.log('🔧 Engine STOP button clicked');
     setIsEngineRunning(false);
+    socketClient.emitEngineStop();
     setIsAutoMode(false);
     socketClient.emitAutoAccelDisable();
     socketClient.emitThrottle(false);
