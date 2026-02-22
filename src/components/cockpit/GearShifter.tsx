@@ -1,4 +1,4 @@
-import { OctagonX, Power, PowerOff, Radio } from "lucide-react";
+import { OctagonX, Power, PowerOff, Radio, Volume2 } from "lucide-react";
 
 interface GearShifterProps {
   currentGear: string;
@@ -20,6 +20,7 @@ interface GearShifterProps {
   isEngineRunning?: boolean;
   onEngineStart?: () => void;
   onEngineStop?: () => void;
+  onHorn?: () => void;
   /** Current motor speed (0-100) — used to block forward↔reverse while moving */
   speed?: number;
 }
@@ -46,6 +47,7 @@ export const GearShifter = ({
   isEngineRunning = false,
   onEngineStart,
   onEngineStop,
+  onHorn,
   speed = 0
 }: GearShifterProps) => {
   // Forward↔reverse safety: block direction-reversing gear changes while moving
@@ -374,7 +376,7 @@ export const GearShifter = ({
         </svg>
       </div>
 
-      {/* START and STOP Buttons - Always visible, fixed at bottom */}
+      {/* START, STOP, and HORN Buttons - Always visible, fixed at bottom */}
       <div className="flex gap-1.5 w-full mt-auto pt-1">
         {/* START Button - Round */}
         <button
@@ -388,6 +390,21 @@ export const GearShifter = ({
         >
           <Power className="w-3 h-3 mb-0.5" style={{ color: (isEngineRunning || isAutopilotEnabled) ? 'rgb(107, 114, 128)' : (isEngineRunning ? 'rgb(0, 184, 163)' : 'rgb(107, 114, 128)') }} />
           <span className="text-[6px] sm:text-[7px] leading-tight">START</span>
+        </button>
+
+        {/* HORN Button - Round */}
+        <button
+          onClick={onHorn}
+          disabled={!isEngineRunning}
+          className="flex-1 rounded-full bg-transparent flex flex-col items-center justify-center py-1.5 px-1 transition-all duration-100 touch-feedback font-bold racing-text disabled:opacity-50 disabled:cursor-not-allowed active:scale-95"
+          style={{
+            outline: 'none',
+            border: '2px solid rgb(34, 197, 94)'
+          }}
+          title="Press to honk the horn"
+        >
+          <Volume2 className="w-3 h-3 mb-0.5" style={{ color: !isEngineRunning ? 'rgb(107, 114, 128)' : 'rgb(34, 197, 94)' }} />
+          <span className="text-[6px] sm:text-[7px] leading-tight">HORN</span>
         </button>
 
         {/* STOP Button - Round */}

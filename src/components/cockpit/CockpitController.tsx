@@ -856,6 +856,11 @@ export const CockpitController = () => {
     console.log('✅ Engine stopped');
   }, []);
 
+  const handleHorn = useCallback(() => {
+    console.log('📯 Horn button pressed');
+    socketClient.emitHorn();
+  }, []);
+
   const handleImmersiveViewToggle = useCallback(() => {
     setIsImmersiveView(prev => !prev);
   }, []);
@@ -1073,6 +1078,7 @@ export const CockpitController = () => {
                 isEngineRunning={isEngineRunning}
                 onEngineStart={handleEngineStart}
                 onEngineStop={handleEngineStop}
+                onHorn={handleHorn}
                 speed={controlState.speed}
               />
             )}

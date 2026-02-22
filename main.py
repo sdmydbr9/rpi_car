@@ -268,8 +268,37 @@ check_and_build()
 # 🔊 CAR AUDIO SETUP
 # ==========================================
 CAR_AUDIO_DEVICE = os.environ.get("CAR_AUDIO_DEVICE", "default")
-car_audio = CarAudioManager(SOUNDS_DIR, audio_device=CAR_AUDIO_DEVICE)
-print(f"🔊 [Audio] Initialized (device={CAR_AUDIO_DEVICE}, sounds={SOUNDS_DIR})")
+try:
+    CAR_IDLE_START_DELAY_S = float(os.environ.get("CAR_IDLE_START_DELAY_S", "3.5"))
+except (TypeError, ValueError):
+    CAR_IDLE_START_DELAY_S = 3.5
+try:
+    CAR_IDLE_TRIM_END_S = float(os.environ.get("CAR_IDLE_TRIM_END_S", "2.5"))
+except (TypeError, ValueError):
+    CAR_IDLE_TRIM_END_S = 2.5
+try:
+    CAR_IDLE_CROSSFADE_S = float(os.environ.get("CAR_IDLE_CROSSFADE_S", "0.12"))
+except (TypeError, ValueError):
+    CAR_IDLE_CROSSFADE_S = 0.12
+try:
+    CAR_IDLE_HANDOFF_OVERLAP_S = float(os.environ.get("CAR_IDLE_HANDOFF_OVERLAP_S", "0.18"))
+except (TypeError, ValueError):
+    CAR_IDLE_HANDOFF_OVERLAP_S = 0.18
+car_audio = CarAudioManager(
+    SOUNDS_DIR,
+    audio_device=CAR_AUDIO_DEVICE,
+    idle_start_delay_s=CAR_IDLE_START_DELAY_S,
+    idle_trim_end_s=CAR_IDLE_TRIM_END_S,
+    idle_crossfade_s=CAR_IDLE_CROSSFADE_S,
+    idle_handoff_overlap_s=CAR_IDLE_HANDOFF_OVERLAP_S,
+)
+print(
+    f"🔊 [Audio] Initialized (device={CAR_AUDIO_DEVICE}, "
+    f"idle_lead_in={CAR_IDLE_START_DELAY_S:.2f}s, "
+    f"idle_trim_end={CAR_IDLE_TRIM_END_S:.2f}s, "
+    f"idle_xfade={CAR_IDLE_CROSSFADE_S:.3f}s, "
+    f"idle_handoff_overlap={CAR_IDLE_HANDOFF_OVERLAP_S:.3f}s, sounds={SOUNDS_DIR})"
+)
 
 # ==========================================
 # 📷 CAMERA DETECTION
@@ -2014,6 +2043,14 @@ def on_engine_stop(data=None):
     car_audio.set_engine_running(False)
     print(f"\n⚙️ [UI Control] 🔊 ENGINE: STOPPED")
     emit('engine_response', {'status': 'ok', 'running': False})
+
+
+@socketio.on('horn')
+def on_horn(data=None):
+    """Handle horn button press - stateless, just plays horn sound."""
+    print(f"\n🔔 [UI Control] 📯 HORN: HONK!")
+    car_audio.play_horn()
+    emit('horn_response', {'status': 'ok'})
 
 
 @socketio.on('throttle')

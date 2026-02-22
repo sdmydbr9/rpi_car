@@ -587,6 +587,18 @@ export function emitEngineStop(): void {
 }
 
 /**
+ * Emit horn control (stateless - just plays horn once)
+ */
+export function emitHorn(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎮 HORN: HONK!`);
+    socket.emit('horn', {});
+  } else {
+    console.warn(`[UI Control] ⚠️ Cannot emit horn - socket not connected`, { socket: !!socket, connected: socket?.connected });
+  }
+}
+
+/**
  * Emit brake control
  * @param pressed - Whether brake is pressed
  */
