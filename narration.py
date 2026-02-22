@@ -27,11 +27,15 @@ def _play_kokoro_with_volume(
     voice: str,
     speed: float = 1.0,
     volume: float = 8.0,
+    audio_device: str = 'default',
 ) -> bool:
     """
     Request MP3 from Kokoro API, then decode and play with an aggressive
     loudness chain (compression + normalisation) via sox -> aplay.
     Falls back to kokoro_client.synthesize_and_stream when sox/aplay is unavailable.
+    
+    Args:
+        audio_device: ALSA device name (e.g. 'default', 'hw:1,0') for output
     """
     base_url = f"http://{ip_address}"
     mp3_path = None
@@ -93,7 +97,7 @@ def _play_kokoro_with_volume(
                 stderr=subprocess.PIPE,
             )
             aplay_proc = subprocess.Popen(
-                [aplay_bin, "-D", "default", "-"],
+                [aplay_bin, "-D", audio_device, "-"],
                 stdin=sox_proc.stdout,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
@@ -331,7 +335,8 @@ class NarrationEngine:
         self._on_narration_error = None  # callback(error: str)
         self._on_narration_done = None   # callback() — fired after audio playback finishes
         self._lock = threading.Lock()
-        self._play_local_tts = True  # Always play audio on Pi's headphone jack by default
+        self._play_local_tts = True  # Fallback to espeak-ng when Kokoro is unavailable
+        self._audio_device = 'default'  # ALSA device for both Kokoro and TTS playback
         # Kokoro TTS configuration
         self._kokoro_enabled = False
         self._kokoro_ip: str = ""
@@ -349,11 +354,24 @@ class NarrationEngine:
             self._prompt = prompt
     
     def set_local_tts_enabled(self, enabled: bool):
-        """Enable/disable local TTS playback on Pi's headphone jack."""
+        """Enable/disable local TTS (espeak-ng) fallback when Kokoro is unavailable."""
         with self._lock:
             self._play_local_tts = enabled
         status = "enabled" if enabled else "disabled"
-        print(f"🔊 [Narration] Local TTS playback {status}")
+        print(f"🔊 [Narration] Local TTS fallback {status}")
+    
+    def set_tts_audio_device(self, device: str):
+        """Configure the audio device for all playback (Kokoro and espeak-ng).
+        
+        Args:
+            device: ALSA device name for GPIO or other audio output (e.g., 'default', 'hw:1,0')
+        """
+        with self._lock:
+            self._audio_device = device
+        tts = get_tts_synthesizer()
+        tts.set_audio_device(device)
+        print(f"🔊 [Narration] Audio device configured for all playback: {device}")
+    
     
     def set_kokoro_config(
         self,
@@ -380,7 +398,7 @@ class NarrationEngine:
                 self._kokoro_enabled = False
                 self._kokoro_ip = ""
                 self._kokoro_voice = ""
-                print(f"🎤 [Narration] Kokoro disabled - will fallback to local TTS")
+                print(f"🎤 [Narration] Kokoro disabled")
     
     def set_camera(self, picam2, vision_system):
         """Set camera references for frame capture."""
@@ -445,6 +463,7 @@ class NarrationEngine:
                     kokoro_speed = self._kokoro_speed
                     kokoro_volume = self._kokoro_volume
                     play_local_tts = self._play_local_tts
+                    audio_device = self._audio_device
                 
                 # Capture frame
                 jpeg_bytes = capture_frame_as_jpeg(picam2, vision_system)
@@ -466,10 +485,11 @@ class NarrationEngine:
                     consecutive_errors = 0
                     print(f"⏱️ [Narration] Response in {elapsed:.1f}s")
                     
-                    # Play audio on the car — try Kokoro (with loudness pipeline)
+                    # Play audio on the car via Kokoro (with loudness pipeline)
                     # first, fallback to local TTS if unavailable/failed
                     kokoro_success = False
                     if kokoro_enabled and kokoro_ip and kokoro_voice:
+                        print(f"🎤 [Narration] Kokoro config - enabled={kokoro_enabled}, ip={kokoro_ip}, voice={kokoro_voice}, device={audio_device}")
                         print(f"🎤 [Narration] Playing via Kokoro loudness pipeline at {kokoro_ip}...")
                         kokoro_success = _play_kokoro_with_volume(
                             ip_address=kokoro_ip,
@@ -477,13 +497,17 @@ class NarrationEngine:
                             voice=kokoro_voice,
                             speed=kokoro_speed,
                             volume=kokoro_volume,
+                            audio_device=audio_device,
                         )
+                        print(f"🎤 [Narration] Kokoro playback result: {kokoro_success}")
                         if not kokoro_success:
                             print(f"⚠️  [Narration] Kokoro playback failed, falling back to local TTS")
+                    else:
+                        print(f"⚠️  [Narration] Kokoro not fully configured - enabled={kokoro_enabled}, ip={kokoro_ip}, voice={kokoro_voice}")
 
                     # Fallback to local TTS if Kokoro not enabled or failed
                     if not kokoro_success and play_local_tts:
-                        print(f"🔊 [Narration] Using local TTS...")
+                        print(f"🔊 [Narration] Using local TTS...") 
                         tts = get_tts_synthesizer()
                         tts.speak(text)
 

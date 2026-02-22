@@ -43,13 +43,14 @@ if HAS_PYTTSX3:
 # ==========================================
 
 class LocalTTSynthesizer:
-    """Synthesizes and plays speech locally on the Pi via headphone jack."""
+    """Synthesizes and plays speech locally on the Pi (configurable audio device)."""
     
     def __init__(self):
         self._playing = False
         self._play_thread: threading.Thread | None = None
         self._tts_engine = None
         self._lock = threading.Lock()
+        self._audio_device = 'default'  # ALSA device (e.g., 'default', 'hw:0,0', 'hw:1,0')
         
         # Initialize pyttsx3 if available
         if HAS_PYTTSX3:
@@ -58,10 +59,20 @@ class LocalTTSynthesizer:
                 # Configure for Pi (headphone jack output)
                 self._tts_engine.setProperty('rate', 150)  # Speed (slower for clarity)
                 self._tts_engine.setProperty('volume', 1.0)  # Max volume
-                print("🔊 [TTS] Using pyttsx3 engine")
+                print(f"🔊 [TTS] Using pyttsx3 engine (device: {self._audio_device})")
             except Exception as e:
                 print(f"⚠️  [TTS] pyttsx3 initialization failed: {e}")
                 self._tts_engine = None
+    
+    def set_audio_device(self, device: str):
+        """Configure the ALSA audio device for output.
+        
+        Args:
+            device: ALSA device name (e.g. 'default', 'hw:0,0', 'hw:1,0')
+        """
+        with self._lock:
+            self._audio_device = device
+            print(f"🔊 [TTS] Audio device set to: {device}")
     
     @property
     def is_available(self) -> bool:
@@ -132,7 +143,7 @@ class LocalTTSynthesizer:
             # Play the WAV file via aplay (ALSA player)
             if os.path.exists(temp_wav):
                 result = subprocess.run(
-                    ['aplay', '-D', 'default', temp_wav],
+                    ['aplay', '-D', self._audio_device, temp_wav],
                     capture_output=True,
                     timeout=30
                 )
@@ -155,14 +166,14 @@ class LocalTTSynthesizer:
             # -a = amplitude (0-200), default 100
             # -s = speed (in words per minute, 80-500)
             # -p = pitch (0-99)
-            # -d = audio device (hw:0,0 = card 0 device 0 = headphone jack)
+            # -d = audio device (configured ALSA device)
             result = subprocess.run(
                 [
                     'espeak-ng',
                     '-a', '100',      # amplitude
                     '-s', '120',      # speed (words per minute)
                     '-p', '50',       # pitch
-                    '-d', 'hw:0,0',   # output to card 0 device 0 (headphone jack)
+                    '-d', self._audio_device,   # output to configured device
                     '-m',             # no markup interpretation
                     text
                 ],
@@ -170,7 +181,7 @@ class LocalTTSynthesizer:
                 timeout=30
             )
             if result.returncode == 0:
-                print(f"🔊 [TTS] Played via espeak-ng to hw:0,0 (headphone jack)")
+                print(f"🔊 [TTS] Played via espeak-ng to {self._audio_device}")
             else:
                 stderr = result.stderr.decode()
                 print(f"⚠️  [TTS] espeak-ng failed: {stderr}")

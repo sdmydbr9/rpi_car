@@ -2468,7 +2468,7 @@ def on_narration_config_update(data):
 def on_narration_toggle(data):
     """Toggle AI narration on/off."""
     desired = data.get('enabled', not car_state['narration_enabled'])
-    print(f"\n\U0001f399\ufe0f [Narration] Toggle: {desired}")
+    print(f"\n🎙️ [Narration] Toggle: {desired}")
     
     if desired:
         # Check prerequisites
@@ -2489,6 +2489,15 @@ def on_narration_toggle(data):
             interval=_narration_config.get('interval', 30),
         )
         narration_engine.set_camera(picam2, vision_system)
+        
+        # Apply Kokoro TTS config if available
+        if _narration_config.get('kokoro_enabled') and _narration_config.get('kokoro_ip') and _narration_config.get('kokoro_voice'):
+            narration_engine.set_kokoro_config(
+                _narration_config.get('kokoro_ip'),
+                _narration_config.get('kokoro_voice')
+            )
+            print(f"🎤 [Narration] Kokoro enabled for this session: {_narration_config.get('kokoro_ip')} / {_narration_config.get('kokoro_voice')}")
+        
         narration_engine.start()
         car_state['narration_enabled'] = True
         _narration_config['enabled'] = True
@@ -2577,7 +2586,7 @@ def on_kokoro_validate_api(data):
 @socketio.on('kokoro_config_update')
 def on_kokoro_config_update(data):
     """Update Kokoro TTS configuration (enable/disable, IP, voice)."""
-    print(f"\n\U0001f3a4 [Kokoro] Config update: {data}")
+    print(f"\n🎤 [Kokoro] Config update: {data}")
     
     if 'kokoro_enabled' in data:
         _narration_config['kokoro_enabled'] = data['kokoro_enabled']
@@ -2593,15 +2602,16 @@ def on_kokoro_config_update(data):
     
     _save_narration_config(_narration_config)
     
-    # Apply configuration to narration engine if narration is running
-    if car_state.get('narration_enabled'):
-        if _narration_config.get('kokoro_enabled'):
-            narration_engine.set_kokoro_config(
-                _narration_config.get('kokoro_ip'),
-                _narration_config.get('kokoro_voice')
-            )
-        else:
-            narration_engine.set_kokoro_config(None, None)
+    # Always apply configuration to narration engine (whether it's running or not)
+    if _narration_config.get('kokoro_enabled') and _narration_config.get('kokoro_ip') and _narration_config.get('kokoro_voice'):
+        narration_engine.set_kokoro_config(
+            _narration_config.get('kokoro_ip'),
+            _narration_config.get('kokoro_voice')
+        )
+        print(f"✅ [Kokoro] Configuration applied to narration engine: {_narration_config.get('kokoro_ip')} / {_narration_config.get('kokoro_voice')}")
+    else:
+        narration_engine.set_kokoro_config(None, None)
+        print(f"⚠️  [Kokoro] Kokoro disabled or incomplete configuration")
     
     emit('kokoro_config_response', {'status': 'ok'})
 
