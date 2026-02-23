@@ -26,6 +26,29 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
 # ==========================================
+# 🌐 NETWORK DETECTION (Shared with narration.py)
+# ==========================================
+
+def is_hotspot_mode() -> bool:
+    """Check if device is in hotspot mode (wlan0 IP in 192.168.4.x or 10.42.0.x)."""
+    try:
+        result = subprocess.run(['ip', 'addr', 'show', 'wlan0'], 
+                              capture_output=True, text=True, timeout=2)
+        for line in result.stdout.split('\n'):
+            if 'inet ' in line and 'scope' in line:
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    ip_with_mask = parts[1]
+                    ip = ip_with_mask.split('/')[0]
+                    if ip.startswith('192.168.4.') or ip.startswith('10.42.0.'):
+                        return True
+                    return False
+        return False
+    except Exception as e:
+        print(f"[TARS] Hotspot check failed: {e}")
+        return False
+
+# ==========================================
 # 🔐 LOAD CREDENTIALS (from parameters or file)
 # ==========================================
 
@@ -165,7 +188,15 @@ SYSTEM_PROMPT = (
 
 
 def has_internet_access(timeout: float = 2.0) -> bool:
-    """Quick WAN reachability probe used to pick cloud vs local startup stack."""
+    """
+    Quick WAN reachability probe used to pick cloud vs local startup stack.
+    Also checks hotspot mode (no internet indication).
+    """
+    # Quick check: if in hotspot mode, definitely no internet
+    if is_hotspot_mode():
+        return False
+    
+    # Otherwise, try DNS probe
     for host, port in (("1.1.1.1", 53), ("8.8.8.8", 53)):
         try:
             with socket.create_connection((host, port), timeout=timeout):
@@ -394,11 +425,25 @@ def expressive_text_from_local_llm(telemetry_summary: str) -> str:
     }
 
     try:
+        started_at = time.monotonic()
         print("[TARS] Processing telemetry through local llama.cpp...", end=" ", flush=True)
-        response = requests.post(LLM_API_URL, json=payload, timeout=20)
-        response.raise_for_status()
+        # Intentionally no request timeout: local model generation can be slow on Pi hardware.
+        response = requests.post(LLM_API_URL, json=payload)
+        elapsed = time.monotonic() - started_at
 
-        data = response.json()
+        if response.status_code != 200:
+            body_preview = (response.text or "").strip().replace("\n", " ")[:200]
+            print(f"FAILED: HTTP {response.status_code} after {elapsed:.1f}s")
+            if body_preview:
+                print(f"[TARS] Local LLM error body: {body_preview}")
+            return None
+
+        try:
+            data = response.json()
+        except ValueError as json_err:
+            print(f"FAILED: invalid JSON after {elapsed:.1f}s ({json_err})")
+            return None
+
         choices = data.get("choices") or []
         if not choices:
             print("FAILED: empty choices")
@@ -410,7 +455,7 @@ def expressive_text_from_local_llm(telemetry_summary: str) -> str:
             print("FAILED: empty content")
             return None
 
-        print("DONE")
+        print(f"DONE ({elapsed:.1f}s)")
         return result
     except Exception as e:
         print(f"FAILED: {e}")
@@ -597,7 +642,8 @@ def speak_with_mimic3(
 
     try:
         print("[TARS] Synthesizing local Mimic3 response...", end=" ", flush=True)
-        response = requests.get(TTS_API_URL, params={"text": text}, timeout=30)
+        # Intentionally no request timeout: local Mimic3 is the only startup voice path.
+        response = requests.get(TTS_API_URL, params={"text": text})
         response.raise_for_status()
 
         audio_bytes = response.content
@@ -673,49 +719,19 @@ def fallback_speak_status(
         else:
             text = "Warning. Critical systems are offline. I calculate a ninety-nine percent probability of failure."
 
-        print(f"[TARS] Vocalizing (Fallback, device={audio_device}): {text}")
-
-        playback_started = False
-        try:
-            if callable(on_playback_start):
-                try:
-                    on_playback_start()
-                    playback_started = True
-                except Exception as cb_err:
-                    print(f"[TARS] Playback start callback failed: {cb_err}")
-
-            primary_cmd = ["espeak-ng", "-ven-us+m7", "-s140"]
-            if audio_device:
-                primary_cmd.extend(["-d", audio_device])
-            primary_cmd.append(text)
-
-            primary = subprocess.run(primary_cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-            if primary.returncode == 0:
+        print(f"[TARS] Vocalizing (Mimic3 fallback, device={audio_device}): {text}")
+        for attempt in range(1, 4):
+            if speak_with_mimic3(
+                text,
+                audio_device=audio_device,
+                on_playback_start=on_playback_start,
+                on_playback_end=on_playback_end,
+            ):
                 return True
-
-            primary_err = primary.stderr.decode(errors="ignore").strip()
-            print(f"[TARS] Fallback device playback failed: {primary_err}")
-
-            # Final fallback: system default device
-            fallback = subprocess.run(
-                ["espeak-ng", "-ven-us+m7", "-s140", text],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-            if fallback.returncode == 0:
-                print("[TARS] Fallback played on system default audio device")
-                return True
-
-            fallback_err = fallback.stderr.decode(errors="ignore").strip()
-            print(f"[TARS] Fallback default playback failed: {fallback_err}")
-            return False
-        finally:
-            if playback_started and callable(on_playback_end):
-                try:
-                    on_playback_end()
-                except Exception as cb_err:
-                    print(f"[TARS] Playback end callback failed: {cb_err}")
+            print(f"[TARS] Mimic3 fallback attempt {attempt}/3 failed")
+            time.sleep(0.5)
+        print("[TARS] Mimic3 fallback exhausted all retries")
+        return False
 
     except Exception as e:
         print(f"[TARS] Vocalizer completely offline: {e}")
@@ -851,39 +867,33 @@ def main(
     summary = generate_status_summary(status)
 
     internet_available = has_internet_access()
+    hotspot_mode = is_hotspot_mode()
+    
     if internet_available:
         print("[TARS] Internet uplink: ONLINE (cloud cognitive stack enabled)")
     else:
-        print("[TARS] Internet uplink: OFFLINE (switching to local llama.cpp + Mimic3)")
+        if hotspot_mode:
+            print("[TARS] Hotspot mode detected - OFFLINE (local llama.cpp + Mimic3 fallback)")
+        else:
+            print("[TARS] Internet uplink: OFFLINE (switching to local llama.cpp + Mimic3)")
 
     expressive_text = None
     speech_played = False
 
-    if internet_available:
-        if GEMINI_AVAILABLE:
-            expressive_text = expressive_text_from_gemini(summary)
-            if expressive_text:
-                print(f"\n[TARS VOCAL OUTPUT] > {expressive_text}\n")
+    if internet_available and GEMINI_AVAILABLE:
+        expressive_text = expressive_text_from_gemini(summary)
 
-        if expressive_text and ELEVENLABS_AVAILABLE:
-            speech_played = speak_with_eleven(
-                expressive_text,
-                voice_id=voice_id,
-                api_key=ELEVEN_API_KEY,
-                audio_device=audio_device,
-                on_playback_start=on_speech_start,
-                on_playback_end=on_speech_end,
-            )
-    else:
+    if not expressive_text:
         expressive_text = expressive_text_from_local_llm(summary)
-        if expressive_text:
-            print(f"\n[TARS VOCAL OUTPUT] > {expressive_text}\n")
-            speech_played = speak_with_mimic3(
-                expressive_text,
-                audio_device=audio_device,
-                on_playback_start=on_speech_start,
-                on_playback_end=on_speech_end,
-            )
+
+    if expressive_text:
+        print(f"\n[TARS VOCAL OUTPUT] > {expressive_text}\n")
+        speech_played = speak_with_mimic3(
+            expressive_text,
+            audio_device=audio_device,
+            on_playback_start=on_speech_start,
+            on_playback_end=on_speech_end,
+        )
 
     if not speech_played:
         fallback_speak_status(

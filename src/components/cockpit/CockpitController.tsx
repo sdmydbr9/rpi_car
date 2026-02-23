@@ -32,6 +32,15 @@ interface ControlState {
   batteryVoltage: number; // Battery voltage in V
 }
 
+type NetworkMode = "wifi" | "hotspot";
+
+interface NetworkModeSwitchResponse {
+  status: string;
+  mode: NetworkMode;
+  message?: string;
+  redirect_url?: string;
+}
+
 // Helper function to convert old sensor format to new format
 const convertSensorStatus = (
   oldStatus: Record<string, string>
@@ -76,6 +85,13 @@ export const CockpitController = () => {
     batteryVoltage: 0,
   });
   const [isConnected, setIsConnected] = useState(false);
+  const defaultWifiLink = "http://raspberrypi.local:5000";
+  const [networkMode, setNetworkMode] = useState<NetworkMode>("wifi");
+  const [networkSwitching, setNetworkSwitching] = useState(false);
+  const [networkLinks, setNetworkLinks] = useState<{ wifi: string; hotspot: string }>({
+    wifi: defaultWifiLink,
+    hotspot: "http://192.168.4.1:5000",
+  });
   const [serverIp, setServerIp] = useState("");
   const [isEmergencyStop, setIsEmergencyStop] = useState(false);
   const [isAutoMode, setIsAutoMode] = useState(false);
@@ -253,6 +269,43 @@ export const CockpitController = () => {
     });
   }, []);
 
+  const refreshNetworkMode = useCallback(async () => {
+    try {
+      const response = await fetch('/api/server-ip', {
+        signal: AbortSignal.timeout(5000),
+        cache: 'no-store',
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const data = await response.json() as { ip?: string; transport?: string; hotspot_active?: boolean };
+      const resolvedMode: NetworkMode = (data.transport === 'hotspot' || data.hotspot_active) ? 'hotspot' : 'wifi';
+      const resolvedIp = typeof data.ip === 'string' ? data.ip.trim() : '';
+
+      setNetworkMode(resolvedMode);
+      setNetworkLinks(prev => {
+        const next = { ...prev };
+        if (resolvedMode === 'hotspot' && resolvedIp) {
+          next.hotspot = `http://${resolvedIp}:5000`;
+        }
+        if (resolvedMode === 'wifi' && resolvedIp && !resolvedIp.startsWith('127.')) {
+          next.wifi = `http://${resolvedIp}:5000`;
+        }
+        return next;
+      });
+    } catch (error) {
+      console.warn('⚠️ [Network] Could not refresh mode from /api/server-ip:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshNetworkMode();
+    const intervalId = window.setInterval(refreshNetworkMode, 15000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [refreshNetworkMode]);
+
   useEffect(() => {
     const handleFirstInteraction = () => {
       unlockTTS();
@@ -267,13 +320,13 @@ export const CockpitController = () => {
     };
   }, [unlockTTS]);
 
-  // Smart auto-connect: try localhost first, then fallback to server IP
+  // Smart auto-connect: try localhost first, then fallback to server IP, then hotspot IP
   useEffect(() => {
     if (!autoConnectAttemptedRef.current) {
       autoConnectAttemptedRef.current = true;
       const smartAutoConnect = async () => {
-        const tryConnection = async (ip: string) => {
-          console.log(`🔌 [Startup] Attempting connection to ${ip}:5000...`);
+        const tryConnection = async (ip: string, reason: string = '') => {
+          console.log(`🔌 [Startup] Attempting connection to ${ip}:5000... ${reason}`);
           try {
             await socketClient.connectToServer(ip, 5000);
             setServerIp(ip);
@@ -288,24 +341,35 @@ export const CockpitController = () => {
         };
 
         // Try localhost first (for local development)
-        const localhostConnected = await tryConnection('localhost');
+        const localhostConnected = await tryConnection('localhost', '(localhost development)');
         
         if (!localhostConnected) {
           // If localhost fails, fetch the server's network IP
-          console.log('🔍 [Startup] Localhost failed, fetching server IP...');
+          console.log('🔍 [Startup] Localhost failed, fetching server IP from /api/server-ip...');
           try {
             // Try to get server IP from current origin
             const protocol = window.location.protocol;
             const hostname = window.location.hostname;
             const port = window.location.port;
             const apiUrl = `${protocol}//${hostname}${port ? ':' + port : ''}/api/server-ip`;
-            const response = await fetch(apiUrl);
+            const response = await fetch(apiUrl, { signal: AbortSignal.timeout(5000) });
             const data = await response.json();
-            console.log(`📡 [Startup] Server IP from API: ${data.ip}`);
-            await tryConnection(data.ip);
+            console.log(`📡 [Startup] Server IP from API: ${data.ip} (hotspot: ${data.hotspot_active})`);
+            const apiConnected = await tryConnection(data.ip, `(from API - ${data.transport})`);
+            
+            if (!apiConnected && data.hotspot_active) {
+              // If API IP failed but we're in hotspot mode, we're already on the right network
+              console.log('🔥 [Startup] In hotspot mode but API IP failed - this should not happen');
+              return;
+            }
+            if (apiConnected) return;
           } catch (error) {
-            console.error('❌ [Startup] Could not fetch server IP:', error);
+            console.warn('⚠️ [Startup] Could not fetch server IP from API:', error);
           }
+
+          // Last resort: try standard hotspot IP (192.168.4.1)
+          console.log('🔍 [Startup] Trying standard hotspot IP...');
+          await tryConnection('192.168.4.1', '(standard hotspot IP)');
         }
       };
       smartAutoConnect();
@@ -614,9 +678,13 @@ export const CockpitController = () => {
       console.warn('⚠️ Engine not running, cannot throttle');
       return;
     }
+    if (!isConnected) {
+      console.warn('⚠️ Throttle failed - socket not connected');
+      return;
+    }
     setControlState(prev => ({ ...prev, throttle: active }));
     socketClient.emitThrottle(active);
-  }, [isEngineRunning]);
+  }, [isEngineRunning, isConnected]);
 
   const handleBrakeChange = useCallback((active: boolean) => {
     console.log('🎮 Brake changed:', active, { isEngineRunning, isConnected });
@@ -624,9 +692,13 @@ export const CockpitController = () => {
       console.warn('⚠️ Engine not running, cannot brake');
       return;
     }
+    if (!isConnected) {
+      console.warn('⚠️ Brake failed - socket not connected');
+      return;
+    }
     setControlState(prev => ({ ...prev, brake: active }));
     socketClient.emitBrake(active);
-  }, [isEngineRunning]);
+  }, [isEngineRunning, isConnected]);
 
   const handleGearChange = useCallback((gear: string) => {
     console.log('🎮 Gear changed:', gear, { isEngineRunning, isConnected });
@@ -634,30 +706,53 @@ export const CockpitController = () => {
       console.warn('⚠️ Engine not running, cannot change gear');
       return;
     }
+    if (!isConnected) {
+      console.warn('⚠️ Gear change failed - socket not connected');
+      return;
+    }
     setControlState(prev => ({ ...prev, gear }));
     pendingGearRef.current = { gear, ts: Date.now() };
     socketClient.emitGearChange(gear);
-  }, [isEngineRunning]);
+  }, [isEngineRunning, isConnected]);
 
   const handleLaunch = useCallback(() => {
     if (!isEngineRunning || isAutoMode) return;
+    if (!isConnected) {
+      console.warn('⚠️ Launch failed - socket not connected');
+      return;
+    }
     // Launch: auto-accelerate in current gear
     setIsAutoMode(true);
     socketClient.emitAutoAccelEnable();
-  }, [isEngineRunning, isAutoMode]);
+  }, [isEngineRunning, isAutoMode, isConnected]);
 
   const handleDonut = useCallback(() => {
     if (!isEngineRunning || isAutoMode) return;
+    if (!isConnected) {
+      console.warn('⚠️ Donut failed - socket not connected');
+      return;
+    }
     // Donut: full throttle + steering
     setIsAutoMode(true);
     socketClient.emitThrottle(true);
     socketClient.emitSteering(60);
     socketClient.emitAutoAccelEnable();
-  }, [isEngineRunning, isAutoMode]);
+  }, [isEngineRunning, isAutoMode, isConnected]);
 
   const handleEmergencyStop = useCallback(() => {
     const newEmergencyStopState = !isEmergencyStop;
     console.log('🏁 Emergency stop toggled:', newEmergencyStopState);
+    
+    // Check connection for safety-critical operation
+    if (!isConnected) {
+      console.warn('⚠️ Emergency stop failed - socket not connected');
+      toast.error('Cannot activate emergency stop', {
+        description: 'Backend connection lost. Please check your WiFi connection and ensure the RPi is reachable.',
+        duration: 4000,
+      });
+      return;
+    }
+    
     setIsEmergencyStop(newEmergencyStopState);
     setEBrakeActive(newEmergencyStopState);
     
@@ -675,12 +770,23 @@ export const CockpitController = () => {
       console.log('🏁 Emergency stop RELEASED');
       socketClient.emitEmergencyStopRelease();
     }
-  }, [isEmergencyStop]);
+  }, [isEmergencyStop, isConnected]);
 
   // Autopilot-specific e-brake: stops the car but stays in autopilot mode
   const handleAutopilotEBrake = useCallback(() => {
     const newEBrakeState = !eBrakeActive;
     console.log('🛑 Autopilot E-brake toggled:', newEBrakeState);
+    
+    // Check connection for safety-critical operation
+    if (!isConnected) {
+      console.warn('⚠️ Autopilot e-brake toggle failed - socket not connected');
+      toast.error('Cannot activate e-brake', {
+        description: 'Backend connection lost. Please check your WiFi connection and ensure the RPi is reachable.',
+        duration: 4000,
+      });
+      return;
+    }
+    
     setEBrakeActive(newEBrakeState);
     setIsEmergencyStop(newEBrakeState);
     
@@ -694,11 +800,22 @@ export const CockpitController = () => {
       console.log('🛑 Autopilot E-brake RELEASED - resuming autopilot');
       socketClient.emitEmergencyStopRelease();
     }
-  }, [eBrakeActive]);
+  }, [eBrakeActive, isConnected]);
 
   const handleEBrakeToggle = useCallback(() => {
     const newEBrakeState = !eBrakeActive;
     console.log('🛑 E-brake toggled:', newEBrakeState);
+    
+    // Check connection for safety-critical operation
+    if (!isConnected) {
+      console.warn('⚠️ E-brake toggle failed - socket not connected');
+      toast.error('Cannot activate e-brake', {
+        description: 'Backend connection lost. Please check your WiFi connection and ensure the RPi is reachable.',
+        duration: 4000,
+      });
+      return;
+    }
+    
     setEBrakeActive(newEBrakeState);
     
     if (newEBrakeState) {
@@ -718,17 +835,28 @@ export const CockpitController = () => {
       setIsEmergencyStop(false);
       socketClient.emitEmergencyStopRelease();
     }
-  }, [eBrakeActive, isAutopilotRunning]);
+  }, [eBrakeActive, isAutopilotRunning, isConnected]);
 
   const handleAutoMode = useCallback(() => {
     if (isEmergencyStop) return; // Cannot enable auto mode during emergency stop
+    
+    // Check connection before toggling auto mode
+    if (!isConnected) {
+      console.warn('⚠️ Auto mode toggle failed - socket not connected');
+      toast.error('Cannot toggle auto mode', {
+        description: 'Backend connection lost. Please check your WiFi connection and ensure the RPi is reachable.',
+        duration: 4000,
+      });
+      return;
+    }
+    
     setIsAutoMode(prev => !prev);
     if (!isAutoMode) {
       socketClient.emitAutoAccelEnable();
     } else {
       socketClient.emitAutoAccelDisable();
     }
-  }, [isEmergencyStop, isAutoMode]);
+  }, [isEmergencyStop, isAutoMode, isConnected]);
 
   const handleIRToggle = useCallback(() => {
     console.log('🎮 IR sensor toggle');
@@ -802,10 +930,14 @@ export const CockpitController = () => {
     const entering = !isAutopilotEnabled;
     if (!entering && isAutopilotRunning) {
       // Exiting autopilot view while running → stop the autopilot first
+      if (!isConnected) {
+        console.warn('⚠️ Autopilot disable failed - socket not connected');
+        return;
+      }
       socketClient.emitAutopilotDisable();
     }
     setIsAutopilotEnabled(entering);
-  }, [eBrakeActive, isEmergencyStop, isAutopilotEnabled, isAutopilotRunning]);
+  }, [eBrakeActive, isEmergencyStop, isAutopilotEnabled, isAutopilotRunning, isConnected]);
 
   // Actually start / stop the autopilot FSM on the server
   const handleAutopilotStartStop = useCallback(() => {
@@ -814,6 +946,16 @@ export const CockpitController = () => {
       console.log('🚫 Cannot start autopilot while e-brake/emergency stop is active');
       return;
     }
+    
+    if (!isConnected) {
+      console.warn('⚠️ Autopilot control failed - socket not connected');
+      toast.error('Cannot control autopilot', {
+        description: 'Backend connection lost. Please check your WiFi connection and ensure the RPi is reachable.',
+        duration: 4000,
+      });
+      return;
+    }
+    
     if (isAutopilotRunning) {
       socketClient.emitAutopilotDisable();
     } else {
@@ -835,17 +977,39 @@ export const CockpitController = () => {
       }
       socketClient.emitAutopilotEnable();
     }
-  }, [eBrakeActive, isEmergencyStop, isAutopilotRunning, isSonarEnabled, isIREnabled, isMPU6050Enabled]);
+  }, [eBrakeActive, isEmergencyStop, isAutopilotRunning, isSonarEnabled, isIREnabled, isMPU6050Enabled, isConnected]);
 
   const handleEngineStart = useCallback(() => {
     console.log('🔧 Engine START button clicked');
+    
+    // Check connection status before starting engine
+    if (!isConnected) {
+      console.warn('⚠️ Engine start failed - socket not connected');
+      toast.error('Cannot start engine', {
+        description: 'Backend connection lost. Please check your WiFi connection and ensure the RPi is reachable.',
+        duration: 4000,
+      });
+      return;
+    }
+    
     setIsEngineRunning(true);
     socketClient.emitEngineStart();
     console.log('✅ Engine started');
-  }, []);
+  }, [isConnected]);
 
   const handleEngineStop = useCallback(() => {
     console.log('🔧 Engine STOP button clicked');
+    
+    // Check connection status before stopping engine
+    if (!isConnected) {
+      console.warn('⚠️ Engine stop failed - socket not connected');
+      toast.error('Cannot stop engine', {
+        description: 'Backend connection lost. Please check your WiFi connection and ensure the RPi is reachable.',
+        duration: 4000,
+      });
+      return;
+    }
+    
     setIsEngineRunning(false);
     socketClient.emitEngineStop();
     setIsAutoMode(false);
@@ -854,7 +1018,7 @@ export const CockpitController = () => {
     socketClient.emitBrake(true);
     setControlState(prev => ({ ...prev, throttle: false, brake: false, speed: 0, speedMpm: 0, temperature: 0, cpuClock: 0, gpuClock: 0, rpm: 0, batteryVoltage: 0 }));
     console.log('✅ Engine stopped');
-  }, []);
+  }, [isConnected]);
 
   const handleHorn = useCallback(() => {
     console.log('📯 Horn button pressed');
@@ -878,6 +1042,58 @@ export const CockpitController = () => {
       setNarrationLastText('');
     }
   }, []);
+
+  const handleNetworkModeSwitch = useCallback(async (targetMode: NetworkMode) => {
+    if (networkSwitching || targetMode === networkMode) {
+      return;
+    }
+
+    const fallbackRedirectUrl = targetMode === 'hotspot' ? networkLinks.hotspot : networkLinks.wifi;
+    setNetworkSwitching(true);
+
+    try {
+      const response = await fetch('/system/switch_network_mode', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ mode: targetMode }),
+      });
+
+      let data: Partial<NetworkModeSwitchResponse> = {};
+      try {
+        data = await response.json() as NetworkModeSwitchResponse;
+      } catch {
+        data = {};
+      }
+
+      if (!response.ok || data.status !== 'ok') {
+        throw new Error(data.message || `Request failed with status ${response.status}`);
+      }
+
+      const redirectUrl =
+        typeof data.redirect_url === 'string' && data.redirect_url.length > 0
+          ? data.redirect_url
+          : fallbackRedirectUrl;
+
+      toast.success(`Switching to ${targetMode === 'hotspot' ? 'Hotspot' : 'WiFi'}`, {
+        description: `Connection will restart. Redirecting to ${redirectUrl}`,
+        duration: 6000,
+      });
+
+      window.setTimeout(() => {
+        window.location.href = redirectUrl;
+      }, 1800);
+    } catch (error) {
+      console.error('❌ [Network] Switch mode failed:', error);
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      toast.error(`Could not switch to ${targetMode === 'hotspot' ? 'Hotspot' : 'WiFi'}`, {
+        description: message,
+        duration: 5000,
+      });
+      setNetworkSwitching(false);
+    }
+  }, [networkLinks.hotspot, networkLinks.wifi, networkMode, networkSwitching]);
 
   // Use auto-acceleration hook for client-side auto-throttle
   useAutoAcceleration({
@@ -965,6 +1181,10 @@ export const CockpitController = () => {
         <Header 
           driverName={driverName || "MACHINE"}
           isConnected={isConnected}
+          networkMode={networkMode}
+          networkSwitching={networkSwitching}
+          networkLinks={networkLinks}
+          onNetworkModeSwitch={handleNetworkModeSwitch}
           tuning={tuning}
           onTuningChange={setTuning}
           backendDefaults={backendDefaults}

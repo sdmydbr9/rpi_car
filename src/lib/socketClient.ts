@@ -88,11 +88,28 @@ export function connectToServer(serverIp: string, port: number = 5000): Promise<
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
-      reconnectionAttempts: 5,
+      reconnectionAttempts: 10,  // Increased for hotspot stability
       transports: ['websocket', 'polling'],
+      // Hotspot mode configuration
+      connectTimeout: 10000,  // 10 second timeout for initial connection
+      // Polling transport settings for hotspot mode reliability
+      upgrade: true,
+      forceNew: false,
+      // Disable secure WebSocket requirement for local hotspot
+      secure: false,
     });
 
+    // Timeout to reject if connection takes too long
+    const connectionTimeout = setTimeout(() => {
+      if (!socket?.connected) {
+        console.error(`[Socket] ❌ Connection timeout to ${url}`);
+        socket?.close();
+        reject(new Error(`Connection timeout to ${url}`));
+      }
+    }, 15000);  // 15 second overall timeout
+
     socket.on('connect', () => {
+      clearTimeout(connectionTimeout);
       console.log(`[Socket] ✅ Successfully connected to RC Car backend at ${url}`);
       console.log(`[Socket] 📡 Socket ID: ${socket?.id}`);
       if (connectionStateCallback) {
@@ -112,8 +129,13 @@ export function connectToServer(serverIp: string, port: number = 5000): Promise<
     });
 
     socket.on('connect_error', (error) => {
+      clearTimeout(connectionTimeout);
       console.error(`[Socket] ❌ Connection error to ${url}:`, error);
       reject(error);
+    });
+
+    socket.on('error', (error) => {
+      console.error(`[Socket] ❌ Socket error:`, error);
     });
 
     socket.on('disconnect', () => {

@@ -31,6 +31,7 @@ from vision import VisionSystem
 from narration import NarrationEngine, validate_key as narration_validate_key, list_multimodal_models
 from kokoro_client import get_kokoro_client
 from audio_manager import CarAudioManager
+from network_core import PiCarNetworkManager
 from pico_sensor_reader import (
     init_pico_reader, get_gyro_z as pico_get_gyro_z,
     get_accel_xyz as pico_get_accel_xyz,
@@ -544,6 +545,9 @@ if _narration_config.get('kokoro_enabled') and _narration_config.get('kokoro_ip'
         _narration_config['kokoro_voice']
     )
     print(f"\U0001f3a4 [Kokoro] Restored persisted config: {_narration_config['kokoro_ip']} / {_narration_config['kokoro_voice']}")
+
+# Configure local LLM fallback for hotspot mode
+narration_engine.set_local_llm_config()
 
 def _on_narration_text(text: str):
     """Callback when narration text is received from AI."""
@@ -1721,11 +1725,73 @@ app = Flask(__name__,
             static_url_path='/assets',
             template_folder=DIST_DIR)
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, 
+                   cors_allowed_origins="*",
+                   async_mode='threading',
+                   ping_timeout=60,
+                   ping_interval=25,
+                   max_http_buffer_size=1e8)
+
+DEFAULT_HOTSPOT_IP = os.getenv("RC_HOTSPOT_IP", "192.168.4.1")
+DEFAULT_WIFI_REDIRECT_HOST = os.getenv("RC_WIFI_REDIRECT_HOST", "raspberrypi.local")
+network_manager = PiCarNetworkManager()
+
+# Helper function to check hotspot status
+def get_hotspot_status():
+    """Check if hotspot is active by checking wlan0 IP address"""
+    try:
+        # Get the IP address of wlan0
+        result = subprocess.run(['ip', 'addr', 'show', 'wlan0'], 
+                              capture_output=True, text=True, timeout=2)
+        # Check if wlan0 has an IP in the 192.168.4.x range (standard hotspot range)
+        # or 10.42.0.x range (alternative hotspot range)
+        for line in result.stdout.split('\n'):
+            if 'inet ' in line and 'scope' in line:
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    ip_with_mask = parts[1]
+                    ip = ip_with_mask.split('/')[0]
+                    # Check if it's in hotspot range (192.168.4.x or 10.42.0.x)
+                    if ip.startswith('192.168.4.') or ip.startswith('10.42.0.'):
+                        return True
+                    # If it has any IP, it's not in hotspot mode (it's connected to WiFi)
+                    return False
+        # No IP found on wlan0, so not in hotspot mode
+        return False
+    except Exception as e:
+        print(f"⚠️ Hotspot check failed: {e}")
+        return False
 
 # Helper function to get local network IP
+def get_wlan0_ip():
+    """Get the IP address of wlan0 interface (used for hotspot)"""
+    try:
+        result = subprocess.run(['ip', 'addr', 'show', 'wlan0'], 
+                              capture_output=True, text=True, timeout=2)
+        # Parse output like: inet 192.168.4.1/24 brd 192.168.4.255 scope global wlan0
+        for line in result.stdout.split('\n'):
+            if 'inet ' in line and 'scope' in line:
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    ip_with_mask = parts[1]
+                    ip = ip_with_mask.split('/')[0]
+                    return ip
+        return None
+    except Exception:
+        return None
+
 def get_local_ip():
     """Get the Raspberry Pi's local network IP address"""
+    # First, check if hotspot is active and get its IP
+    if get_hotspot_status():
+        print("📡 [Network] Hotspot mode detected")
+        wlan0_ip = get_wlan0_ip()
+        if wlan0_ip:
+            print(f"📡 [Network] Using hotspot IP from wlan0: {wlan0_ip}")
+            return wlan0_ip
+        # Hotspot active but couldn't get wlan0 IP, fallback below
+        print("⚠️  [Network] Hotspot active but couldn't determine wlan0 IP, falling back...")
+    
     try:
         # Create a socket to determine which IP is used to reach external networks
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1736,8 +1802,11 @@ def get_local_ip():
     except Exception:
         # Fallback: try to get hostname IP
         try:
-            return socket.gethostbyname(socket.gethostname())
+            hostname_ip = socket.gethostbyname(socket.gethostname())
+            print(f"📡 [Network] Using hostname IP: {hostname_ip}")
+            return hostname_ip
         except Exception:
+            print("⚠️  [Network] Could not determine IP, using loopback")
             return "127.0.0.1"
 
 @app.route("/")
@@ -1756,7 +1825,14 @@ def index():
 @app.route("/api/server-ip")
 def api_server_ip():
     """Return the server's network IP address for remote connections"""
-    return jsonify({"ip": get_local_ip(), "port": 5000})
+    ip = get_local_ip()
+    hotspot_active = get_hotspot_status()
+    return jsonify({
+        "ip": ip, 
+        "port": 5000,
+        "hotspot_active": hotspot_active,
+        "transport": "hotspot" if hotspot_active else "wifi"
+    })
 
 # Catch-all for React files (vite.svg, etc.)
 @app.route('/<path:filename>')
@@ -1958,17 +2034,6 @@ def get_wifi_status():
     except Exception as e:
         print(f"⚠️ WiFi check failed: {e}")
         return False, 'Unknown'
-
-def get_hotspot_status():
-    """Check if hotspot is active"""
-    try:
-        result = subprocess.run(['ps', 'aux'], capture_output=True, text=True, timeout=2)
-        # Check for dnsmasq or hostapd which indicate hotspot is running
-        is_active = 'dnsmasq' in result.stdout or 'hostapd' in result.stdout
-        return is_active
-    except Exception as e:
-        print(f"⚠️ Hotspot check failed: {e}")
-        return False
 
 def get_cpu_temperature():
     """Get CPU temperature in Celsius"""
@@ -3420,6 +3485,65 @@ def system_reboot():
     except Exception as e:
         print(f"❌ Reboot failed: {e}")
         return "REBOOT_FAILED"
+
+@app.route("/system/switch_network_mode", methods=['POST'])
+def switch_network_mode():
+    """Switch between WiFi client mode and hotspot mode for wlan0."""
+    try:
+        data = request.get_json(silent=True) or {}
+        requested_mode = str(data.get('mode', '')).strip().lower()
+
+        if requested_mode not in {"wifi", "hotspot"}:
+            return jsonify({
+                "status": "error",
+                "message": "Invalid mode. Use 'wifi' or 'hotspot'.",
+            }), 400
+
+        current_mode = "hotspot" if get_hotspot_status() else "wifi"
+        if requested_mode == current_mode:
+            current_ip = get_local_ip()
+            return jsonify({
+                "status": "ok",
+                "mode": current_mode,
+                "message": f"Already in {current_mode} mode.",
+                "redirect_url": f"http://{current_ip}:5000",
+            })
+
+        if requested_mode == "hotspot":
+            activated = network_manager.enable_hotspot()
+            if not activated:
+                return jsonify({
+                    "status": "error",
+                    "message": "Failed to issue hotspot activation command.",
+                }), 500
+
+            redirect_url = f"http://{DEFAULT_HOTSPOT_IP}:5000"
+            print(f"📡 Network switch requested via network_core.py: WIFI → HOTSPOT ({DEFAULT_HOTSPOT_IP})")
+        else:
+            activated = network_manager.enable_wifi()
+            if not activated:
+                return jsonify({
+                    "status": "error",
+                    "message": "Failed to issue WiFi activation command.",
+                }), 500
+
+            redirect_host = DEFAULT_WIFI_REDIRECT_HOST.strip() or "raspberrypi.local"
+            redirect_url = f"http://{redirect_host}:5000"
+            print(f"📡 Network switch requested via network_core.py: HOTSPOT → WIFI ({redirect_host})")
+
+        return jsonify({
+            "status": "ok",
+            "mode": requested_mode,
+            "message": "Network switch started. Connection interruption expected.",
+            "redirect_url": redirect_url,
+            "disrupts_connection": True,
+        })
+    except Exception as e:
+        print(f"❌ Network mode switch failed: {e}")
+        return jsonify({
+            "status": "error",
+            "message": f"Network switch failed: {str(e)}",
+        }), 500
 
 @app.route("/system/configure_hotspot", methods=['POST'])
 def configure_hotspot():

@@ -15,7 +15,7 @@ const ipSchema = z.string().regex(
 
 export const ConnectionDialog = ({ isConnected, onConnect, onDisconnect }: ConnectionDialogProps) => {
   const [isOpen, setIsOpen] = useState(false);
-  const [ipAddress, setIpAddress] = useState("localhost");
+  const [ipAddress, setIpAddress] = useState("192.168.4.1"); // Default to hotspot IP
   const [error, setError] = useState("");
   const [isConnecting, setIsConnecting] = useState(false);
 
@@ -41,7 +41,7 @@ export const ConnectionDialog = ({ isConnected, onConnect, onDisconnect }: Conne
 
   const handleDisconnect = () => {
     onDisconnect();
-    setIpAddress("localhost");
+    setIpAddress("192.168.4.1"); // Reset to default hotspot IP
   };
 
   return (
@@ -107,7 +107,7 @@ export const ConnectionDialog = ({ isConnected, onConnect, onDisconnect }: Conne
                   setIpAddress(e.target.value);
                   setError("");
                 }}
-                placeholder="localhost or 192.168.1.100"
+                placeholder="192.168.4.1 (hotspot) or 192.168.1.100"
                 maxLength={21}
                 className="w-full bg-muted border border-border rounded px-3 py-2 text-foreground racing-number text-sm focus:border-primary focus:outline-none transition-colors"
                 disabled={isConnected}

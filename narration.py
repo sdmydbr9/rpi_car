@@ -2,6 +2,7 @@
 🎙️ AI Narration Module
 Provides Gemini-powered image description for the robot's camera feed.
 Supports key validation, multimodal model discovery, and image analysis.
+Falls back to local Llama LLM when in hotspot mode or when Gemini fails.
 """
 
 import google.generativeai as genai
@@ -14,11 +15,187 @@ import shutil
 import subprocess
 import tempfile
 import requests
+import json
+import base64
 from tts_local import get_tts_synthesizer
 from kokoro_client import get_kokoro_client
 
 # ==========================================
-# � KOKORO LOUDNESS PLAYBACK HELPER
+# 🌐 HOTSPOT DETECTION & LOCAL LLM
+# ==========================================
+
+# Default narration prompt
+DEFAULT_PROMPT = (
+    "you are a robot who just got vision for the first time, "
+    "describe what do you see in less than 20 words, "
+    "be narrative and interesting and use human like expressions"
+)
+
+# Configuration for hotspot mode (matches auto_voice.py exactly)
+LOCAL_LLM_URL = os.getenv("RC_LOCAL_LLM_URL", "http://127.0.0.1:8000/v1/chat/completions")
+MIMIC3_TTS_URL = os.getenv("RC_MIMIC3_TTS_URL", "http://127.0.0.1:59125/api/tts")
+HOTSPOT_AUDIO_DEVICE = os.getenv("RC_HOTSPOT_AUDIO_DEVICE", "plughw:0,0")
+
+def is_hotspot_mode() -> bool:
+    """Check if device is in hotspot mode (no internet connectivity).
+    Returns True if wlan0 IP is in hotspot range (192.168.4.x or 10.42.0.x)"""
+    try:
+        result = subprocess.run(['ip', 'addr', 'show', 'wlan0'], 
+                              capture_output=True, text=True, timeout=2)
+        for line in result.stdout.split('\n'):
+            if 'inet ' in line and 'scope' in line:
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    ip_with_mask = parts[1]
+                    ip = ip_with_mask.split('/')[0]
+                    # Hotspot range check
+                    if ip.startswith('192.168.4.') or ip.startswith('10.42.0.'):
+                        return True
+                    # Has regular WiFi IP, not hotspot
+                    return False
+        return False
+    except Exception as e:
+        print(f"⚠️ [Narration] Failed to check hotspot status: {e}")
+        return False
+
+
+def has_internet_connectivity(timeout: float = 5.0) -> bool:
+    """Check if device has internet connectivity by attempting DNS resolution."""
+    try:
+        requests.head("http://8.8.8.8", timeout=timeout)
+        return True
+    except (requests.RequestException, Exception):
+        return False
+
+
+def describe_image_local_llm(jpeg_bytes: bytes, prompt: str = DEFAULT_PROMPT,
+                             local_llm_url: str = None) -> str:
+    """Send a JPEG image to a local Llama LLM for description via base64 encoding.
+    
+    Exactly like auto_voice.py but with vision support.
+    
+    Args:
+        jpeg_bytes: Raw JPEG image data
+        prompt: Text prompt for the AI
+        local_llm_url: URL of the local LLM API endpoint
+    
+    Returns:
+        The AI's text response, or an empty string on failure.
+    """
+    if local_llm_url is None:
+        local_llm_url = LOCAL_LLM_URL
+    
+    try:
+        # Encode image as base64
+        image_base64 = base64.b64encode(jpeg_bytes).decode('utf-8')
+        
+        # Prepare payload for local LLM with vision capability
+        payload = {
+            "model": "llama-2-vision",  # or whatever vision model is available
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
+                    ]
+                }
+            ],
+            "temperature": 0.7,
+            "max_tokens": 100
+        }
+        
+        response = requests.post(
+            local_llm_url,
+            json=payload,
+            timeout=20
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("choices") and len(data["choices"]) > 0:
+                text = data["choices"][0].get("message", {}).get("content", "").strip()
+                if text:
+                    print(f"👁️ [Narration] Local LLM says: {text}")
+                    return text
+        
+        print(f"❌ [Narration] Local LLM returned status {response.status_code}")
+        return ""
+        
+    except requests.Timeout:
+        print(f"❌ [Narration] Local LLM request timed out")
+        return ""
+    except Exception as e:
+        print(f"❌ [Narration] Local LLM error: {e}")
+        return ""
+
+
+def _play_mimic3_tts(text: str, mimic3_url: str = None, audio_device: str = None) -> bool:
+    """Play audio via Mimic3 TTS exactly like auto_voice.py.
+    
+    Uses streaming HTTP GET to retrieve MP3, then plays via aplay.
+    
+    Args:
+        text: Text to synthesize
+        mimic3_url: Mimic3 API endpoint
+        audio_device: ALSA device for playback (e.g., 'plughw:0,0')
+    
+    Returns:
+        True if playback succeeded, False otherwise
+    """
+    if mimic3_url is None:
+        mimic3_url = MIMIC3_TTS_URL
+    if audio_device is None:
+        audio_device = HOTSPOT_AUDIO_DEVICE
+    
+    if not text.strip():
+        return False
+    
+    try:
+        print(f"🎙️ [Narration] Mimic3: synthesizing...")
+        # GET request with streaming (exactly like auto_voice.py)
+        r = requests.get(mimic3_url, params={"text": text}, stream=True, timeout=15)
+        
+        if r.status_code != 200:
+            print(f"❌ [Narration] Mimic3 HTTP {r.status_code}")
+            return False
+        
+        # Play streaming content directly to aplay (exactly like auto_voice.py)
+        print(f"🎙️ [Narration] Mimic3: playing to {audio_device}...")
+        aplay = subprocess.Popen(
+            ['aplay', '-D', audio_device, '-q'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE
+        )
+        
+        # Stream content to aplay
+        try:
+            aplay.communicate(input=r.content, timeout=30)
+            if aplay.returncode == 0:
+                print(f"✅ [Narration] Mimic3 playback: OK")
+                return True
+            else:
+                err = aplay.stderr.read().decode(errors='ignore') if aplay.stderr else ""
+                print(f"❌ [Narration] Mimic3 playback failed: {err}")
+                return False
+        except subprocess.TimeoutExpired:
+            aplay.kill()
+            print(f"❌ [Narration] Mimic3 playback timeout")
+            return False
+        
+    except requests.Timeout:
+        print(f"❌ [Narration] Mimic3 request timeout")
+        return False
+    except requests.ConnectionError:
+        print(f"❌ [Narration] Mimic3 connection failed (not running at {mimic3_url})")
+        return False
+    except Exception as e:
+        print(f"❌ [Narration] Mimic3 error: {e}")
+        return False
+
+
+# ==========================================# � KOKORO LOUDNESS PLAYBACK HELPER
 # ==========================================
 
 def _play_kokoro_with_volume(
@@ -211,13 +388,6 @@ def list_multimodal_models(api_key: str) -> list[dict]:
 # 🖼️ IMAGE ANALYSIS
 # ==========================================
 
-# Default narration prompt
-DEFAULT_PROMPT = (
-    "you are a robot who just got vision for the first time, "
-    "describe what do you see in less than 20 words, "
-    "be narrative and interesting and use human like expressions"
-)
-
 def describe_image(api_key: str, model_name: str, jpeg_bytes: bytes,
                    prompt: str = DEFAULT_PROMPT) -> str:
     """Send a JPEG image to a Gemini model for description.
@@ -344,6 +514,13 @@ class NarrationEngine:
         self._kokoro_voice: str = ""
         self._kokoro_speed: float = 1.0
         self._kokoro_volume: float = 8.0  # Aggressive loudness multiplier
+        # Local LLM configuration
+        self._local_llm_url: str = LOCAL_LLM_URL
+        self._use_local_llm: bool = False  # Set to True to force local LLM in hotspot mode
+        # Mimic3 TTS configuration (for hotspot mode, matches auto_voice.py)
+        self._mimic3_enabled: bool = False
+        self._mimic3_url: str = MIMIC3_TTS_URL
+        self._mimic3_audio_device: str = HOTSPOT_AUDIO_DEVICE
     
     def configure(self, api_key: str, model_name: str,
                   interval: float = 90.0, prompt: str = DEFAULT_PROMPT):
@@ -400,6 +577,32 @@ class NarrationEngine:
                 self._kokoro_ip = ""
                 self._kokoro_voice = ""
                 print(f"🎤 [Narration] Kokoro disabled")
+    
+    def set_local_llm_config(self, url: str | None = None, force_use: bool = False):
+        """Configure local LLM for hotspot mode fallback (and enable Mimic3 TTS).
+        
+        When in hotspot mode, uses both local LLM for vision + Mimic3 TTS for playback,
+        exactly like auto_voice.py pattern.
+        
+        Args:
+            url: URL of the local LLM API endpoint (e.g., http://127.0.0.1:8000/v1/chat/completions)
+            force_use: If True, always use local LLM instead of Gemini
+        """
+        with self._lock:
+            if url:
+                self._local_llm_url = url
+            self._use_local_llm = force_use or is_hotspot_mode()
+            
+            # Auto-enable Mimic3 TTS if in hotspot mode or forced
+            if self._use_local_llm:
+                self._mimic3_enabled = True
+                print(f"🎙️ [Narration] Hotspot mode detected - enabling Mimic3 TTS")
+            else:
+                self._mimic3_enabled = False
+        
+        mode = "always" if force_use else ("hotspot" if self._use_local_llm else "if-available")
+        print(f"🧠 [Narration] Local LLM configured - URL: {self._local_llm_url}, Mode: {mode}")
+        print(f"🎙️ [Narration] Mimic3 TTS: {'enabled' if self._mimic3_enabled else 'disabled'}")
     
     def set_camera(self, picam2, vision_system):
         """Set camera references for frame capture."""
@@ -475,6 +678,11 @@ class NarrationEngine:
                     kokoro_volume = self._kokoro_volume
                     play_local_tts = self._play_local_tts
                     audio_device = self._audio_device
+                    local_llm_url = self._local_llm_url
+                    use_local_llm = self._use_local_llm
+                    mimic3_enabled = self._mimic3_enabled
+                    mimic3_url = self._mimic3_url
+                    mimic3_audio_device = self._mimic3_audio_device
                 
                 # Capture frame
                 jpeg_bytes = capture_frame_as_jpeg(picam2, vision_system)
@@ -486,19 +694,33 @@ class NarrationEngine:
                     time.sleep(interval)
                     continue
                 
-                # Send to AI
-                start_time = time.time()
-                text = describe_image(api_key, model_name, jpeg_bytes, prompt)
-                elapsed = time.time() - start_time
+                # Determine which AI to use: check hotspot mode and internet connectivity
+                in_hotspot = is_hotspot_mode()
+                if in_hotspot or use_local_llm:
+                    print(f"🌐 [Narration] Hotspot mode detected or local LLM forced - using local LLM")
+                    text = describe_image_local_llm(jpeg_bytes, prompt, local_llm_url)
+                else:
+                    # Try Gemini first if we have API key and internet
+                    start_time = time.time()
+                    text = describe_image(api_key, model_name, jpeg_bytes, prompt)
+                    elapsed = time.time() - start_time
+                    
+                    # If Gemini fails, fall back to local LLM
+                    if not text:
+                        print(f"⚠️  [Narration] Gemini failed or returned empty - falling back to local LLM")
+                        text = describe_image_local_llm(jpeg_bytes, prompt, local_llm_url)
+                    else:
+                        print(f"⏱️ [Narration] Gemini response in {elapsed:.1f}s")
                 
                 if text and self._on_narration_text:
                     self._on_narration_text(text)
                     consecutive_errors = 0
-                    print(f"⏱️ [Narration] Response in {elapsed:.1f}s")
                     
-                    # Play audio on the car via Kokoro (with loudness pipeline)
-                    # first, fallback to local TTS if unavailable/failed
-                    kokoro_success = False
+                    # Audio playback priority:
+                    # 1. Mimic3 TTS if in hotspot mode (exactly like auto_voice.py)
+                    # 2. Kokoro TTS (with loudness pipeline) for online mode
+                    # 3. Local TTS (espeak-ng) as final fallback
+                    playback_success = False
                     
                     # Get audio manager reference for volume ducking
                     audio_manager = None
@@ -510,10 +732,23 @@ class NarrationEngine:
                         audio_manager.duck_engine_volume(True)
                     
                     try:
-                        if kokoro_enabled and kokoro_ip and kokoro_voice:
-                            print(f"🎤 [Narration] Kokoro config - enabled={kokoro_enabled}, ip={kokoro_ip}, voice={kokoro_voice}, device={audio_device}")
-                            print(f"🎤 [Narration] Playing via Kokoro loudness pipeline at {kokoro_ip}...")
-                            kokoro_success = _play_kokoro_with_volume(
+                        # PRIMARY: Mimic3 TTS for hotspot mode (matches auto_voice.py)
+                        if mimic3_enabled and mimic3_url:
+                            print(f"🎙️ [Narration] Mimic3 enabled (hotspot mode) - using Mimic3 TTS...")
+                            playback_success = _play_mimic3_tts(
+                                text=text,
+                                mimic3_url=mimic3_url,
+                                audio_device=mimic3_audio_device
+                            )
+                            if playback_success:
+                                print(f"✅ [Narration] Mimic3 playback: SUCCESS")
+                            else:
+                                print(f"⚠️  [Narration] Mimic3 playback failed - trying Kokoro...")
+                        
+                        # SECONDARY: Kokoro TTS for online mode (with loudness pipeline)
+                        if not playback_success and kokoro_enabled and kokoro_ip and kokoro_voice:
+                            print(f"🎤 [Narration] Kokoro: IP={kokoro_ip}, Voice={kokoro_voice}...")
+                            playback_success = _play_kokoro_with_volume(
                                 ip_address=kokoro_ip,
                                 text=text,
                                 voice=kokoro_voice,
@@ -521,17 +756,19 @@ class NarrationEngine:
                                 volume=kokoro_volume,
                                 audio_device=audio_device,
                             )
-                            print(f"🎤 [Narration] Kokoro playback result: {kokoro_success}")
-                            if not kokoro_success:
-                                print(f"⚠️  [Narration] Kokoro playback failed, falling back to local TTS")
-                        else:
-                            print(f"⚠️  [Narration] Kokoro not fully configured - enabled={kokoro_enabled}, ip={kokoro_ip}, voice={kokoro_voice}")
+                            if playback_success:
+                                print(f"✅ [Narration] Kokoro playback: SUCCESS")
+                            else:
+                                print(f"⚠️  [Narration] Kokoro playback failed - trying local TTS...")
+                        elif not playback_success and not kokoro_enabled:
+                            print(f"⚠️  [Narration] Kokoro not configured")
 
-                        # Fallback to local TTS if Kokoro not enabled or failed
-                        if not kokoro_success and play_local_tts:
-                            print(f"🔊 [Narration] Using local TTS...") 
+                        # TERTIARY: Local TTS fallback (espeak-ng)
+                        if not playback_success and play_local_tts:
+                            print(f"🔊 [Narration] Using local TTS fallback...") 
                             tts = get_tts_synthesizer()
                             tts.speak(text)
+                            playback_success = True
                     finally:
                         # Restore engine volume after playback completes
                         if audio_manager:
@@ -542,18 +779,18 @@ class NarrationEngine:
                         self._on_narration_done()
                 elif not text:
                     consecutive_errors += 1
-                    print(f"⚠️  [Narration] Empty response (attempt {consecutive_errors})")
+                    print(f"⚠️  [Narration] Empty response from both Gemini and local LLM (attempt {consecutive_errors})")
                     if consecutive_errors >= 3 and self._on_narration_error:
                         self._on_narration_error(
-                            "AI returned empty responses — check API key, model, or try a different model"
+                            "AI returned empty responses from both Gemini and local LLM — check connectivity and LLM availability"
                         )
                         consecutive_errors = 0
-                
+
             except Exception as e:
                 print(f"❌ [Narration] Loop error: {e}")
                 if self._on_narration_error:
                     self._on_narration_error(str(e))
-            
+
             # Wait for the configured interval
             # Use small sleep increments so we can stop quickly
             wait_end = time.time() + interval
