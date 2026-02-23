@@ -38,3 +38,4 @@ __pycache__/*
 .camera_config.json
 .narration_config.json
 snap.jpg
+.startup_config.json

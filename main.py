@@ -914,6 +914,10 @@ has_had_client = False  # Track if a client has ever connected (to avoid false e
 HEARTBEAT_INTERVAL = 2.0  # Send ping every 2 seconds
 HEARTBEAT_TIMEOUT = 5.0   # Declare client dead if no pong for 5 seconds
 
+# Startup-check runtime guard (prevents overlapping checks from auto/manual triggers)
+_startup_check_lock = threading.Lock()
+_startup_check_running = False
+
 # ==========================================
 # 📡 LASER MOVING-AVERAGE FILTER
 # ==========================================
@@ -2125,11 +2129,27 @@ def on_heartbeat_pong(data):
 @socketio.on('engine_start')
 def on_engine_start(data=None):
     """Handle UI engine start button."""
+    was_running = bool(car_state.get("engine_running", False))
     car_state["engine_running"] = True
     car_state["brake_pressed"] = False
     car_state["is_braking"] = False
     car_audio.set_engine_running(True)
     print(f"\n⚙️ [UI Control] 🔊 ENGINE: STARTED")
+
+    # Auto-run startup AI check when engine transitions OFF -> ON.
+    if not was_running:
+        started, reason = _trigger_startup_check_async(
+            client_id=request.sid,
+            source="engine_start_auto",
+            require_enabled=True,
+        )
+        if started:
+            print("⬛ [Startup] Auto diagnostic check triggered by engine start")
+        elif reason == "disabled":
+            print("⬛ [Startup] Auto diagnostic check skipped (disabled in config)")
+        elif reason == "already_running":
+            print("⬛ [Startup] Auto diagnostic check skipped (already running)")
+
     emit('engine_response', {'status': 'ok', 'running': True})
 
 
@@ -2828,6 +2848,91 @@ def on_kokoro_config_update(data):
     emit('kokoro_config_response', {'status': 'ok'})
 
 # ==========================================
+# ⬛ STARTUP CHECK RUNTIME
+# ==========================================
+
+def _trigger_startup_check_async(client_id=None, source="manual", require_enabled=False):
+    """Launch startup diagnostics in a background thread with overlap protection."""
+    global _startup_check_running
+
+    if require_enabled and not _startup_config.get('startup_check_enabled', True):
+        return False, "disabled"
+
+    with _startup_check_lock:
+        if _startup_check_running:
+            return False, "already_running"
+        _startup_check_running = True
+
+    def run_check_async():
+        global _startup_check_running
+        try:
+            from startup_systems_check import main as run_startup_check
+
+            gemini_key = _narration_config.get('api_key')  # Use narration API key for Gemini
+            eleven_key = _startup_config.get('elevenlabs_api_key')
+            voice_id = _startup_config.get('elevenlabs_voice_id', 'JBFqnCBsd6RMkjVDRZzb')
+
+            print(f"⬛ [Startup] Running diagnostics ({source}) with provided credentials...")
+
+            def _on_speech_start():
+                try:
+                    car_audio.duck_engine_volume(True)
+                except Exception as duck_err:
+                    print(f"⚠️  [Startup] Could not duck engine audio: {duck_err}")
+
+            def _on_speech_end():
+                try:
+                    car_audio.duck_engine_volume(False)
+                except Exception as unduck_err:
+                    print(f"⚠️  [Startup] Could not restore engine audio: {unduck_err}")
+
+            status = run_startup_check(
+                gemini_key=gemini_key,
+                eleven_key=eleven_key,
+                voice_id=voice_id,
+                audio_device=CAR_AUDIO_DEVICE,
+                on_speech_start=_on_speech_start,
+                on_speech_end=_on_speech_end,
+            )
+
+            result_data = {
+                'status': 'complete',
+                'critical_ok': status.critical_systems_ready,
+                'all_ok': status.all_systems_ready,
+                'pico_bridge': status.pico_bridge_ok,
+                'front_sonar': status.front_sonar_ok,
+                'laser': status.laser_ok,
+                'rear_sonar': status.rear_sonar_ok,
+                'mpu6050': status.mpu6050_ok,
+                'ir_sensors': status.ir_sensors_ok,
+                'encoder': status.encoder_ok,
+                'battery_voltage': status.battery_voltage,
+                'motor_current': status.motor_current,
+            }
+
+            if client_id:
+                print(f"⬛ [Startup] Check complete ({source}) - sending results to client {client_id}")
+                socketio.emit('startup_check_result', result_data, to=client_id)
+            else:
+                print(f"⬛ [Startup] Check complete ({source}) - broadcasting results")
+                socketio.emit('startup_check_result', result_data)
+
+        except Exception as e:
+            print(f"❌ [Startup] Check failed ({source}): {e}")
+            error_payload = {'status': 'error', 'error': str(e)}
+            if client_id:
+                socketio.emit('startup_check_result', error_payload, to=client_id)
+            else:
+                socketio.emit('startup_check_result', error_payload)
+        finally:
+            with _startup_check_lock:
+                _startup_check_running = False
+
+    check_thread = threading.Thread(target=run_check_async, daemon=True)
+    check_thread.start()
+    return True, "running"
+
+# ==========================================
 # ⬛ STARTUP CHECK SOCKET EVENTS
 # ==========================================
 
@@ -2987,68 +3092,19 @@ def on_startup_check_run(data):
     """Trigger manual startup check execution."""
     print(f"\n⬛ [Startup] Manual check requested from client")
     client_id = request.sid
-    
-    def run_check_async():
-        """Background task to run startup check."""
-        audio_ducked = False
-        try:
-            from startup_systems_check import main as run_startup_check
-            
-            gemini_key = _narration_config.get('api_key')  # Use narration API key for Gemini
-            eleven_key = _startup_config.get('elevenlabs_api_key')
-            voice_id = _startup_config.get('elevenlabs_voice_id', 'JBFqnCBsd6RMkjVDRZzb')
-            
-            print(f"⬛ [Startup] Running diagnostics with provided credentials...")
 
-            # Lower engine channels while startup speech plays so output is audible.
-            try:
-                car_audio.duck_engine_volume(True)
-                audio_ducked = True
-            except Exception as duck_err:
-                print(f"⚠️  [Startup] Could not duck engine audio: {duck_err}")
+    started, reason = _trigger_startup_check_async(
+        client_id=client_id,
+        source="manual",
+        require_enabled=False,
+    )
 
-            status = run_startup_check(
-                gemini_key=gemini_key,
-                eleven_key=eleven_key,
-                voice_id=voice_id,
-                audio_device=CAR_AUDIO_DEVICE,
-            )
-            
-            # Send result back to client
-            result_data = {
-                'status': 'complete',
-                'critical_ok': status.critical_systems_ready,
-                'all_ok': status.all_systems_ready,
-                'pico_bridge': status.pico_bridge_ok,
-                'front_sonar': status.front_sonar_ok,
-                'laser': status.laser_ok,
-                'rear_sonar': status.rear_sonar_ok,
-                'mpu6050': status.mpu6050_ok,
-                'ir_sensors': status.ir_sensors_ok,
-                'encoder': status.encoder_ok,
-                'battery_voltage': status.battery_voltage,
-                'motor_current': status.motor_current,
-            }
-            
-            print(f"⬛ [Startup] Check complete - sending results to client {client_id}")
-            socketio.emit('startup_check_result', result_data, to=client_id)
-            
-        except Exception as e:
-            print(f"❌ [Startup] Check failed: {e}")
-            socketio.emit('startup_check_result', {'status': 'error', 'error': str(e)}, to=client_id)
-        finally:
-            if audio_ducked:
-                try:
-                    car_audio.duck_engine_volume(False)
-                except Exception as unduck_err:
-                    print(f"⚠️  [Startup] Could not restore engine audio: {unduck_err}")
-    
-    # Run check in background thread
-    check_thread = threading.Thread(target=run_check_async, daemon=True)
-    check_thread.start()
-    
-    # Immediately send acknowledgment
-    emit('startup_check_response', {'status': 'running', 'message': 'Diagnostic check started in background'})
+    if started:
+        emit('startup_check_response', {'status': 'running', 'message': 'Diagnostic check started in background'})
+    elif reason == "already_running":
+        emit('startup_check_response', {'status': 'busy', 'message': 'Diagnostic check is already running'})
+    else:
+        emit('startup_check_response', {'status': 'skipped', 'message': 'Diagnostic check is disabled in config'})
 
 # Heartbeat monitoring thread
 def heartbeat_monitor():

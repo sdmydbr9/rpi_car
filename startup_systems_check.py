@@ -642,7 +642,14 @@ def generate_status_summary(status: SystemStatus) -> str:
 # 🎬 MAIN STARTUP FLOW
 # ==========================================
 
-def main(gemini_key=None, eleven_key=None, voice_id="JBFqnCBsd6RMkjVDRZzb", audio_device="default"):
+def main(
+    gemini_key=None,
+    eleven_key=None,
+    voice_id="JBFqnCBsd6RMkjVDRZzb",
+    audio_device="default",
+    on_speech_start=None,
+    on_speech_end=None,
+):
     """
     Run the startup check sequence.
     
@@ -651,6 +658,8 @@ def main(gemini_key=None, eleven_key=None, voice_id="JBFqnCBsd6RMkjVDRZzb", audi
         eleven_key: Optional ElevenLabs API key (overrides file config)
         voice_id: Optional ElevenLabs voice ID (default: TARS voice)
         audio_device: ALSA device for voice playback (e.g. default, hw:1,0)
+        on_speech_start: Optional callback fired immediately before speech playback.
+        on_speech_end: Optional callback fired immediately after speech playback.
     """
     # Reload credentials with explicit parameters if provided
     global GEMINI_API_KEY, ELEVEN_API_KEY, GEMINI_AVAILABLE, ELEVENLABS_AVAILABLE
@@ -673,9 +682,25 @@ def main(gemini_key=None, eleven_key=None, voice_id="JBFqnCBsd6RMkjVDRZzb", audi
         if expressive_text:
             print(f"\n[TARS VOCAL OUTPUT] > {expressive_text}\n")
 
+    def _run_speech_with_hooks(playback_fn, *args, **kwargs):
+        if callable(on_speech_start):
+            try:
+                on_speech_start()
+            except Exception as cb_err:
+                print(f"[TARS] on_speech_start callback failed: {cb_err}")
+        try:
+            return playback_fn(*args, **kwargs)
+        finally:
+            if callable(on_speech_end):
+                try:
+                    on_speech_end()
+                except Exception as cb_err:
+                    print(f"[TARS] on_speech_end callback failed: {cb_err}")
+
     speech_played = False
     if expressive_text and ELEVENLABS_AVAILABLE:
-        speech_played = speak_with_eleven(
+        speech_played = _run_speech_with_hooks(
+            speak_with_eleven,
             expressive_text,
             voice_id=voice_id,
             api_key=ELEVEN_API_KEY,
@@ -683,7 +708,8 @@ def main(gemini_key=None, eleven_key=None, voice_id="JBFqnCBsd6RMkjVDRZzb", audi
         )
 
     if not speech_played:
-        fallback_speak_status(
+        _run_speech_with_hooks(
+            fallback_speak_status,
             status,
             audio_device=audio_device,
             text_override=expressive_text if expressive_text else None,
