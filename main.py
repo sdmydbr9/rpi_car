@@ -180,7 +180,9 @@ def _load_narration_config():
         'kokoro_enabled': False,
         'kokoro_ip': '',
         'kokoro_voice': '',
-        'kokoro_voices': []
+        'kokoro_voices': [],
+        'elevenlabs_api_key': '',
+        'elevenlabs_voice_id': 'JBFqnCBsd6RMkjVDRZzb',
     }
 
 def _save_narration_config(config):
@@ -228,6 +230,112 @@ def _save_sensor_config(config):
         print(f"⚠️  [Sensor Config] Failed to save: {e}")
 
 _sensor_config = _load_sensor_config()
+
+# --- STARTUP CHECK CONFIG PERSISTENCE ---
+STARTUP_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.startup_config.json')
+
+_STARTUP_CONFIG_DEFAULTS = {
+    'startup_check_enabled': True,
+    'elevenlabs_api_key': '',
+    'elevenlabs_voice_id': 'JBFqnCBsd6RMkjVDRZzb',  # Default TARS voice
+}
+
+def _load_startup_config():
+    """Load persisted startup check configuration from JSON file."""
+    try:
+        if os.path.exists(STARTUP_CONFIG_FILE):
+            with open(STARTUP_CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+            # Merge with defaults so new keys get a value
+            merged = {**_STARTUP_CONFIG_DEFAULTS, **config}
+            print(f"✅ [Startup Config] Loaded persisted config")
+            return merged
+    except Exception as e:
+        print(f"⚠️  [Startup Config] Failed to load: {e}")
+    return dict(_STARTUP_CONFIG_DEFAULTS)
+
+def _save_startup_config(config):
+    """Save startup check configuration to JSON file for persistence."""
+    try:
+        with open(STARTUP_CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=2)
+        print(f"💾 [Startup Config] Saved to {STARTUP_CONFIG_FILE}")
+    except Exception as e:
+        print(f"⚠️  [Startup Config] Failed to save: {e}")
+
+_startup_config = _load_startup_config()
+
+ELEVENLABS_DEFAULT_VOICE_ID = 'JBFqnCBsd6RMkjVDRZzb'
+
+def _effective_elevenlabs_api_key() -> str:
+    """Return the stored ElevenLabs key from startup or narration config."""
+    return _startup_config.get('elevenlabs_api_key', '') or _narration_config.get('elevenlabs_api_key', '')
+
+def _effective_elevenlabs_voice_id() -> str:
+    """Return the stored ElevenLabs voice ID from startup or narration config."""
+    return (
+        _startup_config.get('elevenlabs_voice_id')
+        or _narration_config.get('elevenlabs_voice_id')
+        or ELEVENLABS_DEFAULT_VOICE_ID
+    )
+
+def _build_narration_config_sync_payload() -> dict:
+    """Build narration config payload shared by connect/update events."""
+    api_key = _narration_config.get('api_key', '')
+    eleven_key = _effective_elevenlabs_api_key()
+    return {
+        'provider': _narration_config.get('provider', 'gemini'),
+        'api_key_set': bool(api_key),
+        'api_key_masked': ('*' * 8 + api_key[-4:]) if len(api_key) > 4 else '',
+        'model': _narration_config.get('model', ''),
+        'interval': _narration_config.get('interval', 30),
+        'enabled': car_state.get('narration_enabled', False),
+        'models': _narration_config.get('models', []),
+        'kokoro_enabled': _narration_config.get('kokoro_enabled', False),
+        'kokoro_ip': _narration_config.get('kokoro_ip', ''),
+        'kokoro_voice': _narration_config.get('kokoro_voice', ''),
+        'kokoro_voices': _narration_config.get('kokoro_voices', []),
+        'elevenlabs_api_key_set': bool(eleven_key),
+        'elevenlabs_api_key': eleven_key,
+        'elevenlabs_api_key_masked': ('*' * 8 + eleven_key[-4:]) if len(eleven_key) > 4 else '',
+        'elevenlabs_voice_id': _effective_elevenlabs_voice_id(),
+    }
+
+def _build_startup_config_sync_payload() -> dict:
+    """Build startup config payload shared by connect/request/update events."""
+    eleven_key = _effective_elevenlabs_api_key()
+    return {
+        'startup_check_enabled': _startup_config.get('startup_check_enabled', True),
+        'elevenlabs_api_key_set': bool(eleven_key),
+        'elevenlabs_api_key': eleven_key,
+        'elevenlabs_voice_id': _effective_elevenlabs_voice_id(),
+    }
+
+def _sync_elevenlabs_config_between_files() -> None:
+    """Keep startup/narration ElevenLabs values aligned across config files."""
+    effective_key = _effective_elevenlabs_api_key()
+    effective_voice_id = _effective_elevenlabs_voice_id()
+    changed = False
+
+    if _startup_config.get('elevenlabs_api_key', '') != effective_key:
+        _startup_config['elevenlabs_api_key'] = effective_key
+        changed = True
+    if _narration_config.get('elevenlabs_api_key', '') != effective_key:
+        _narration_config['elevenlabs_api_key'] = effective_key
+        changed = True
+    if _startup_config.get('elevenlabs_voice_id', ELEVENLABS_DEFAULT_VOICE_ID) != effective_voice_id:
+        _startup_config['elevenlabs_voice_id'] = effective_voice_id
+        changed = True
+    if _narration_config.get('elevenlabs_voice_id', ELEVENLABS_DEFAULT_VOICE_ID) != effective_voice_id:
+        _narration_config['elevenlabs_voice_id'] = effective_voice_id
+        changed = True
+
+    if changed:
+        _save_startup_config(_startup_config)
+        _save_narration_config(_narration_config)
+        print("💾 [ElevenLabs] Synced startup and narration config values")
+
+_sync_elevenlabs_config_between_files()
 
 # Load persisted camera config (overrides defaults)
 _persisted_camera_config = _load_camera_config()
@@ -414,6 +522,7 @@ except Exception as e:
 # ==========================================
 narration_engine = NarrationEngine()
 narration_engine.set_camera(picam2, vision_system)
+narration_engine.set_audio_manager(car_audio)
 
 # Configure from persisted settings if API key exists
 if _narration_config.get('api_key'):
@@ -1944,21 +2053,14 @@ def on_connect():
     })
     # Send camera specs for dynamic resolution dropdown
     emit('camera_specs_sync', camera_specs)
-    # Send narration config (mask API key for security)
-    _masked_narration = {
-        'provider': _narration_config.get('provider', 'gemini'),
-        'api_key_set': bool(_narration_config.get('api_key', '')),
-        'api_key_masked': ('*' * 8 + _narration_config.get('api_key', '')[-4:]) if len(_narration_config.get('api_key', '')) > 4 else '',
-        'model': _narration_config.get('model', ''),
-        'interval': _narration_config.get('interval', 30),
-        'enabled': car_state.get('narration_enabled', False),
-        'models': _narration_config.get('models', []),
-        'kokoro_enabled': _narration_config.get('kokoro_enabled', False),
-        'kokoro_ip': _narration_config.get('kokoro_ip', ''),
-        'kokoro_voice': _narration_config.get('kokoro_voice', ''),
-        'kokoro_voices': _narration_config.get('kokoro_voices', []),
-    }
+    # Send narration config
+    # Always include cached models from the config file to avoid "revalidate" prompts on browser refresh
+    api_key = _narration_config.get('api_key', '')
+    cached_models = _narration_config.get('models', [])
+    _masked_narration = _build_narration_config_sync_payload()
+    _masked_narration['models'] = cached_models  # Use cached models from config file on initial sync
     emit('narration_config_sync', _masked_narration)
+    print(f"✅ [Narration] Sent config sync with {len(cached_models)} cached models (api_key_set={bool(api_key)})")
     # Send persisted sensor toggle states so client syncs immediately
     emit('sensor_config_sync', {
         'ir_enabled': car_state['ir_enabled'],
@@ -1966,24 +2068,28 @@ def on_connect():
         'mpu6050_enabled': car_state['mpu6050_enabled'],
         'rear_sonar_enabled': car_state['rear_sonar_enabled'],
     })
-    # Refresh models list in background if key is set
+    # Send startup check config
+    _masked_startup = _build_startup_config_sync_payload()
+    emit('startup_config_sync', _masked_startup)
+    # Refresh models list in background if key is set and we have cached models
     _client_sid = request.sid
-    if _narration_config.get('api_key'):
+    if api_key:
         def _refresh_models_async(client_id):
             try:
-                fresh_models = list_multimodal_models(_narration_config['api_key'])
+                fresh_models = list_multimodal_models(api_key)
                 if fresh_models:
-                    _narration_config['models'] = fresh_models
-                    _save_narration_config(_narration_config)
-                    _updated = {**_masked_narration, 'models': fresh_models,
-                                 'kokoro_enabled': _narration_config.get('kokoro_enabled', False),
-                                 'kokoro_ip': _narration_config.get('kokoro_ip', ''),
-                                 'kokoro_voice': _narration_config.get('kokoro_voice', ''),
-                                 'kokoro_voices': _narration_config.get('kokoro_voices', [])}
-                    socketio.emit('narration_config_sync', _updated, to=client_id)
-                    print(f"\u2705 [Narration] Refreshed {len(fresh_models)} models for client")
+                    # Only send update if models actually changed
+                    if fresh_models != cached_models:
+                        _narration_config['models'] = fresh_models
+                        _save_narration_config(_narration_config)
+                        _updated = _build_narration_config_sync_payload()
+                        _updated['models'] = fresh_models
+                        socketio.emit('narration_config_sync', _updated, to=client_id)
+                        print(f"✅ [Narration] Refreshed models from API: {len(fresh_models)} models available")
+                    else:
+                        print(f"✅ [Narration] Cached models are current ({len(fresh_models)} models)")
             except Exception as e:
-                print(f"\u26a0\ufe0f [Narration] Background model refresh failed: {e}")
+                print(f"⚠️  [Narration] Background model refresh failed: {e}")
         threading.Thread(target=_refresh_models_async, args=(_client_sid,), daemon=True).start()
 
 @socketio.on('disconnect')
@@ -2537,6 +2643,8 @@ def on_narration_validate_key(data):
                 _save_narration_config(_narration_config)
                 print(f"\u2705 [Narration] Key valid, {len(models)} multimodal models available")
                 socketio.emit('narration_key_result', {'valid': True, 'models': models, 'error': ''}, to=client_id)
+                # Emit updated config sync so UI reflects saved state immediately
+                socketio.emit('narration_config_sync', _build_narration_config_sync_payload(), to=client_id)
             else:
                 print(f"❌ [Narration] Key validation failed")
                 socketio.emit('narration_key_result', {'valid': False, 'models': [], 'error': 'Invalid API key'}, to=client_id)
@@ -2643,19 +2751,12 @@ def on_narration_key_clear(data):
     _narration_config['enabled'] = False
     _save_narration_config(_narration_config)
     # Broadcast cleared config to all clients
-    _cleared = {
-        'provider': _narration_config.get('provider', 'gemini'),
-        'api_key_set': False,
-        'api_key_masked': '',
-        'model': '',
-        'interval': _narration_config.get('interval', 30),
-        'enabled': False,
-        'models': [],
-        'kokoro_enabled': _narration_config.get('kokoro_enabled', False),
-        'kokoro_ip': _narration_config.get('kokoro_ip', ''),
-        'kokoro_voice': _narration_config.get('kokoro_voice', ''),
-        'kokoro_voices': _narration_config.get('kokoro_voices', []),
-    }
+    _cleared = _build_narration_config_sync_payload()
+    _cleared['api_key_set'] = False
+    _cleared['api_key_masked'] = ''
+    _cleared['model'] = ''
+    _cleared['enabled'] = False
+    _cleared['models'] = []
     socketio.emit('narration_config_sync', _cleared)
     emit('narration_key_clear_response', {'status': 'ok'})
     print(f"\u2705 [Narration] API key cleared and narration disabled")
@@ -2725,6 +2826,229 @@ def on_kokoro_config_update(data):
         print(f"⚠️  [Kokoro] Kokoro disabled or incomplete configuration")
     
     emit('kokoro_config_response', {'status': 'ok'})
+
+# ==========================================
+# ⬛ STARTUP CHECK SOCKET EVENTS
+# ==========================================
+
+@socketio.on('startup_config_request')
+def on_startup_config_request(data):
+    """Handle request for current startup config."""
+    print(f"⬛ [Startup] Config request received")
+    emit('startup_config_sync', _build_startup_config_sync_payload())
+
+@socketio.on('startup_config_update')
+def on_startup_config_update(data):
+    """Update startup check configuration (enabled/disabled, API key, voice ID)."""
+    print(f"\n⬛ [Startup] Config update requested")
+    
+    if 'startup_check_enabled' in data:
+        _startup_config['startup_check_enabled'] = data['startup_check_enabled']
+        print(f"   Startup check: {'ENABLED' if data['startup_check_enabled'] else 'DISABLED'}")
+    
+    if 'elevenlabs_voice_id' in data:
+        _startup_config['elevenlabs_voice_id'] = data['elevenlabs_voice_id']
+        # Also update narration config for consistency
+        _narration_config['elevenlabs_voice_id'] = data['elevenlabs_voice_id']
+        print(f"   ElevenLabs voice ID: {data['elevenlabs_voice_id']}")
+    
+    _sync_elevenlabs_config_between_files()
+    _save_startup_config(_startup_config)
+    _save_narration_config(_narration_config)
+    
+    socketio.emit('startup_config_sync', _build_startup_config_sync_payload())
+    emit('startup_config_response', {'status': 'ok'})
+    print(f"✅ [Startup] Configuration saved and synced")
+
+@socketio.on('elevenlabs_validate_key')
+def on_elevenlabs_validate_key(data):
+    """Validate ElevenLabs API key and fetch available voices."""
+    api_key = data.get('api_key', '')
+    client_id = request.sid
+    
+    if not api_key:
+        emit('elevenlabs_validation_result', {'valid': False, 'voices': [], 'error': 'API key is empty'})
+        return
+    
+    def validate_async():
+        """Background validation task."""
+        print(f"\n🎤 [ElevenLabs] Validating API key (client: {client_id[:8]}...)")
+        
+        try:
+            from elevenlabs.client import ElevenLabs
+            from elevenlabs.play import play
+            client = ElevenLabs(api_key=api_key)
+            
+            voices = []
+            permission_limited = False
+            
+            try:
+                # Try to get available voices
+                voices_response = client.voices.get_all()
+                
+                # Extract voice names and IDs
+                if hasattr(voices_response, 'voices'):
+                    for voice in voices_response.voices:
+                        if hasattr(voice, 'name') and hasattr(voice, 'voice_id'):
+                            voices.append({
+                                'name': voice.name,
+                                'voice_id': voice.voice_id
+                            })
+            except Exception as voices_error:
+                # Check if it's a permission error
+                error_str = str(voices_error)
+                if 'missing_permissions' in error_str or 'voices_read' in error_str or 'permission' in error_str.lower():
+                    print(f"⚠️  [ElevenLabs] API key lacks voices_read permission - using default voices")
+                    permission_limited = True
+                    # Use default premium voice if not permissioned to list
+                    voices = [
+                        {'name': 'Rachel (Default)', 'voice_id': ELEVENLABS_DEFAULT_VOICE_ID},
+                        {'name': 'Bella', 'voice_id': '2EiwWnXFnvU5JabPnP5r'},
+                        {'name': 'Antoni', 'voice_id': 'ErXwobaYp0DKrXfsKm7U'},
+                        {'name': 'Josh', 'voice_id': 'nPczCjzI2InUD7YtIKWO'},
+                        {'name': 'Arnold', 'voice_id': 'VR6AewLHs0MzaIknZaEp'},
+                    ]
+                else:
+                    raise
+            
+            if voices:
+                # Persist the API key and default voice in both config files
+                _startup_config['elevenlabs_api_key'] = api_key
+                _startup_config['elevenlabs_voice_id'] = voices[0]['voice_id']
+                _narration_config['elevenlabs_api_key'] = api_key
+                _narration_config['elevenlabs_voice_id'] = voices[0]['voice_id']
+                _save_startup_config(_startup_config)
+                _save_narration_config(_narration_config)
+                
+                result = {
+                    'valid': True,
+                    'voices': voices,
+                    'error': 'limited_permissions' if permission_limited else ''
+                }
+                message = f"✅ [ElevenLabs] API key valid - using {len(voices)} voices"
+                if permission_limited:
+                    message += " (note: API key has limited permissions, using default voice list)"
+                print(message)
+                
+                # Send updated narration config sync so UI reflects saved state
+                socketio.emit('narration_config_sync', _build_narration_config_sync_payload(), to=client_id)
+                socketio.emit('startup_config_sync', _build_startup_config_sync_payload())
+            else:
+                result = {
+                    'valid': False,
+                    'voices': [],
+                    'error': 'No voices found in account'
+                }
+                print(f"⚠️  [ElevenLabs] API key valid but no voices found")
+            
+            socketio.emit('elevenlabs_validation_result', result, to=client_id)
+            
+        except Exception as e:
+            error_msg = str(e)
+            print(f"❌ [ElevenLabs] Validation error: {error_msg}")
+            
+            # Provide more helpful error messages
+            if '401' in error_msg or 'unauthorized' in error_msg.lower():
+                user_error = "Invalid or expired API key. Check your ElevenLabs account settings."
+            elif 'permission' in error_msg.lower():
+                user_error = "API key lacks required permissions. Ensure it has 'voices_read' permission in ElevenLabs account."
+            elif 'network' in error_msg.lower() or 'connection' in error_msg.lower():
+                user_error = "Network error connecting to ElevenLabs. Check your internet connection."
+            else:
+                user_error = f"Validation failed: {error_msg[:100]}"
+            
+            socketio.emit('elevenlabs_validation_result', {
+                'valid': False,
+                'voices': [],
+                'error': user_error
+            }, to=client_id)
+    
+    # Run validation in background thread
+    validation_thread = threading.Thread(target=validate_async, daemon=True)
+    validation_thread.start()
+
+@socketio.on('elevenlabs_key_clear')
+def on_elevenlabs_key_clear(data):
+    """Clear the stored ElevenLabs API key."""
+    print(f"\n🎤 [ElevenLabs] API key clear requested")
+    _startup_config['elevenlabs_api_key'] = ''
+    _narration_config['elevenlabs_api_key'] = ''
+    _save_startup_config(_startup_config)
+    _save_narration_config(_narration_config)
+    
+    # Broadcast cleared config to all clients
+    socketio.emit('startup_config_sync', _build_startup_config_sync_payload())
+    socketio.emit('narration_config_sync', _build_narration_config_sync_payload())
+    emit('elevenlabs_key_clear_response', {'status': 'ok'})
+    print(f"✅ [ElevenLabs] API key cleared")
+
+@socketio.on('startup_check_run')
+def on_startup_check_run(data):
+    """Trigger manual startup check execution."""
+    print(f"\n⬛ [Startup] Manual check requested from client")
+    client_id = request.sid
+    
+    def run_check_async():
+        """Background task to run startup check."""
+        audio_ducked = False
+        try:
+            from startup_systems_check import main as run_startup_check
+            
+            gemini_key = _narration_config.get('api_key')  # Use narration API key for Gemini
+            eleven_key = _startup_config.get('elevenlabs_api_key')
+            voice_id = _startup_config.get('elevenlabs_voice_id', 'JBFqnCBsd6RMkjVDRZzb')
+            
+            print(f"⬛ [Startup] Running diagnostics with provided credentials...")
+
+            # Lower engine channels while startup speech plays so output is audible.
+            try:
+                car_audio.duck_engine_volume(True)
+                audio_ducked = True
+            except Exception as duck_err:
+                print(f"⚠️  [Startup] Could not duck engine audio: {duck_err}")
+
+            status = run_startup_check(
+                gemini_key=gemini_key,
+                eleven_key=eleven_key,
+                voice_id=voice_id,
+                audio_device=CAR_AUDIO_DEVICE,
+            )
+            
+            # Send result back to client
+            result_data = {
+                'status': 'complete',
+                'critical_ok': status.critical_systems_ready,
+                'all_ok': status.all_systems_ready,
+                'pico_bridge': status.pico_bridge_ok,
+                'front_sonar': status.front_sonar_ok,
+                'laser': status.laser_ok,
+                'rear_sonar': status.rear_sonar_ok,
+                'mpu6050': status.mpu6050_ok,
+                'ir_sensors': status.ir_sensors_ok,
+                'encoder': status.encoder_ok,
+                'battery_voltage': status.battery_voltage,
+                'motor_current': status.motor_current,
+            }
+            
+            print(f"⬛ [Startup] Check complete - sending results to client {client_id}")
+            socketio.emit('startup_check_result', result_data, to=client_id)
+            
+        except Exception as e:
+            print(f"❌ [Startup] Check failed: {e}")
+            socketio.emit('startup_check_result', {'status': 'error', 'error': str(e)}, to=client_id)
+        finally:
+            if audio_ducked:
+                try:
+                    car_audio.duck_engine_volume(False)
+                except Exception as unduck_err:
+                    print(f"⚠️  [Startup] Could not restore engine audio: {unduck_err}")
+    
+    # Run check in background thread
+    check_thread = threading.Thread(target=run_check_async, daemon=True)
+    check_thread.start()
+    
+    # Immediately send acknowledgment
+    emit('startup_check_response', {'status': 'running', 'message': 'Diagnostic check started in background'})
 
 # Heartbeat monitoring thread
 def heartbeat_monitor():

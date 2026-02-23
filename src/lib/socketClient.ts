@@ -149,6 +149,24 @@ export function connectToServer(serverIp: string, port: number = 5000): Promise<
       console.log(`[Socket] 🎤 Kokoro config response:`, data);
       if (kokoroConfigResponseCallback) kokoroConfigResponseCallback(data);
     });
+
+    // Register ElevenLabs TTS event listeners at connect time so they persist
+    socket.on('elevenlabs_validation_result', (data: ElevenLabsValidationResult) => {
+      console.log(`[Socket] 🎤 ElevenLabs validation result:`, data);
+      if (elevenLabsValidationResultCallback) elevenLabsValidationResultCallback(data);
+    });
+
+    // Register startup sync/result listeners at connect time so callbacks
+    // still work when subscribed before socket creation.
+    socket.on('startup_config_sync', (data: StartupConfig) => {
+      console.log(`[Socket] ⬛ Startup config sync:`, data);
+      if (startupConfigSyncCallback) startupConfigSyncCallback(data);
+    });
+
+    socket.on('startup_check_result', (data: StartupCheckResult) => {
+      console.log(`[Socket] ⬛ Startup check result:`, data);
+      if (startupCheckResultCallback) startupCheckResultCallback(data);
+    });
   });
 }
 
@@ -256,6 +274,10 @@ export interface NarrationConfig {
   kokoro_ip?: string;
   kokoro_voice?: string;
   kokoro_voices?: string[];
+  elevenlabs_api_key_set?: boolean;
+  elevenlabs_api_key?: string;
+  elevenlabs_api_key_masked?: string;
+  elevenlabs_voice_id?: string;
 }
 
 export interface NarrationModel {
@@ -430,6 +452,133 @@ export function emitKokoroConfigUpdate(config: { kokoro_enabled?: boolean; kokor
   if (socket && socket.connected) {
     console.log(`[UI Control] 🎤 KOKORO CONFIG UPDATE:`, config);
     socket.emit('kokoro_config_update', config);
+  }
+}
+
+// ==========================================
+// 🎤 ELEVENLABS TTS SOCKET EVENTS
+// ==========================================
+
+export interface ElevenLabsVoice {
+  name: string;
+  voice_id: string;
+}
+
+export interface ElevenLabsValidationResult {
+  valid: boolean;
+  voices: ElevenLabsVoice[];
+  error: string;
+}
+
+export interface StartupConfig {
+  startup_check_enabled: boolean;
+  elevenlabs_api_key_set: boolean;
+  elevenlabs_api_key?: string;
+  elevenlabs_voice_id: string;
+}
+
+export interface StartupCheckResult {
+  status: string;
+  error?: string;
+  critical_ok?: boolean;
+  all_ok?: boolean;
+  pico_bridge?: boolean;
+  front_sonar?: boolean;
+  laser?: boolean;
+  rear_sonar?: boolean;
+  mpu6050?: boolean;
+  ir_sensors?: boolean;
+  encoder?: boolean;
+  battery_voltage?: number;
+  motor_current?: number;
+}
+
+let elevenLabsValidationResultCallback: ((data: ElevenLabsValidationResult) => void) | null = null;
+let startupConfigSyncCallback: ((data: StartupConfig) => void) | null = null;
+let startupCheckResultCallback: ((data: StartupCheckResult) => void) | null = null;
+
+/**
+ * Subscribe to ElevenLabs API validation results
+ */
+export function onElevenLabsValidationResult(callback: (data: ElevenLabsValidationResult) => void): void {
+  elevenLabsValidationResultCallback = callback;
+}
+
+/**
+ * Subscribe to startup config sync events (sent on connect)
+ */
+export function onStartupConfigSync(callback: (data: StartupConfig) => void): void {
+  startupConfigSyncCallback = callback;
+  if (socket) {
+    socket.off('startup_config_sync');
+    socket.on('startup_config_sync', (data: StartupConfig) => {
+      console.log(`[Socket] ⬛ Startup config sync:`, data);
+      if (startupConfigSyncCallback) startupConfigSyncCallback(data);
+    });
+  }
+}
+
+/**
+ * Subscribe to startup check results
+ */
+export function onStartupCheckResult(callback: (data: StartupCheckResult) => void): void {
+  startupCheckResultCallback = callback;
+  if (socket) {
+    socket.off('startup_check_result');
+    socket.on('startup_check_result', (data: StartupCheckResult) => {
+      console.log(`[Socket] ⬛ Startup check result:`, data);
+      if (startupCheckResultCallback) startupCheckResultCallback(data);
+    });
+  }
+}
+
+/**
+ * Validate ElevenLabs API key and fetch available voices
+ */
+export function emitElevenLabsValidateKey(apiKey: string): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎤 ELEVENLABS: Validating API key`);
+    socket.emit('elevenlabs_validate_key', { api_key: apiKey });
+  }
+}
+
+/**
+ * Clear the stored ElevenLabs API key on the backend
+ */
+export function emitElevenLabsKeyClear(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎤 ELEVENLABS: Clear API key`);
+    socket.emit('elevenlabs_key_clear', {});
+  }
+}
+
+/**
+ * Update startup check configuration (enabled/disabled, voice ID)
+ */
+export function emitStartupConfigUpdate(config: { startup_check_enabled?: boolean; elevenlabs_voice_id?: string }): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] ⬛ STARTUP CONFIG UPDATE:`, config);
+    socket.emit('startup_config_update', config);
+  }
+}
+
+/**
+ * Trigger manual startup check execution
+ */
+export function emitStartupCheckRun(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] ⬛ STARTUP: Triggering manual check`);
+    socket.emit('startup_check_run', {});
+  }
+}
+
+/**
+ * Request current startup config from backend
+ */
+export function requestStartupConfig(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] ⬛ STARTUP: Requesting config`);
+    socket.emit('startup_config_request', {});
   }
 }
 
@@ -872,4 +1021,14 @@ export default {
   emitSaveDriverData,
   requestDriverData,
   emitResetDriverData,
+  // ElevenLabs
+  onElevenLabsValidationResult,
+  emitElevenLabsValidateKey,
+  emitElevenLabsKeyClear,
+  // Startup Check
+  onStartupConfigSync,
+  onStartupCheckResult,
+  emitStartupConfigUpdate,
+  emitStartupCheckRun,
+  requestStartupConfig,
 };

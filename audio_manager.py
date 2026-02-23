@@ -160,6 +160,12 @@ class CarAudioManager:
         self._throttle = 0.0
         self._last_gas_time = 0.0
         self._last_reverse_time = 0.0
+        
+        # Volume ducking state for narration
+        self._narration_ducking = False
+        self._saved_accel_volume = 0.0
+        self._saved_idle_a_volume = 0.0
+        self._saved_idle_b_volume = 0.0
 
     def _load_sounds(self):
         """Load all sound files into pygame mixer."""
@@ -208,7 +214,36 @@ class CarAudioManager:
                 self._horn_channel.set_volume(1.0)
                 if not self._horn_channel.get_busy():
                     self._horn_channel.play(self._sounds["horn"])
-                    print("� Horn played!")
+                    print("🔔 Horn played!")
+
+    def duck_engine_volume(self, enable: bool = True):
+        """Reduce engine volume to 10% for narration playback.
+        
+        Args:
+            enable: True to duck (lower) volume, False to restore
+        """
+        with self._lock:
+            if enable and not self._narration_ducking:
+                # Save current volumes and reduce to 10%
+                self._saved_accel_volume = self._accel_channel.get_volume()
+                self._saved_idle_a_volume = self._idle_channel_a.get_volume()
+                self._saved_idle_b_volume = self._idle_channel_b.get_volume()
+                
+                self._accel_channel.set_volume(self._saved_accel_volume * 0.1)
+                self._idle_channel_a.set_volume(self._saved_idle_a_volume * 0.1)
+                self._idle_channel_b.set_volume(self._saved_idle_b_volume * 0.1)
+                
+                self._narration_ducking = True
+                print("🔊 Engine volume ducked to 10% for narration")
+            
+            elif not enable and self._narration_ducking:
+                # Restore previous volumes
+                self._accel_channel.set_volume(self._saved_accel_volume)
+                self._idle_channel_a.set_volume(self._saved_idle_a_volume)
+                self._idle_channel_b.set_volume(self._saved_idle_b_volume)
+                
+                self._narration_ducking = False
+                print("🔊 Engine volume restored after narration")
 
     def shutdown(self):
         """Stop all audio and clean up."""

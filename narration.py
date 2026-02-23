@@ -337,6 +337,7 @@ class NarrationEngine:
         self._lock = threading.Lock()
         self._play_local_tts = True  # Fallback to espeak-ng when Kokoro is unavailable
         self._audio_device = 'default'  # ALSA device for both Kokoro and TTS playback
+        self._audio_manager = None  # Reference to CarAudioManager for volume ducking
         # Kokoro TTS configuration
         self._kokoro_enabled = False
         self._kokoro_ip: str = ""
@@ -405,6 +406,16 @@ class NarrationEngine:
         with self._lock:
             self._picam2 = picam2
             self._vision_system = vision_system
+    
+    def set_audio_manager(self, audio_manager):
+        """Set the audio manager reference for volume ducking during narration.
+        
+        Args:
+            audio_manager: CarAudioManager instance for volume control
+        """
+        with self._lock:
+            self._audio_manager = audio_manager
+        print("🔊 [Narration] Audio manager configured for volume ducking")
     
     def set_callback(self, callback):
         """Set the callback for narration text output."""
@@ -488,28 +499,43 @@ class NarrationEngine:
                     # Play audio on the car via Kokoro (with loudness pipeline)
                     # first, fallback to local TTS if unavailable/failed
                     kokoro_success = False
-                    if kokoro_enabled and kokoro_ip and kokoro_voice:
-                        print(f"🎤 [Narration] Kokoro config - enabled={kokoro_enabled}, ip={kokoro_ip}, voice={kokoro_voice}, device={audio_device}")
-                        print(f"🎤 [Narration] Playing via Kokoro loudness pipeline at {kokoro_ip}...")
-                        kokoro_success = _play_kokoro_with_volume(
-                            ip_address=kokoro_ip,
-                            text=text,
-                            voice=kokoro_voice,
-                            speed=kokoro_speed,
-                            volume=kokoro_volume,
-                            audio_device=audio_device,
-                        )
-                        print(f"🎤 [Narration] Kokoro playback result: {kokoro_success}")
-                        if not kokoro_success:
-                            print(f"⚠️  [Narration] Kokoro playback failed, falling back to local TTS")
-                    else:
-                        print(f"⚠️  [Narration] Kokoro not fully configured - enabled={kokoro_enabled}, ip={kokoro_ip}, voice={kokoro_voice}")
+                    
+                    # Get audio manager reference for volume ducking
+                    audio_manager = None
+                    with self._lock:
+                        audio_manager = self._audio_manager
+                    
+                    # Duck engine volume during narration playback
+                    if audio_manager:
+                        audio_manager.duck_engine_volume(True)
+                    
+                    try:
+                        if kokoro_enabled and kokoro_ip and kokoro_voice:
+                            print(f"🎤 [Narration] Kokoro config - enabled={kokoro_enabled}, ip={kokoro_ip}, voice={kokoro_voice}, device={audio_device}")
+                            print(f"🎤 [Narration] Playing via Kokoro loudness pipeline at {kokoro_ip}...")
+                            kokoro_success = _play_kokoro_with_volume(
+                                ip_address=kokoro_ip,
+                                text=text,
+                                voice=kokoro_voice,
+                                speed=kokoro_speed,
+                                volume=kokoro_volume,
+                                audio_device=audio_device,
+                            )
+                            print(f"🎤 [Narration] Kokoro playback result: {kokoro_success}")
+                            if not kokoro_success:
+                                print(f"⚠️  [Narration] Kokoro playback failed, falling back to local TTS")
+                        else:
+                            print(f"⚠️  [Narration] Kokoro not fully configured - enabled={kokoro_enabled}, ip={kokoro_ip}, voice={kokoro_voice}")
 
-                    # Fallback to local TTS if Kokoro not enabled or failed
-                    if not kokoro_success and play_local_tts:
-                        print(f"🔊 [Narration] Using local TTS...") 
-                        tts = get_tts_synthesizer()
-                        tts.speak(text)
+                        # Fallback to local TTS if Kokoro not enabled or failed
+                        if not kokoro_success and play_local_tts:
+                            print(f"🔊 [Narration] Using local TTS...") 
+                            tts = get_tts_synthesizer()
+                            tts.speak(text)
+                    finally:
+                        # Restore engine volume after playback completes
+                        if audio_manager:
+                            audio_manager.duck_engine_volume(False)
 
                     # Signal that audio playback is done
                     if self._on_narration_done:

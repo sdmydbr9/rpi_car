@@ -532,6 +532,16 @@ export const SettingsDialog = ({
   const [isValidatingKokoro, setIsValidatingKokoro] = useState(false);
   const [kokoroError, setKokoroError] = useState("");
 
+  /* ---- Startup Check local state ---- */
+  const [startupCheckEnabled, setStartupCheckEnabled] = useState(true);
+  const [elevenLabsApiKeyInput, setElevenLabsApiKeyInput] = useState("");
+  const [isValidatingElevenLabs, setIsValidatingElevenLabs] = useState(false);
+  const [isElevenLabsKeyValid, setIsElevenLabsKeyValid] = useState(false);
+  const [availableElevenLabsVoices, setAvailableElevenLabsVoices] = useState<Array<{ name: string; voice_id: string }>>([]);
+  const [selectedElevenLabsVoice, setSelectedElevenLabsVoice] = useState("JBFqnCBsd6RMkjVDRZzb");
+  const [elevenLabsError, setElevenLabsError] = useState("");
+  const [isRunningStartupCheck, setIsRunningStartupCheck] = useState(false);
+
   // Sync narration config from backend when it changes
   useEffect(() => {
     if (narrationConfig) {
@@ -558,6 +568,19 @@ export const SettingsDialog = ({
       }
       if (narrationConfig.kokoro_voices && narrationConfig.kokoro_voices.length > 0) {
         setAvailableKokoroVoices(narrationConfig.kokoro_voices);
+      }
+      // Sync ElevenLabs settings from narration config
+      if (narrationConfig.elevenlabs_api_key_set !== undefined) {
+        setIsElevenLabsKeyValid(narrationConfig.elevenlabs_api_key_set);
+        if (!narrationConfig.elevenlabs_api_key_set) {
+          setElevenLabsApiKeyInput("");
+        }
+      }
+      if (typeof narrationConfig.elevenlabs_api_key === "string") {
+        setElevenLabsApiKeyInput(narrationConfig.elevenlabs_api_key);
+      }
+      if (narrationConfig.elevenlabs_voice_id) {
+        setSelectedElevenLabsVoice(narrationConfig.elevenlabs_voice_id);
       }
     }
   }, [narrationConfig]);
@@ -600,6 +623,48 @@ export const SettingsDialog = ({
       }
     });
 
+    // Subscribe to narration config sync (sent after validation or on reconnect)
+    socketClient.onNarrationConfigSync((data) => {
+      console.log("🎙️ SettingsDialog received narration config sync:", data);
+      setNarrationProvider(data.provider || "gemini");
+      setIsKeyValid(data.api_key_set || false);
+      setSelectedModel(data.model || "");
+      setNarrationInterval(data.interval || 30);
+      if (data.api_key_set && data.api_key_masked) {
+        setApiKeyInput(data.api_key_masked);
+      } else if (!data.api_key_set) {
+        setApiKeyInput("");
+      }
+      if (data.models && data.models.length > 0) {
+        setAvailableModels(data.models);
+      }
+      if (data.kokoro_enabled !== undefined) {
+        setKokoroEnabled(data.kokoro_enabled || false);
+      }
+      if (data.kokoro_ip) {
+        setKokoroIp(data.kokoro_ip);
+      }
+      if (data.kokoro_voice) {
+        setKokoroVoice(data.kokoro_voice);
+      }
+      if (data.kokoro_voices && data.kokoro_voices.length > 0) {
+        setAvailableKokoroVoices(data.kokoro_voices);
+      }
+      // Update ElevenLabs settings from narration config
+      if (data.elevenlabs_api_key_set !== undefined) {
+        setIsElevenLabsKeyValid(data.elevenlabs_api_key_set);
+        if (!data.elevenlabs_api_key_set) {
+          setElevenLabsApiKeyInput("");
+        }
+      }
+      if (typeof data.elevenlabs_api_key === "string") {
+        setElevenLabsApiKeyInput(data.elevenlabs_api_key);
+      }
+      if (data.elevenlabs_voice_id) {
+        setSelectedElevenLabsVoice(data.elevenlabs_voice_id);
+      }
+    });
+
     socketClient.onKokoroValidationResult((data: KokoroValidationResult) => {
       console.log("🎤 SettingsDialog received Kokoro validation result:", data);
       setIsValidatingKokoro(false);
@@ -638,6 +703,74 @@ export const SettingsDialog = ({
         });
       }
     });
+
+    // Subscribe to ElevenLabs validation results
+    socketClient.onElevenLabsValidationResult((data) => {
+      console.log("🎤 SettingsDialog received ElevenLabs validation result:", data);
+      setIsValidatingElevenLabs(false);
+      if (data.valid && data.voices && data.voices.length > 0) {
+        setAvailableElevenLabsVoices(data.voices);
+        setIsElevenLabsKeyValid(true);
+        setElevenLabsError("");
+        
+        const limitedMsg = data.error === 'limited_permissions' 
+          ? " (using default voices due to limited API key permissions)" 
+          : "";
+        
+        toast.success("🎤 ElevenLabs API Valid", {
+          description: `${data.voices.length} voices available${limitedMsg}`,
+          duration: 3000,
+        });
+        if (data.voices.length > 0) {
+          setSelectedElevenLabsVoice(data.voices[0].voice_id);
+          socketClient.emitStartupConfigUpdate({ elevenlabs_voice_id: data.voices[0].voice_id });
+        }
+      } else {
+        setAvailableElevenLabsVoices([]);
+        setIsElevenLabsKeyValid(false);
+        setElevenLabsError(data.error || "Failed to validate ElevenLabs API");
+        toast.error("❌ ElevenLabs API Invalid", {
+          description: data.error || "Could not validate ElevenLabs API",
+          duration: 4000,
+        });
+      }
+    });
+
+    // Subscribe to startup config sync
+    socketClient.onStartupConfigSync((data) => {
+      console.log("⬛ SettingsDialog received startup config sync:", data);
+      setStartupCheckEnabled(data.startup_check_enabled);
+      setIsElevenLabsKeyValid(data.elevenlabs_api_key_set);
+      setSelectedElevenLabsVoice(data.elevenlabs_voice_id);
+      if (typeof data.elevenlabs_api_key === "string") {
+        setElevenLabsApiKeyInput(data.elevenlabs_api_key);
+      } else if (!data.elevenlabs_api_key_set) {
+        setElevenLabsApiKeyInput("");
+      }
+    });
+
+    // Subscribe to startup check results
+    socketClient.onStartupCheckResult((data) => {
+      console.log("⬛ SettingsDialog received startup check result:", data);
+      setIsRunningStartupCheck(false);
+      if (data.status === "complete") {
+        const allOk = data.all_ok ? "All systems operational" : "Some systems offline";
+        const icon = data.critical_ok ? "✅" : "⚠️";
+        toast.success(`${icon} Startup Check Complete`, {
+          description: allOk,
+          duration: 5000,
+        });
+      } else if (data.status === "error") {
+        toast.error("⬛ Startup Check Failed", {
+          description: data.error || "An error occurred during the check",
+          duration: 4000,
+        });
+      }
+    });
+
+    // Request latest startup config after listeners are registered.
+    // This avoids missing a fast sync response before callback binding.
+    socketClient.requestStartupConfig();
   }, []);
 
   /* ---- AI Narration handlers ---- */
@@ -702,6 +835,43 @@ export const SettingsDialog = ({
     },
     [kokoroIp, kokoroVoice],
   );
+
+  /* ---- ElevenLabs handlers ---- */
+  const handleValidateElevenLabsKey = useCallback(() => {
+    if (!elevenLabsApiKeyInput.trim()) {
+      setElevenLabsError("Please enter an API key");
+      return;
+    }
+    setIsValidatingElevenLabs(true);
+    setElevenLabsError("");
+    socketClient.emitElevenLabsValidateKey(elevenLabsApiKeyInput.trim());
+  }, [elevenLabsApiKeyInput]);
+
+  const handleClearElevenLabsKey = useCallback(() => {
+    socketClient.emitElevenLabsKeyClear();
+    setElevenLabsApiKeyInput("");
+    setIsElevenLabsKeyValid(false);
+    setAvailableElevenLabsVoices([]);
+    setSelectedElevenLabsVoice("JBFqnCBsd6RMkjVDRZzb");
+    setElevenLabsError("");
+    toast.success("🗑️ ElevenLabs Key Cleared", { description: "API key removed from server", duration: 3000 });
+  }, []);
+
+  const handleElevenLabsVoiceChange = useCallback((voiceId: string) => {
+    setSelectedElevenLabsVoice(voiceId);
+    socketClient.emitStartupConfigUpdate({ elevenlabs_voice_id: voiceId });
+  }, []);
+
+  /* ---- Startup Check handlers ---- */
+  const handleStartupCheckToggle = useCallback((enabled: boolean) => {
+    setStartupCheckEnabled(enabled);
+    socketClient.emitStartupConfigUpdate({ startup_check_enabled: enabled });
+  }, []);
+
+  const handleRunStartupCheck = useCallback(() => {
+    setIsRunningStartupCheck(true);
+    socketClient.emitStartupCheckRun();
+  }, []);
 
   /* ---- CV mode camera helpers ---- */
   const originalCameraSettingsRef = useRef<{ resolution: string; jpeg_quality: number; framerate: number } | null>(null);
@@ -937,7 +1107,12 @@ export const SettingsDialog = ({
                   <div className="py-0.5">
                     <div className="flex items-center justify-between gap-1">
                       <span className="text-[9px] sm:text-[11px] text-muted-foreground racing-text">API Key</span>
-                      {isKeyValid && (
+                      {isKeyValid && availableModels.length > 0 && (
+                        <span className="flex items-center gap-0.5 text-[8px] text-green-400 racing-text">
+                          <Check className="w-2.5 h-2.5" /> Cached ({availableModels.length} models)
+                        </span>
+                      )}
+                      {isKeyValid && availableModels.length === 0 && (
                         <span className="flex items-center gap-0.5 text-[8px] text-green-400 racing-text">
                           <Check className="w-2.5 h-2.5" /> Saved
                         </span>
@@ -949,11 +1124,18 @@ export const SettingsDialog = ({
                           type={showApiKey ? "text" : "password"}
                           value={apiKeyInput}
                           onChange={(e) => {
-                            setApiKeyInput(e.target.value);
-                            setKeyError("");
+                            const newValue = e.target.value;
+                            setApiKeyInput(newValue);
+                            // Only clear error if user is typing a new key
+                            if (!isKeyValid || !newValue.startsWith("*")) {
+                              setKeyError("");
+                            }
                           }}
-                          placeholder={isKeyValid ? "•••••••• (key saved)" : "Paste your API key..."}
-                          className="w-full h-5 sm:h-6 bg-card border border-border rounded px-2 pr-6 text-[10px] sm:text-xs text-foreground racing-text focus:border-primary focus:outline-none placeholder:text-muted-foreground/50"
+                          placeholder={isKeyValid && availableModels.length > 0 ? "✓ Key loaded from cache" : isKeyValid ? "•••••••• (key saved)" : "Paste your API key..."}
+                          readOnly={isKeyValid && availableModels.length > 0}
+                          className={`w-full h-5 sm:h-6 bg-card border border-border rounded px-2 pr-6 text-[10px] sm:text-xs text-foreground racing-text focus:border-primary focus:outline-none placeholder:text-muted-foreground/50 ${
+                            isKeyValid && availableModels.length > 0 ? "bg-muted/30 cursor-not-allowed" : ""
+                          }`}
                         />
                         <button
                           onClick={() => setShowApiKey(!showApiKey)}
@@ -962,19 +1144,21 @@ export const SettingsDialog = ({
                           {showApiKey ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
                         </button>
                       </div>
-                      <button
-                        onClick={handleValidateKey}
-                        disabled={isValidatingKey || !apiKeyInput.trim() || apiKeyInput.startsWith("*")}
-                        className="px-2 py-0.5 rounded border border-primary bg-primary/20 text-primary racing-text text-[9px] sm:text-[10px] hover:bg-primary/30 transition-colors disabled:opacity-40 disabled:pointer-events-none flex items-center gap-0.5"
-                      >
-                        {isValidatingKey ? (
-                          <>
-                            <Loader2 className="w-2.5 h-2.5 animate-spin" /> Checking...
-                          </>
-                        ) : (
-                          "Validate"
-                        )}
-                      </button>
+                      {!(isKeyValid && availableModels.length > 0) && (
+                        <button
+                          onClick={handleValidateKey}
+                          disabled={isValidatingKey || !apiKeyInput.trim() || apiKeyInput.startsWith("*")}
+                          className="px-2 py-0.5 rounded border border-primary bg-primary/20 text-primary racing-text text-[9px] sm:text-[10px] hover:bg-primary/30 transition-colors disabled:opacity-40 disabled:pointer-events-none flex items-center gap-0.5"
+                        >
+                          {isValidatingKey ? (
+                            <>
+                              <Loader2 className="w-2.5 h-2.5 animate-spin" /> Checking...
+                            </>
+                          ) : (
+                            "Validate"
+                          )}
+                        </button>
+                      )}
                       {isKeyValid && (
                         <button
                           onClick={handleClearKey}
@@ -986,6 +1170,11 @@ export const SettingsDialog = ({
                       )}
                     </div>
                     {keyError && <div className="mt-0.5 text-[8px] text-red-400 racing-text">{keyError}</div>}
+                    {isKeyValid && availableModels.length > 0 && (
+                      <div className="mt-0.5 text-[7px] text-muted-foreground/60 racing-text">
+                        ✓ API key loaded from config. Models cached locally.
+                      </div>
+                    )}
                   </div>
 
                   {/* Model */}
@@ -1164,6 +1353,134 @@ export const SettingsDialog = ({
                         ))}
                       </select>
                     </SettingsRow>
+                  )}
+                </CollapsibleGroup>
+
+                {/* ───────── ELEVENLABS TTS ───────── */}
+                <CollapsibleGroup title="🎤 ELEVENLABS VOICES" defaultOpen={false}>
+                  {/* Info */}
+                  <div className="py-0.5 text-[8px] sm:text-[9px] text-muted-foreground/70 racing-text">
+                    Configure premium AI voices for startup diagnostics and narration.
+                  </div>
+
+                  {/* API Key */}
+                  <div className="py-0.5">
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-[9px] sm:text-[11px] text-muted-foreground racing-text">API Key</span>
+                      {isElevenLabsKeyValid && (
+                        <span className="flex items-center gap-0.5 text-[8px] text-green-400 racing-text">
+                          <Check className="w-2.5 h-2.5" /> Saved
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-0.5 mt-0.5">
+                      <div className="flex-1">
+                        <input
+                          type="text"
+                          value={elevenLabsApiKeyInput}
+                          onChange={(e) => {
+                            setElevenLabsApiKeyInput(e.target.value);
+                            setElevenLabsError("");
+                          }}
+                          placeholder="Paste your API key..."
+                          className="w-full h-5 sm:h-6 bg-card border border-border rounded px-2 text-[10px] sm:text-xs text-foreground racing-text focus:border-primary focus:outline-none placeholder:text-muted-foreground/50"
+                        />
+                      </div>
+                      <button
+                        onClick={handleValidateElevenLabsKey}
+                        disabled={isValidatingElevenLabs || !elevenLabsApiKeyInput.trim()}
+                        className="px-2 py-0.5 rounded border border-pink-500 bg-pink-500/20 text-pink-400 racing-text text-[9px] sm:text-[10px] hover:bg-pink-500/30 transition-colors disabled:opacity-40 disabled:pointer-events-none flex items-center gap-0.5"
+                      >
+                        {isValidatingElevenLabs ? (
+                          <>
+                            <Loader2 className="w-2.5 h-2.5 animate-spin" /> Checking...
+                          </>
+                        ) : (
+                          "Validate"
+                        )}
+                      </button>
+                      {isElevenLabsKeyValid && (
+                        <button
+                          onClick={handleClearElevenLabsKey}
+                          className="px-1.5 py-0.5 rounded border border-destructive/50 bg-destructive/10 text-destructive racing-text text-[9px] sm:text-[10px] hover:bg-destructive/20 transition-colors flex items-center gap-0.5"
+                          title="Clear API key"
+                        >
+                          <Trash2 className="w-2.5 h-2.5" />
+                        </button>
+                      )}
+                    </div>
+                    {elevenLabsError && <div className="mt-0.5 text-[8px] text-red-400 racing-text">{elevenLabsError}</div>}
+                    {elevenLabsError && elevenLabsError.includes('permission') && (
+                      <div className="mt-1 text-[7px] text-yellow-400/80 racing-text bg-yellow-500/10 p-1 rounded">
+                        💡 To fix permission issues: Log into your ElevenLabs account → API Keys → Regenerate the key with full permissions including 'voices_read'
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Voice Selection */}
+                  <SettingsRow label="Default Voice" info="Voice used for startup AI diagnostics and narration.">
+                    {availableElevenLabsVoices.length > 0 ? (
+                      <select
+                        value={selectedElevenLabsVoice}
+                        onChange={(e) => handleElevenLabsVoiceChange(e.target.value)}
+                        className="px-2 py-0.5 rounded border border-border bg-card text-[10px] sm:text-xs text-foreground racing-text focus:border-primary focus:outline-none max-w-[180px]"
+                      >
+                        {availableElevenLabsVoices.map((voice) => (
+                          <option key={voice.voice_id} value={voice.voice_id}>
+                            {voice.name}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        value={selectedElevenLabsVoice}
+                        readOnly
+                        className="w-full max-w-[220px] h-5 sm:h-6 bg-muted/30 border border-border rounded px-2 text-[10px] sm:text-xs text-foreground/80 racing-text cursor-not-allowed"
+                      />
+                    )}
+                  </SettingsRow>
+                </CollapsibleGroup>
+
+                {/* ───────── STARTUP AI CHECK ───────── */}
+                <CollapsibleGroup title="⬛ STARTUP AI CHECK" defaultOpen={false}>
+                  {/* Enable / Disable */}
+                  <SettingsRow label="Enable" info="Run AI diagnostics when the car starts up (speaks system status via TTS).">
+                    <button
+                      onClick={() => handleStartupCheckToggle(!startupCheckEnabled)}
+                      className={`px-3 py-0.5 rounded border text-[10px] sm:text-xs racing-text transition-colors ${
+                        startupCheckEnabled
+                          ? "border-gray-500 bg-gray-500/20 text-gray-400 hover:bg-gray-500/30"
+                          : "border-border bg-muted/30 text-muted-foreground hover:bg-muted/50"
+                      }`}
+                    >
+                      {startupCheckEnabled ? "ON" : "OFF"}
+                    </button>
+                  </SettingsRow>
+
+                  {/* Run Check Button */}
+                  <div className="py-0.5">
+                    <button
+                      onClick={handleRunStartupCheck}
+                      disabled={isRunningStartupCheck || !isElevenLabsKeyValid}
+                      className="w-full px-3 py-1 rounded border border-gray-500 bg-gray-500/20 text-gray-400 racing-text text-[9px] sm:text-[10px] hover:bg-gray-500/30 transition-colors disabled:opacity-40 disabled:pointer-events-none flex items-center justify-center gap-1"
+                    >
+                      {isRunningStartupCheck ? (
+                        <>
+                          <Loader2 className="w-2.5 h-2.5 animate-spin" /> Running...
+                        </>
+                      ) : (
+                        <>
+                          ⬛ Run Startup Check
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  {!isElevenLabsKeyValid && (
+                    <div className="ml-0 text-[7px] text-amber-400/80 racing-text pb-0.5">
+                      ⚠️ Configure ElevenLabs API key above to enable startup checks
+                    </div>
                   )}
                 </CollapsibleGroup>
 
