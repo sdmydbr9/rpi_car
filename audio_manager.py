@@ -1,11 +1,10 @@
 import os
-import sys
 import time
-import pygame
 import threading
+
+import pygame
 from pydub import AudioSegment
 from pydub.silence import detect_nonsilent
-from typing import Optional
 
 
 # ==========================================
@@ -28,6 +27,7 @@ NARRATION_DUCK_RELEASE_PER_SEC = 1.8  # 0.1 -> 1.0 in ~500ms
 # ==========================================
 
 ENGINE_SAMPLE_RATE = 44100 
+AUDIO_BACKEND_FALLBACK_ORDER = ("pulseaudio", "alsa")
 
 
 def process_track(filename, target_dbfs, target_channels, offset_db=0.0):
@@ -109,10 +109,19 @@ class CarAudioManager:
         self._lock = threading.Lock()
         self._sounds_dir = sounds_dir
         self._audio_device = audio_device or "default"
-        
-        # Prepare audio files
-        if not prepare_gapless_audio(sounds_dir):
-            print("⚠️  Audio preparation failed")
+        self._audio_ready = False
+        self._active_backend = None
+        self._warned_audio_unavailable = False
+
+        # State is initialized before mixer setup so service-mode failures
+        # never leave a partially-constructed object.
+        self._sounds = {}
+        self._ign_channel = None
+        self._idle_channel_a = None
+        self._idle_channel_b = None
+        self._accel_channel = None
+        self._horn_channel = None
+        self._beeper_channel = None
         
         self._paths = {
             "ignition": os.path.join(sounds_dir, "ignition_trimmed.wav"),
@@ -122,27 +131,33 @@ class CarAudioManager:
             "horn": os.path.join(sounds_dir, "horn_trimmed.wav"),
         }
 
+        # Prepare audio files
+        if not prepare_gapless_audio(sounds_dir):
+            print("⚠️  Audio preparation failed")
+
         self._engine_running = False
         self._accelerating = False
         self._reversing = False
         self._horn_warning = False
 
-        # Initialize pygame mixer with PulseAudio for Shairport Sync mixing
-        try:
-            pygame.mixer.init(
-                frequency=ENGINE_SAMPLE_RATE,
-                size=-16,
-                channels=2,
-                buffer=512,
-                devicename=None  # Uses default PulseAudio sink
-            )
-            print(f"🔊 Pygame mixer initialized (rate={ENGINE_SAMPLE_RATE}Hz, device={audio_device})")
-        except Exception as e:
-            print(f"⚠️  Failed to initialize pygame mixer: {e}")
+        # Timing state
+        self._ign_started = False
+        self._idle_channel_active = "A"
+        self._next_idle_trigger = 0.0
+        self._throttle = 0.0
+        self._last_gas_time = 0.0
+        self._last_reverse_time = 0.0
+
+        # Volume ducking state for narration
+        self._narration_ducking = False
+        self._duck_factor = 1.0
+        self._last_mix_update_ts = time.monotonic()
+
+        if not self._init_mixer_with_fallback():
+            print("⚠️  Engine sound is unavailable; continuing without car audio.")
             return
 
         # Load sounds into memory
-        self._sounds = {}
         self._load_sounds()
         
         # Channel allocation
@@ -161,19 +176,63 @@ class CarAudioManager:
         if "beeper" in self._sounds:
             self._beeper_channel.play(self._sounds["beeper"], loops=-1)
             self._beeper_channel.set_volume(0.0)
-        
-        # Timing state
-        self._ign_started = False
-        self._idle_channel_active = "A"
-        self._next_idle_trigger = 0.0
-        self._throttle = 0.0
-        self._last_gas_time = 0.0
-        self._last_reverse_time = 0.0
-        
-        # Volume ducking state for narration
-        self._narration_ducking = False
-        self._duck_factor = 1.0
-        self._last_mix_update_ts = time.monotonic()
+
+        self._audio_ready = True
+
+    def is_available(self) -> bool:
+        return self._audio_ready
+
+    def backend(self) -> str:
+        return self._active_backend or "unavailable"
+
+    def _init_mixer_with_fallback(self) -> bool:
+        preferred_driver = (os.environ.get("SDL_AUDIODRIVER") or "").strip()
+        fallback_order = []
+        if preferred_driver:
+            fallback_order.append(preferred_driver)
+        for candidate in AUDIO_BACKEND_FALLBACK_ORDER:
+            if candidate not in fallback_order:
+                fallback_order.append(candidate)
+
+        audio_device = (self._audio_device or "").strip().lower()
+        init_errors = []
+        for driver in fallback_order:
+            try:
+                pygame.mixer.quit()
+            except Exception:
+                pass
+
+            os.environ["SDL_AUDIODRIVER"] = driver
+            if driver == "alsa":
+                if audio_device and audio_device != "default":
+                    os.environ["AUDIODEV"] = self._audio_device
+                else:
+                    os.environ.pop("AUDIODEV", None)
+            else:
+                os.environ.pop("AUDIODEV", None)
+
+            try:
+                pygame.mixer.init(
+                    frequency=ENGINE_SAMPLE_RATE,
+                    size=-16,
+                    channels=2,
+                    buffer=512,
+                    devicename=None,
+                )
+                self._active_backend = driver
+                print(
+                    f"🔊 Pygame mixer initialized "
+                    f"(rate={ENGINE_SAMPLE_RATE}Hz, backend={driver}, device={self._audio_device})"
+                )
+                return True
+            except Exception as exc:
+                init_errors.append(f"{driver}: {exc}")
+
+        print(
+            "⚠️  Failed to initialize pygame mixer on any backend: "
+            + " | ".join(init_errors)
+        )
+        return False
 
     def _load_sounds(self):
         """Load all sound files into pygame mixer."""
@@ -195,6 +254,12 @@ class CarAudioManager:
                 return
 
             self._engine_running = enabled
+            if not self._audio_ready:
+                if enabled and not self._warned_audio_unavailable:
+                    print("⚠️  Engine start requested but audio backend is unavailable.")
+                    self._warned_audio_unavailable = True
+                return
+
             if enabled:
                 self._accelerating = False
                 self._reversing = False
@@ -212,11 +277,15 @@ class CarAudioManager:
             self._accelerating = bool(accelerating)
             self._reversing = bool(reversing)
             self._horn_warning = bool(horn_warning)
+            if not self._audio_ready:
+                return
             self._update_audio_mix_locked()
 
     def play_horn(self):
         """Play the horn sound once (stateless, manual trigger)."""
         with self._lock:
+            if not self._audio_ready:
+                return
             if "horn" in self._sounds:
                 # Ensure horn channel volume is set for manual play
                 self._horn_channel.set_volume(1.0)
@@ -231,6 +300,8 @@ class CarAudioManager:
             enable: True to duck (lower) volume, False to restore
         """
         with self._lock:
+            if not self._audio_ready:
+                return
             if enable and not self._narration_ducking:
                 self._narration_ducking = True
                 print("🔊 Engine ducking requested (smooth ramp to 10%)")
@@ -249,13 +320,17 @@ class CarAudioManager:
             self._reversing = False
             self._horn_warning = False
             self._stop_all_locked()
+            if not self._audio_ready:
+                return
             try:
                 pygame.mixer.quit()
-            except:
+            except Exception:
                 pass
 
     def _update_audio_mix_locked(self):
         """Update throttle and audio mixing based on current state."""
+        if not self._audio_ready:
+            return
         current_time = time.monotonic()
         dt = current_time - self._last_mix_update_ts
         self._last_mix_update_ts = current_time
@@ -326,6 +401,8 @@ class CarAudioManager:
 
     def _start_engine_sequence_locked(self):
         """Start the engine ignition sequence with crossfade to idle."""
+        if not self._audio_ready:
+            return
         self._throttle = 0.0
         self._last_gas_time = 0.0
         self._last_reverse_time = 0.0
@@ -370,17 +447,28 @@ class CarAudioManager:
 
     def _stop_all_locked(self):
         """Stop all audio channels with fadeout."""
+        if not self._audio_ready:
+            self._ign_started = False
+            self._throttle = 0.0
+            self._duck_factor = 1.0
+            return
         # Fade out all audio like in sound_sequence.py when 'q' is pressed
         try:
             pygame.mixer.fadeout(1000)
-        except:
+        except Exception:
             # Fallback: fade out individual channels if mixer fadeout fails
-            self._ign_channel.fadeout(200)
-            self._idle_channel_a.fadeout(200)
-            self._idle_channel_b.fadeout(200)
-            self._accel_channel.set_volume(0.0)
-            self._beeper_channel.set_volume(0.0)
-            self._horn_channel.fadeout(200)
+            if self._ign_channel is not None:
+                self._ign_channel.fadeout(200)
+            if self._idle_channel_a is not None:
+                self._idle_channel_a.fadeout(200)
+            if self._idle_channel_b is not None:
+                self._idle_channel_b.fadeout(200)
+            if self._accel_channel is not None:
+                self._accel_channel.set_volume(0.0)
+            if self._beeper_channel is not None:
+                self._beeper_channel.set_volume(0.0)
+            if self._horn_channel is not None:
+                self._horn_channel.fadeout(200)
         self._ign_started = False
         self._throttle = 0.0
         self._duck_factor = 1.0

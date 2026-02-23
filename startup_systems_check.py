@@ -880,20 +880,50 @@ def main(
     expressive_text = None
     speech_played = False
 
-    if internet_available and GEMINI_AVAILABLE:
-        expressive_text = expressive_text_from_gemini(summary)
+    if internet_available:
+        if GEMINI_AVAILABLE:
+            expressive_text = expressive_text_from_gemini(summary)
 
-    if not expressive_text:
+        if not expressive_text:
+            expressive_text = expressive_text_from_local_llm(summary)
+
+        if expressive_text:
+            print(f"\n[TARS VOCAL OUTPUT] > {expressive_text}\n")
+            if ELEVENLABS_AVAILABLE:
+                speech_played = speak_with_eleven(
+                    expressive_text,
+                    voice_id=voice_id,
+                    api_key=ELEVEN_API_KEY,
+                    audio_device=audio_device,
+                    on_playback_start=on_speech_start,
+                    on_playback_end=on_speech_end,
+                )
+                if not speech_played:
+                    print("[TARS] ElevenLabs playback failed; falling back to local Mimic3")
+                    speech_played = speak_with_mimic3(
+                        expressive_text,
+                        audio_device=audio_device,
+                        on_playback_start=on_speech_start,
+                        on_playback_end=on_speech_end,
+                    )
+            else:
+                print("[TARS] ElevenLabs unavailable; using local Mimic3")
+                speech_played = speak_with_mimic3(
+                    expressive_text,
+                    audio_device=audio_device,
+                    on_playback_start=on_speech_start,
+                    on_playback_end=on_speech_end,
+                )
+    else:
         expressive_text = expressive_text_from_local_llm(summary)
-
-    if expressive_text:
-        print(f"\n[TARS VOCAL OUTPUT] > {expressive_text}\n")
-        speech_played = speak_with_mimic3(
-            expressive_text,
-            audio_device=audio_device,
-            on_playback_start=on_speech_start,
-            on_playback_end=on_speech_end,
-        )
+        if expressive_text:
+            print(f"\n[TARS VOCAL OUTPUT] > {expressive_text}\n")
+            speech_played = speak_with_mimic3(
+                expressive_text,
+                audio_device=audio_device,
+                on_playback_start=on_speech_start,
+                on_playback_end=on_speech_end,
+            )
 
     if not speech_played:
         fallback_speak_status(

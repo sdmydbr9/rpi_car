@@ -1,6 +1,11 @@
 import os
-# Configure pygame to use PulseAudio for mixing with Shairport Sync
-os.environ['SDL_AUDIODRIVER'] = 'pulseaudio'
+# Prefer PulseAudio by default for Shairport Sync mixing, but allow
+# systemd/service mode to override via CAR_AUDIO_DRIVER (e.g. "alsa").
+_car_audio_driver_override = os.environ.get("CAR_AUDIO_DRIVER")
+if _car_audio_driver_override:
+    os.environ["SDL_AUDIODRIVER"] = _car_audio_driver_override
+else:
+    os.environ.setdefault("SDL_AUDIODRIVER", "pulseaudio")
 
 try:
     import RPi.GPIO as GPIO
@@ -406,7 +411,7 @@ car_audio = CarAudioManager(
     idle_handoff_overlap_s=CAR_IDLE_HANDOFF_OVERLAP_S,
 )
 print(
-    f"🔊 [Audio] Initialized (device={CAR_AUDIO_DEVICE}, "
+    f"🔊 [Audio] Initialized (ready={car_audio.is_available()}, backend={car_audio.backend()}, device={CAR_AUDIO_DEVICE}, "
     f"idle_lead_in={CAR_IDLE_START_DELAY_S:.2f}s, "
     f"idle_trim_end={CAR_IDLE_TRIM_END_S:.2f}s, "
     f"idle_xfade={CAR_IDLE_CROSSFADE_S:.3f}s, "
