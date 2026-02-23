@@ -1,3 +1,7 @@
+import os
+# Configure pygame to use PulseAudio for mixing with Shairport Sync
+os.environ['SDL_AUDIODRIVER'] = 'pulseaudio'
+
 try:
     import RPi.GPIO as GPIO
 except (ImportError, RuntimeError):

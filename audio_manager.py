@@ -127,9 +127,15 @@ class CarAudioManager:
         self._reversing = False
         self._horn_warning = False
 
-        # Initialize pygame mixer
+        # Initialize pygame mixer with PulseAudio for Shairport Sync mixing
         try:
-            pygame.mixer.init(frequency=ENGINE_SAMPLE_RATE, size=-16, channels=2, buffer=512)
+            pygame.mixer.init(
+                frequency=ENGINE_SAMPLE_RATE,
+                size=-16,
+                channels=2,
+                buffer=512,
+                devicename=None  # Uses default PulseAudio sink
+            )
             print(f"🔊 Pygame mixer initialized (rate={ENGINE_SAMPLE_RATE}Hz, device={audio_device})")
         except Exception as e:
             print(f"⚠️  Failed to initialize pygame mixer: {e}")
