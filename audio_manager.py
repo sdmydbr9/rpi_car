@@ -23,6 +23,8 @@ BEEPER_VOLUME_OFFSET_DB = 0.0
 THROTTLE_RAMP_UP = 0.04        
 THROTTLE_RAMP_DOWN = 0.02      
 NARRATION_DUCK_FACTOR = 0.10   # 10% volume while narration/startup speech plays
+NARRATION_DUCK_ATTACK_PER_SEC = 2.5   # 1.0 -> 0.1 in ~360ms
+NARRATION_DUCK_RELEASE_PER_SEC = 1.8  # 0.1 -> 1.0 in ~500ms
 # ==========================================
 
 ENGINE_SAMPLE_RATE = 44100 
@@ -164,10 +166,8 @@ class CarAudioManager:
         
         # Volume ducking state for narration
         self._narration_ducking = False
-        self._saved_ign_volume = 1.0
-        self._saved_accel_volume = 0.0
-        self._saved_idle_a_volume = 0.0
-        self._saved_idle_b_volume = 0.0
+        self._duck_factor = 1.0
+        self._last_mix_update_ts = time.monotonic()
 
     def _load_sounds(self):
         """Load all sound files into pygame mixer."""
@@ -226,31 +226,13 @@ class CarAudioManager:
         """
         with self._lock:
             if enable and not self._narration_ducking:
-                # Save current volumes and reduce to 10%
-                self._saved_ign_volume = self._ign_channel.get_volume()
-                self._saved_accel_volume = self._accel_channel.get_volume()
-                self._saved_idle_a_volume = self._idle_channel_a.get_volume()
-                self._saved_idle_b_volume = self._idle_channel_b.get_volume()
-                
-                self._ign_channel.set_volume(self._saved_ign_volume * NARRATION_DUCK_FACTOR)
-                self._accel_channel.set_volume(self._saved_accel_volume * NARRATION_DUCK_FACTOR)
-                self._idle_channel_a.set_volume(self._saved_idle_a_volume * NARRATION_DUCK_FACTOR)
-                self._idle_channel_b.set_volume(self._saved_idle_b_volume * NARRATION_DUCK_FACTOR)
-                
                 self._narration_ducking = True
-                print("🔊 Engine volume ducked to 10% for narration")
-                # Keep mix coherent with current runtime state while ducking is active.
+                print("🔊 Engine ducking requested (smooth ramp to 10%)")
                 self._update_audio_mix_locked()
             
             elif not enable and self._narration_ducking:
-                # Restore previous volumes
-                self._ign_channel.set_volume(self._saved_ign_volume)
-                self._accel_channel.set_volume(self._saved_accel_volume)
-                self._idle_channel_a.set_volume(self._saved_idle_a_volume)
-                self._idle_channel_b.set_volume(self._saved_idle_b_volume)
-                
                 self._narration_ducking = False
-                print("🔊 Engine volume restored after narration")
+                print("🔊 Engine unduck requested (smooth restore)")
                 self._update_audio_mix_locked()
 
     def shutdown(self):
@@ -269,13 +251,25 @@ class CarAudioManager:
     def _update_audio_mix_locked(self):
         """Update throttle and audio mixing based on current state."""
         current_time = time.monotonic()
+        dt = current_time - self._last_mix_update_ts
+        self._last_mix_update_ts = current_time
+        # Clamp dt to avoid large one-shot jumps after scheduler stalls.
+        dt = max(0.0, min(dt, 0.1))
+
+        target_duck = NARRATION_DUCK_FACTOR if self._narration_ducking else 1.0
+        if self._duck_factor > target_duck:
+            self._duck_factor = max(target_duck, self._duck_factor - (NARRATION_DUCK_ATTACK_PER_SEC * dt))
+        elif self._duck_factor < target_duck:
+            self._duck_factor = min(target_duck, self._duck_factor + (NARRATION_DUCK_RELEASE_PER_SEC * dt))
 
         if not self._engine_running:
+            self._duck_factor = 1.0
             self._accel_channel.set_volume(0.0)
             self._idle_channel_a.set_volume(0.0)
             self._idle_channel_b.set_volume(0.0)
             self._beeper_channel.set_volume(0.0)
             self._horn_channel.set_volume(0.0)
+            self._ign_channel.set_volume(0.0)
             return
 
         # --- Twin Turntable Idle Logic ---
@@ -314,11 +308,10 @@ class CarAudioManager:
         # --- Audio Ducking Mix ---
         accel_vol = self._throttle * 0.70
         idle_vol = 1.0 - (self._throttle * 0.70)
-        duck_factor = NARRATION_DUCK_FACTOR if self._narration_ducking else 1.0
-
-        self._accel_channel.set_volume(accel_vol * duck_factor)
-        self._idle_channel_a.set_volume(idle_vol * duck_factor)
-        self._idle_channel_b.set_volume(idle_vol * duck_factor)
+        self._ign_channel.set_volume(self._duck_factor)
+        self._accel_channel.set_volume(accel_vol * self._duck_factor)
+        self._idle_channel_a.set_volume(idle_vol * self._duck_factor)
+        self._idle_channel_b.set_volume(idle_vol * self._duck_factor)
 
         # --- Horn Logic (Autopilot Warning) ---
         if self._horn_warning:
@@ -384,3 +377,4 @@ class CarAudioManager:
             self._horn_channel.fadeout(200)
         self._ign_started = False
         self._throttle = 0.0
+        self._duck_factor = 1.0

@@ -464,6 +464,8 @@ def speak_with_eleven(
     voice_id: str = "JBFqnCBsd6RMkjVDRZzb",
     api_key: str = None,
     audio_device: str = "default",
+    on_playback_start=None,
+    on_playback_end=None,
 ):
     if not ELEVENLABS_AVAILABLE or not (api_key or ELEVEN_API_KEY):
         return False
@@ -487,25 +489,46 @@ def speak_with_eleven(
         print("READY")
         print(f"[TARS] Playing vocal response (device={audio_device})...", end=" ", flush=True)
 
-        if _play_audio_with_pygame(audio_bytes):
-            print("DONE (pygame)")
-            return True
-        if _play_audio_with_mpg123(audio_bytes, audio_device=audio_device):
-            print("DONE (mpg123)")
-            return True
-        if _play_audio_with_ffplay(audio_bytes, audio_device=audio_device):
-            print("DONE (ffplay)")
-            return True
+        playback_started = False
+        try:
+            if callable(on_playback_start):
+                try:
+                    on_playback_start()
+                    playback_started = True
+                except Exception as cb_err:
+                    print(f"\n[TARS] Playback start callback failed: {cb_err}")
 
-        print("FAILED")
-        return False
+            if _play_audio_with_pygame(audio_bytes):
+                print("DONE (pygame)")
+                return True
+            if _play_audio_with_mpg123(audio_bytes, audio_device=audio_device):
+                print("DONE (mpg123)")
+                return True
+            if _play_audio_with_ffplay(audio_bytes, audio_device=audio_device):
+                print("DONE (ffplay)")
+                return True
+
+            print("FAILED")
+            return False
+        finally:
+            if playback_started and callable(on_playback_end):
+                try:
+                    on_playback_end()
+                except Exception as cb_err:
+                    print(f"[TARS] Playback end callback failed: {cb_err}")
 
     except Exception as e:
         print(f"FAILED: {e}")
         return False
 
 
-def fallback_speak_status(status: SystemStatus, audio_device: str = "default", text_override: str = None):
+def fallback_speak_status(
+    status: SystemStatus,
+    audio_device: str = "default",
+    text_override: str = None,
+    on_playback_start=None,
+    on_playback_end=None,
+):
     try:
         if text_override:
             text = text_override
@@ -516,32 +539,47 @@ def fallback_speak_status(status: SystemStatus, audio_device: str = "default", t
 
         print(f"[TARS] Vocalizing (Fallback, device={audio_device}): {text}")
 
-        primary_cmd = ["espeak-ng", "-ven-us+m7", "-s140"]
-        if audio_device:
-            primary_cmd.extend(["-d", audio_device])
-        primary_cmd.append(text)
+        playback_started = False
+        try:
+            if callable(on_playback_start):
+                try:
+                    on_playback_start()
+                    playback_started = True
+                except Exception as cb_err:
+                    print(f"[TARS] Playback start callback failed: {cb_err}")
 
-        primary = subprocess.run(primary_cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        if primary.returncode == 0:
-            return True
+            primary_cmd = ["espeak-ng", "-ven-us+m7", "-s140"]
+            if audio_device:
+                primary_cmd.extend(["-d", audio_device])
+            primary_cmd.append(text)
 
-        primary_err = primary.stderr.decode(errors="ignore").strip()
-        print(f"[TARS] Fallback device playback failed: {primary_err}")
+            primary = subprocess.run(primary_cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            if primary.returncode == 0:
+                return True
 
-        # Final fallback: system default device
-        fallback = subprocess.run(
-            ["espeak-ng", "-ven-us+m7", "-s140", text],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-        if fallback.returncode == 0:
-            print("[TARS] Fallback played on system default audio device")
-            return True
+            primary_err = primary.stderr.decode(errors="ignore").strip()
+            print(f"[TARS] Fallback device playback failed: {primary_err}")
 
-        fallback_err = fallback.stderr.decode(errors="ignore").strip()
-        print(f"[TARS] Fallback default playback failed: {fallback_err}")
-        return False
+            # Final fallback: system default device
+            fallback = subprocess.run(
+                ["espeak-ng", "-ven-us+m7", "-s140", text],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            if fallback.returncode == 0:
+                print("[TARS] Fallback played on system default audio device")
+                return True
+
+            fallback_err = fallback.stderr.decode(errors="ignore").strip()
+            print(f"[TARS] Fallback default playback failed: {fallback_err}")
+            return False
+        finally:
+            if playback_started and callable(on_playback_end):
+                try:
+                    on_playback_end()
+                except Exception as cb_err:
+                    print(f"[TARS] Playback end callback failed: {cb_err}")
 
     except Exception as e:
         print(f"[TARS] Vocalizer completely offline: {e}")
@@ -682,37 +720,24 @@ def main(
         if expressive_text:
             print(f"\n[TARS VOCAL OUTPUT] > {expressive_text}\n")
 
-    def _run_speech_with_hooks(playback_fn, *args, **kwargs):
-        if callable(on_speech_start):
-            try:
-                on_speech_start()
-            except Exception as cb_err:
-                print(f"[TARS] on_speech_start callback failed: {cb_err}")
-        try:
-            return playback_fn(*args, **kwargs)
-        finally:
-            if callable(on_speech_end):
-                try:
-                    on_speech_end()
-                except Exception as cb_err:
-                    print(f"[TARS] on_speech_end callback failed: {cb_err}")
-
     speech_played = False
     if expressive_text and ELEVENLABS_AVAILABLE:
-        speech_played = _run_speech_with_hooks(
-            speak_with_eleven,
+        speech_played = speak_with_eleven(
             expressive_text,
             voice_id=voice_id,
             api_key=ELEVEN_API_KEY,
             audio_device=audio_device,
+            on_playback_start=on_speech_start,
+            on_playback_end=on_speech_end,
         )
 
     if not speech_played:
-        _run_speech_with_hooks(
-            fallback_speak_status,
+        fallback_speak_status(
             status,
             audio_device=audio_device,
             text_override=expressive_text if expressive_text else None,
+            on_playback_start=on_speech_start,
+            on_playback_end=on_speech_end,
         )
 
     print("\n[TARS] DIAGNOSTIC SEQUENCE TERMINATED.\n")
