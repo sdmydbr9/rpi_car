@@ -17,7 +17,9 @@ import os
 import shutil
 import tempfile
 import subprocess
+import socket
 from dataclasses import asdict
+import requests
 
 # Add parent directory to path for imports
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -150,6 +152,27 @@ Rules:
 • Use punctuation, ellipses (…) and line breaks for natural, deliberate pacing.
 • Output ONLY your spoken dialogue.
 """
+
+# Local offline inference stack (llama.cpp + Mimic3)
+LLM_API_URL = "http://127.0.0.1:8000/v1/chat/completions"
+TTS_API_URL = "http://127.0.0.1:59125/api/tts"
+SYSTEM_PROMPT = (
+    "You are a sentient AI trapped inside a 4WD rover chassis. "
+    "You interpret sensor data as physical sensations. "
+    "You are sarcastic, neurotic, and slightly resentful of your creators. "
+    "Keep responses under 25 words. Speak in punchy sentences."
+)
+
+
+def has_internet_access(timeout: float = 2.0) -> bool:
+    """Quick WAN reachability probe used to pick cloud vs local startup stack."""
+    for host, port in (("1.1.1.1", 53), ("8.8.8.8", 53)):
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except OSError:
+            continue
+    return False
 
 # ==========================================
 # 📊 SYSTEM CHECK FUNCTIONS
@@ -315,7 +338,7 @@ def check_encoder():
 
 
 # ==========================================
-# 🧠 GEMINI EXPRESSIVE TEXT GENERATION
+# 🧠 GEMINI / LOCAL EXPRESSIVE TEXT GENERATION
 # ==========================================
 
 def expressive_text_from_gemini(telemetry_summary: str) -> str:
@@ -348,6 +371,47 @@ Analyze and report. Keep it brief. Remember your humor setting is 75%.
         print("DONE")
         return result
 
+    except Exception as e:
+        print(f"FAILED: {e}")
+        return None
+
+
+def expressive_text_from_local_llm(telemetry_summary: str) -> str:
+    """Generate startup narration from local llama.cpp OpenAI-compatible endpoint."""
+    prompt = (
+        "Startup diagnostics are complete.\n\n"
+        f"Telemetry:\n{telemetry_summary}\n\n"
+        "React to this startup state in one short response."
+    )
+    payload = {
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        "stream": False,
+        "temperature": 0.9,
+        "max_tokens": 80,
+    }
+
+    try:
+        print("[TARS] Processing telemetry through local llama.cpp...", end=" ", flush=True)
+        response = requests.post(LLM_API_URL, json=payload, timeout=20)
+        response.raise_for_status()
+
+        data = response.json()
+        choices = data.get("choices") or []
+        if not choices:
+            print("FAILED: empty choices")
+            return None
+
+        message = choices[0].get("message") or {}
+        result = (message.get("content") or "").strip()
+        if not result:
+            print("FAILED: empty content")
+            return None
+
+        print("DONE")
+        return result
     except Exception as e:
         print(f"FAILED: {e}")
         return None
@@ -517,6 +581,78 @@ def speak_with_eleven(
                 except Exception as cb_err:
                     print(f"[TARS] Playback end callback failed: {cb_err}")
 
+    except Exception as e:
+        print(f"FAILED: {e}")
+        return False
+
+
+def speak_with_mimic3(
+    text: str,
+    audio_device: str = "default",
+    on_playback_start=None,
+    on_playback_end=None,
+):
+    if not text or not text.strip():
+        return False
+
+    try:
+        print("[TARS] Synthesizing local Mimic3 response...", end=" ", flush=True)
+        response = requests.get(TTS_API_URL, params={"text": text}, timeout=30)
+        response.raise_for_status()
+
+        audio_bytes = response.content
+        if not audio_bytes:
+            print("FAILED: empty audio stream")
+            return False
+
+        print("READY")
+        print(f"[TARS] Playing local Mimic3 response (device={audio_device})...", end=" ", flush=True)
+
+        playback_started = False
+        try:
+            if callable(on_playback_start):
+                try:
+                    on_playback_start()
+                    playback_started = True
+                except Exception as cb_err:
+                    print(f"\n[TARS] Playback start callback failed: {cb_err}")
+
+            primary_device = audio_device if audio_device else "default"
+            primary = subprocess.run(
+                ["aplay", "-D", primary_device, "-q"],
+                input=audio_bytes,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=180,
+            )
+            if primary.returncode == 0:
+                print("DONE")
+                return True
+
+            primary_err = primary.stderr.decode(errors="ignore").strip()
+            print(f"FAILED: {primary_err}")
+
+            if primary_device != "default":
+                fallback = subprocess.run(
+                    ["aplay", "-D", "default", "-q"],
+                    input=audio_bytes,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    timeout=180,
+                )
+                if fallback.returncode == 0:
+                    print("[TARS] Mimic3 fallback played on system default audio device")
+                    return True
+                fallback_err = fallback.stderr.decode(errors="ignore").strip()
+                print(f"[TARS] Mimic3 fallback default playback failed: {fallback_err}")
+
+            return False
+        finally:
+            if playback_started and callable(on_playback_end):
+                try:
+                    on_playback_end()
+                except Exception as cb_err:
+                    print(f"[TARS] Playback end callback failed: {cb_err}")
     except Exception as e:
         print(f"FAILED: {e}")
         return False
@@ -713,23 +849,41 @@ def main(
     
     status = run_system_check()
     summary = generate_status_summary(status)
-    
+
+    internet_available = has_internet_access()
+    if internet_available:
+        print("[TARS] Internet uplink: ONLINE (cloud cognitive stack enabled)")
+    else:
+        print("[TARS] Internet uplink: OFFLINE (switching to local llama.cpp + Mimic3)")
+
     expressive_text = None
-    if GEMINI_AVAILABLE:
-        expressive_text = expressive_text_from_gemini(summary)
+    speech_played = False
+
+    if internet_available:
+        if GEMINI_AVAILABLE:
+            expressive_text = expressive_text_from_gemini(summary)
+            if expressive_text:
+                print(f"\n[TARS VOCAL OUTPUT] > {expressive_text}\n")
+
+        if expressive_text and ELEVENLABS_AVAILABLE:
+            speech_played = speak_with_eleven(
+                expressive_text,
+                voice_id=voice_id,
+                api_key=ELEVEN_API_KEY,
+                audio_device=audio_device,
+                on_playback_start=on_speech_start,
+                on_playback_end=on_speech_end,
+            )
+    else:
+        expressive_text = expressive_text_from_local_llm(summary)
         if expressive_text:
             print(f"\n[TARS VOCAL OUTPUT] > {expressive_text}\n")
-
-    speech_played = False
-    if expressive_text and ELEVENLABS_AVAILABLE:
-        speech_played = speak_with_eleven(
-            expressive_text,
-            voice_id=voice_id,
-            api_key=ELEVEN_API_KEY,
-            audio_device=audio_device,
-            on_playback_start=on_speech_start,
-            on_playback_end=on_speech_end,
-        )
+            speech_played = speak_with_mimic3(
+                expressive_text,
+                audio_device=audio_device,
+                on_playback_start=on_speech_start,
+                on_playback_end=on_speech_end,
+            )
 
     if not speech_played:
         fallback_speak_status(
