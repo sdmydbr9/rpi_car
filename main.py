@@ -7,6 +7,14 @@ if _car_audio_driver_override:
 else:
     os.environ.setdefault("SDL_AUDIODRIVER", "pulseaudio")
 
+# When started as a system service, PulseAudio socket vars may be missing.
+# Auto-populate them from the current UID runtime dir if available.
+_runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+_pulse_native = os.path.join(_runtime_dir, "pulse", "native")
+if os.path.exists(_pulse_native):
+    os.environ.setdefault("XDG_RUNTIME_DIR", _runtime_dir)
+    os.environ.setdefault("PULSE_SERVER", f"unix:{_pulse_native}")
+
 try:
     import RPi.GPIO as GPIO
 except (ImportError, RuntimeError):

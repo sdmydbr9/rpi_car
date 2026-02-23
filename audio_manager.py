@@ -157,33 +157,66 @@ class CarAudioManager:
             print("⚠️  Engine sound is unavailable; continuing without car audio.")
             return
 
-        # Load sounds into memory
-        self._load_sounds()
-        
-        # Channel allocation
-        self._ign_channel = pygame.mixer.Channel(0)
-        self._idle_channel_a = pygame.mixer.Channel(1)
-        self._idle_channel_b = pygame.mixer.Channel(2)
-        self._accel_channel = pygame.mixer.Channel(3)
-        self._horn_channel = pygame.mixer.Channel(4)
-        self._beeper_channel = pygame.mixer.Channel(5)
-        
-        # Start continuous muted tracks
-        if "acceleration" in self._sounds:
-            self._accel_channel.play(self._sounds["acceleration"], loops=-1)
-            self._accel_channel.set_volume(0.0)
-        
-        if "beeper" in self._sounds:
-            self._beeper_channel.play(self._sounds["beeper"], loops=-1)
-            self._beeper_channel.set_volume(0.0)
-
-        self._audio_ready = True
+        self._activate_audio_pipeline_locked()
 
     def is_available(self) -> bool:
         return self._audio_ready
 
     def backend(self) -> str:
         return self._active_backend or "unavailable"
+
+    def _alsa_device_candidates(self):
+        configured_device = (self._audio_device or "").strip()
+        if configured_device and configured_device.lower() != "default":
+            return [configured_device]
+
+        # Default fallback order prioritizes shared mixers when Shairport is active.
+        candidates = [
+            "pulse",
+            "dmix:CARD=sndrpihifiberry,DEV=0",
+            "dmix:CARD=vc4hdmi0,DEV=0",
+            "default",
+        ]
+
+        extra_candidates = os.environ.get("CAR_AUDIO_DEVICE_FALLBACKS", "")
+        if extra_candidates:
+            for item in extra_candidates.split(","):
+                value = item.strip()
+                if value:
+                    candidates.insert(0, value)
+
+        deduped = []
+        seen = set()
+        for candidate in candidates:
+            key = candidate.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(candidate)
+        return deduped
+
+    def _activate_audio_pipeline_locked(self):
+        self._sounds = {}
+        self._load_sounds()
+
+        self._ign_channel = pygame.mixer.Channel(0)
+        self._idle_channel_a = pygame.mixer.Channel(1)
+        self._idle_channel_b = pygame.mixer.Channel(2)
+        self._accel_channel = pygame.mixer.Channel(3)
+        self._horn_channel = pygame.mixer.Channel(4)
+        self._beeper_channel = pygame.mixer.Channel(5)
+
+        if "acceleration" in self._sounds:
+            self._accel_channel.play(self._sounds["acceleration"], loops=-1)
+            self._accel_channel.set_volume(0.0)
+
+        if "beeper" in self._sounds:
+            self._beeper_channel.play(self._sounds["beeper"], loops=-1)
+            self._beeper_channel.set_volume(0.0)
+
+        self._audio_ready = True
+        self._warned_audio_unavailable = False
+        self._last_mix_update_ts = time.monotonic()
 
     def _init_mixer_with_fallback(self) -> bool:
         preferred_driver = (os.environ.get("SDL_AUDIODRIVER") or "").strip()
@@ -194,7 +227,7 @@ class CarAudioManager:
             if candidate not in fallback_order:
                 fallback_order.append(candidate)
 
-        audio_device = (self._audio_device or "").strip().lower()
+        self._active_backend = None
         init_errors = []
         for driver in fallback_order:
             try:
@@ -203,14 +236,32 @@ class CarAudioManager:
                 pass
 
             os.environ["SDL_AUDIODRIVER"] = driver
-            if driver == "alsa":
-                if audio_device and audio_device != "default":
-                    os.environ["AUDIODEV"] = self._audio_device
-                else:
-                    os.environ.pop("AUDIODEV", None)
-            else:
-                os.environ.pop("AUDIODEV", None)
 
+            if driver == "alsa":
+                for alsa_device in self._alsa_device_candidates():
+                    if alsa_device.lower() == "default":
+                        os.environ.pop("AUDIODEV", None)
+                    else:
+                        os.environ["AUDIODEV"] = alsa_device
+                    try:
+                        pygame.mixer.init(
+                            frequency=ENGINE_SAMPLE_RATE,
+                            size=-16,
+                            channels=2,
+                            buffer=512,
+                            devicename=None,
+                        )
+                        self._active_backend = f"alsa:{alsa_device}"
+                        print(
+                            f"🔊 Pygame mixer initialized "
+                            f"(rate={ENGINE_SAMPLE_RATE}Hz, backend={self._active_backend})"
+                        )
+                        return True
+                    except Exception as exc:
+                        init_errors.append(f"{driver} ({alsa_device}): {exc}")
+                continue
+
+            os.environ.pop("AUDIODEV", None)
             try:
                 pygame.mixer.init(
                     frequency=ENGINE_SAMPLE_RATE,
@@ -222,7 +273,7 @@ class CarAudioManager:
                 self._active_backend = driver
                 print(
                     f"🔊 Pygame mixer initialized "
-                    f"(rate={ENGINE_SAMPLE_RATE}Hz, backend={driver}, device={self._audio_device})"
+                    f"(rate={ENGINE_SAMPLE_RATE}Hz, backend={self._active_backend})"
                 )
                 return True
             except Exception as exc:
@@ -255,9 +306,13 @@ class CarAudioManager:
 
             self._engine_running = enabled
             if not self._audio_ready:
-                if enabled and not self._warned_audio_unavailable:
-                    print("⚠️  Engine start requested but audio backend is unavailable.")
-                    self._warned_audio_unavailable = True
+                if enabled:
+                    if self._init_mixer_with_fallback():
+                        self._activate_audio_pipeline_locked()
+                        print("🔊 Audio backend recovered on engine start.")
+                    elif not self._warned_audio_unavailable:
+                        print("⚠️  Engine start requested but audio backend is unavailable.")
+                        self._warned_audio_unavailable = True
                 return
 
             if enabled:
