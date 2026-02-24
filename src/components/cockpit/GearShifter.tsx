@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import ColorThief from "colorthief";
 import { Music, OctagonX, Power, PowerOff, Radio, Volume2 } from "lucide-react";
 
 interface GearShifterProps {
@@ -58,6 +59,168 @@ const clampProgress = (value: unknown): number => {
   return Math.max(0, Math.min(100, numeric));
 };
 
+type RGBTuple = [number, number, number];
+
+interface PlayerTheme {
+  border: string;
+  accent: string;
+  title: string;
+  subtitle: string;
+  cardBackground: string;
+  progressTrack: string;
+  progressFill: string;
+  progressGlow: string;
+}
+
+const DEFAULT_PLAYER_THEME: PlayerTheme = {
+  border: "rgba(20, 184, 166, 0.35)",
+  accent: "rgba(20, 184, 166, 0.95)",
+  title: "rgba(240, 252, 255, 0.96)",
+  subtitle: "rgba(188, 214, 222, 0.82)",
+  cardBackground:
+    "linear-gradient(135deg, rgba(14, 23, 33, 0.85) 0%, rgba(4, 11, 18, 0.88) 56%, rgba(1, 7, 12, 0.92) 100%)",
+  progressTrack: "rgba(148, 163, 184, 0.28)",
+  progressFill: "rgba(20, 184, 166, 0.95)",
+  progressGlow: "0 0 8px rgba(20, 184, 166, 0.55)",
+};
+
+const SYSTEM_TEAL: RGBTuple = [20, 184, 166];
+const WHITE_RGB: RGBTuple = [255, 255, 255];
+const BLACK_RGB: RGBTuple = [0, 0, 0];
+
+const clampChannel = (value: number): number => Math.max(0, Math.min(255, Math.round(value)));
+
+const rgbToCss = (color: RGBTuple, alpha = 1): string => {
+  const [r, g, b] = color;
+  return `rgba(${clampChannel(r)}, ${clampChannel(g)}, ${clampChannel(b)}, ${alpha})`;
+};
+
+const mixRgb = (base: RGBTuple, target: RGBTuple, amount: number): RGBTuple => {
+  const mixAmount = Math.max(0, Math.min(1, amount));
+  return [
+    clampChannel(base[0] + (target[0] - base[0]) * mixAmount),
+    clampChannel(base[1] + (target[1] - base[1]) * mixAmount),
+    clampChannel(base[2] + (target[2] - base[2]) * mixAmount),
+  ];
+};
+
+const toLinearChannel = (value: number): number => {
+  const normalized = value / 255;
+  return normalized <= 0.03928 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+};
+
+const contrastRatio = (first: RGBTuple, second: RGBTuple): number => {
+  const firstLuminance =
+    0.2126 * toLinearChannel(first[0]) + 0.7152 * toLinearChannel(first[1]) + 0.0722 * toLinearChannel(first[2]);
+  const secondLuminance =
+    0.2126 * toLinearChannel(second[0]) + 0.7152 * toLinearChannel(second[1]) + 0.0722 * toLinearChannel(second[2]);
+  const lighter = Math.max(firstLuminance, secondLuminance);
+  const darker = Math.min(firstLuminance, secondLuminance);
+  return (lighter + 0.05) / (darker + 0.05);
+};
+
+const ensureContrast = (
+  foreground: RGBTuple,
+  background: RGBTuple,
+  minRatio: number,
+  preferLightTarget: boolean,
+): RGBTuple => {
+  let candidate = foreground;
+  if (contrastRatio(candidate, background) >= minRatio) return candidate;
+
+  const target = preferLightTarget ? WHITE_RGB : BLACK_RGB;
+  for (let step = 0; step < 10; step += 1) {
+    candidate = mixRgb(candidate, target, 0.22);
+    if (contrastRatio(candidate, background) >= minRatio) return candidate;
+  }
+
+  return contrastRatio(WHITE_RGB, background) >= contrastRatio(BLACK_RGB, background) ? WHITE_RGB : BLACK_RGB;
+};
+
+const muteRgb = (color: RGBTuple, amount: number): RGBTuple => {
+  const grayChannel = clampChannel(0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]);
+  const gray: RGBTuple = [grayChannel, grayChannel, grayChannel];
+  return mixRgb(color, gray, amount);
+};
+
+const applySystemTealFilter = (color: RGBTuple): RGBTuple => {
+  const muted = muteRgb(color, 0.56);
+  const tealTinted = mixRgb(muted, SYSTEM_TEAL, 0.34);
+  return mixRgb(tealTinted, [10, 34, 42], 0.1);
+};
+
+const parseHexToRgb = (value: string): RGBTuple | null => {
+  const normalized = value.trim().replace("#", "");
+  if (/^[0-9a-fA-F]{3}$/.test(normalized)) {
+    return [
+      Number.parseInt(`${normalized[0]}${normalized[0]}`, 16),
+      Number.parseInt(`${normalized[1]}${normalized[1]}`, 16),
+      Number.parseInt(`${normalized[2]}${normalized[2]}`, 16),
+    ];
+  }
+  if (/^[0-9a-fA-F]{6}$/.test(normalized)) {
+    return [
+      Number.parseInt(normalized.slice(0, 2), 16),
+      Number.parseInt(normalized.slice(2, 4), 16),
+      Number.parseInt(normalized.slice(4, 6), 16),
+    ];
+  }
+  return null;
+};
+
+const getLuminance = ([r, g, b]: RGBTuple): number => (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+
+const buildPlayerTheme = (dominant: RGBTuple, accentSource: RGBTuple): PlayerTheme => {
+  const filteredDominant = applySystemTealFilter(dominant);
+  const filteredAccentSource = applySystemTealFilter(accentSource);
+  const deepDominant = mixRgb(filteredDominant, [7, 16, 24], 0.52);
+  const softDominant = mixRgb(filteredDominant, [48, 78, 92], 0.43);
+  const baseBackground = mixRgb(deepDominant, BLACK_RGB, 0.2);
+  const preferLightText = getLuminance(baseBackground) < 0.52;
+
+  const titleColor = ensureContrast(preferLightText ? [236, 248, 252] : [10, 34, 44], baseBackground, 6, preferLightText);
+  const subtitleColor = ensureContrast(
+    preferLightText ? mixRgb(titleColor, SYSTEM_TEAL, 0.3) : mixRgb(titleColor, SYSTEM_TEAL, 0.18),
+    baseBackground,
+    4.5,
+    preferLightText,
+  );
+
+  const accentSeed = mixRgb(filteredAccentSource, SYSTEM_TEAL, 0.42);
+  let progressTrackColor = ensureContrast(
+    preferLightText ? mixRgb(baseBackground, [235, 247, 252], 0.3) : mixRgb(baseBackground, BLACK_RGB, 0.26),
+    baseBackground,
+    1.7,
+    preferLightText,
+  );
+  let progressFillColor = ensureContrast(
+    preferLightText ? mixRgb(accentSeed, [220, 255, 248], 0.12) : mixRgb(accentSeed, [4, 90, 84], 0.28),
+    baseBackground,
+    3.5,
+    preferLightText,
+  );
+
+  if (contrastRatio(progressFillColor, progressTrackColor) < 2.4) {
+    progressFillColor = ensureContrast(progressFillColor, progressTrackColor, 2.4, getLuminance(progressTrackColor) < 0.5);
+  }
+
+  const borderColor = ensureContrast(mixRgb(accentSeed, baseBackground, 0.15), baseBackground, 2, preferLightText);
+
+  return {
+    border: rgbToCss(borderColor, 0.62),
+    accent: rgbToCss(progressFillColor, 0.98),
+    title: rgbToCss(titleColor, 0.97),
+    subtitle: rgbToCss(subtitleColor, 0.9),
+    cardBackground: `linear-gradient(135deg, ${rgbToCss(softDominant, 0.86)} 0%, ${rgbToCss(
+      deepDominant,
+      0.91,
+    )} 54%, ${rgbToCss(mixRgb(deepDominant, [0, 0, 0], 0.24), 0.96)} 100%)`,
+    progressTrack: rgbToCss(progressTrackColor, 0.52),
+    progressFill: rgbToCss(progressFillColor, 0.99),
+    progressGlow: `0 0 9px ${rgbToCss(progressFillColor, 0.56)}`,
+  };
+};
+
 export const GearShifter = ({ 
   currentGear, 
   onGearChange,
@@ -110,6 +273,7 @@ export const GearShifter = ({
   ];
   const [nowPlaying, setNowPlaying] = useState<NowPlayingState>(DEFAULT_NOW_PLAYING);
   const [metadataUnavailable, setMetadataUnavailable] = useState(false);
+  const [playerTheme, setPlayerTheme] = useState<PlayerTheme>(DEFAULT_PLAYER_THEME);
 
   useEffect(() => {
     let mounted = true;
@@ -152,6 +316,51 @@ export const GearShifter = ({
   const displayTrack = nowPlaying.track && nowPlaying.track !== "--" ? nowPlaying.track : "No Track";
   const displayArtist = nowPlaying.artist && nowPlaying.artist !== "--" ? nowPlaying.artist : "Unknown Artist";
   const displayAlbum = nowPlaying.album && nowPlaying.album !== "--" ? nowPlaying.album : "Unknown Album";
+
+  useEffect(() => {
+    if (!hasAlbumArt) {
+      setPlayerTheme(DEFAULT_PLAYER_THEME);
+      return;
+    }
+
+    let cancelled = false;
+    const applyFallbackTheme = () => {
+      if (cancelled) return;
+      const fallbackRgb = parseHexToRgb(nowPlaying.bg_color);
+      if (!fallbackRgb) {
+        setPlayerTheme(DEFAULT_PLAYER_THEME);
+        return;
+      }
+      setPlayerTheme(buildPlayerTheme(fallbackRgb, mixRgb(fallbackRgb, [20, 184, 166], 0.28)));
+    };
+
+    const colorThief = new ColorThief();
+    const albumImage = new Image();
+    albumImage.crossOrigin = "anonymous";
+    albumImage.referrerPolicy = "no-referrer";
+    albumImage.decoding = "async";
+
+    albumImage.onload = () => {
+      try {
+        const dominant = colorThief.getColor(albumImage, 8) as RGBTuple;
+        const palette = colorThief.getPalette(albumImage, 4, 8) as RGBTuple[];
+        const accent = palette[1] ?? palette[0] ?? dominant;
+        if (!cancelled) {
+          setPlayerTheme(buildPlayerTheme(dominant, accent));
+        }
+      } catch {
+        applyFallbackTheme();
+      }
+    };
+
+    albumImage.onerror = applyFallbackTheme;
+    albumImage.src = nowPlaying.image;
+
+    return () => {
+      cancelled = true;
+      albumImage.src = "";
+    };
+  }, [hasAlbumArt, nowPlaying.bg_color, nowPlaying.image]);
 
   return (
     <div className="flex flex-col items-center h-full pt-0.5 pb-0.5 px-1 overflow-hidden bg-gradient-to-b from-background to-background/80">
@@ -452,55 +661,75 @@ export const GearShifter = ({
       </div>
 
       {/* NOW PLAYING HUD */}
-      <div className="w-full px-0.5 mb-0.5">
-        <div className="px-2 py-1.5 border border-primary/20 rounded-sm bg-card/40 backdrop-blur-sm">
+      <div className="w-full px-0.5 mb-0.5 flex-shrink-0">
+        <div
+          className="px-2.5 py-2.5 border rounded-sm backdrop-blur-sm min-h-[96px] transition-all duration-300"
+          style={{
+            borderColor: playerTheme.border,
+            background: playerTheme.cardBackground,
+            boxShadow: `inset 0 0 0 1px ${playerTheme.border}, 0 8px 20px rgba(0, 0, 0, 0.28)`,
+          }}
+        >
           <div className="flex items-center gap-1.5">
             <div
-              className="w-7 h-7 rounded-sm overflow-hidden flex items-center justify-center flex-shrink-0 border border-primary/30 bg-black/20"
-              style={{ borderColor: hasAlbumArt ? nowPlaying.bg_color : undefined }}
+              className="w-10 h-10 rounded-sm overflow-hidden flex items-center justify-center flex-shrink-0 border bg-black/20"
+              style={{ borderColor: playerTheme.border }}
             >
               {hasAlbumArt ? (
                 <img src={nowPlaying.image} alt="Album art" className="w-full h-full object-cover" />
               ) : (
                 <Music
-                  className="w-3.5 h-3.5 text-primary"
-                  style={{ filter: "drop-shadow(0 0 3px hsl(var(--primary)))" }}
+                  className="w-4 h-4"
+                  style={{ color: playerTheme.accent, filter: `drop-shadow(0 0 4px ${playerTheme.accent})` }}
                 />
               )}
             </div>
 
             <div className="flex flex-col min-w-0 flex-1 overflow-hidden">
-              <span className="text-[7px] sm:text-[9px] font-bold text-foreground truncate leading-tight tracking-wide">
+              <span
+                className="text-[8px] sm:text-[11px] font-bold truncate leading-tight tracking-wide"
+                style={{ color: playerTheme.title }}
+              >
                 {displayTrack}
               </span>
-              <span className="text-[5px] sm:text-[7px] text-muted-foreground truncate leading-tight tracking-wider uppercase">
+              <span
+                className="text-[6px] sm:text-[8px] truncate leading-tight tracking-wider uppercase"
+                style={{ color: playerTheme.subtitle }}
+              >
                 {displayArtist}
               </span>
-              <span className="text-[5px] text-muted-foreground/80 truncate leading-tight">
+              <span className="text-[6px] sm:text-[7px] truncate leading-tight" style={{ color: playerTheme.subtitle }}>
                 {displayAlbum}
               </span>
             </div>
           </div>
 
-          <div className="mt-1 flex items-center gap-1">
-            <div className="flex-1 h-[3px] bg-muted rounded-full overflow-hidden">
+          <div className="mt-2 flex items-end gap-1.5">
+            <div className="flex-1 h-[4px] rounded-full overflow-hidden" style={{ backgroundColor: playerTheme.progressTrack }}>
               <div
                 className="h-full bg-primary rounded-full transition-all duration-150"
                 style={{
                   width: `${clampProgress(nowPlaying.progress_pct)}%`,
-                  boxShadow: "0 0 4px hsl(var(--primary))",
+                  backgroundColor: playerTheme.progressFill,
+                  boxShadow: playerTheme.progressGlow,
                 }}
               />
             </div>
-            <div className="flex items-center gap-0.5 min-w-[30px] justify-end text-[5px] text-muted-foreground">
-              <Volume2 className="w-[7px] h-[7px]" />
-              <span>{nowPlaying.volume}</span>
+            <div className="flex flex-col items-end gap-0.5 min-w-[56px]">
+              <div className="flex items-center gap-0.5 text-[5px] sm:text-[6px]" style={{ color: playerTheme.subtitle }}>
+                <Volume2 className="w-[8px] h-[8px]" />
+                <span>{nowPlaying.volume}</span>
+              </div>
+              <span className="text-[5px] sm:text-[6px] leading-none text-right" style={{ color: playerTheme.subtitle }}>
+                {nowPlaying.time_str}
+              </span>
             </div>
-            <span className="text-[5px] text-muted-foreground min-w-[50px] text-right">{nowPlaying.time_str}</span>
           </div>
 
           {metadataUnavailable && (
-            <div className="text-[5px] text-muted-foreground/80 mt-0.5 text-right">Metadata unavailable</div>
+            <div className="text-[5px] mt-1 text-right" style={{ color: playerTheme.subtitle }}>
+              Metadata unavailable
+            </div>
           )}
         </div>
       </div>

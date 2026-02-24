@@ -164,6 +164,24 @@ def _normalize_resolution(value: str) -> str:
 CAMERA_DEFAULT_RESOLUTION = "640x480"  # Default to 640x480 for best streaming performance
 CAMERA_JPEG_QUALITY = 70           # JPEG compression quality (1-100, higher = better quality)
 CAMERA_FRAMERATE = 30              # Camera framerate (FPS)
+# Keep encode/stream work bounded so control latency stays predictable.
+CAMERA_MAX_STREAM_FPS = 30
+
+
+def _sanitize_camera_framerate(value, fallback=30):
+    """Clamp camera framerate to the supported/safe range."""
+    try:
+        fps = int(value)
+    except (TypeError, ValueError):
+        return max(1, min(120, int(fallback)))
+    return max(1, min(120, fps))
+
+
+def _camera_controls_for_fps(framerate):
+    """Build libcamera controls that enforce target frame duration."""
+    fps = _sanitize_camera_framerate(framerate, CAMERA_FRAMERATE)
+    frame_duration_us = max(1, int(1_000_000 / fps))
+    return {"FrameDurationLimits": (frame_duration_us, frame_duration_us)}
 
 # --- CAMERA CONFIG PERSISTENCE ---
 CAMERA_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.camera_config.json')
@@ -380,7 +398,10 @@ if _persisted_camera_config:
     if 'jpeg_quality' in _persisted_camera_config:
         CAMERA_JPEG_QUALITY = int(_persisted_camera_config['jpeg_quality'])
     if 'framerate' in _persisted_camera_config:
-        CAMERA_FRAMERATE = int(_persisted_camera_config['framerate'])
+        requested_fps = _persisted_camera_config['framerate']
+        CAMERA_FRAMERATE = _sanitize_camera_framerate(requested_fps, CAMERA_FRAMERATE)
+        if str(requested_fps) != str(CAMERA_FRAMERATE):
+            print(f"⚠️  [Camera Config] Persisted framerate '{requested_fps}' clamped to {CAMERA_FRAMERATE}")
     print(f"📷 [Camera Config] Active config: res={CAMERA_DEFAULT_RESOLUTION}, quality={CAMERA_JPEG_QUALITY}, fps={CAMERA_FRAMERATE}")
 
 # ==========================================
@@ -517,14 +538,16 @@ try:
     from picamera2 import Picamera2
     picam2 = Picamera2()
     _init_resolution = _parse_resolution(CAMERA_DEFAULT_RESOLUTION) or (640, 480)
-    print(f"📷 [Camera Init] Starting with resolution {CAMERA_DEFAULT_RESOLUTION} → {_init_resolution[0]}x{_init_resolution[1]}")
+    _init_fps = _sanitize_camera_framerate(CAMERA_FRAMERATE, 30)
+    print(f"📷 [Camera Init] Starting with resolution {CAMERA_DEFAULT_RESOLUTION} → {_init_resolution[0]}x{_init_resolution[1]} @ {_init_fps}fps")
     cam_config = picam2.create_video_configuration(
-        main={"size": _init_resolution, "format": "BGR888"}
+        main={"size": _init_resolution, "format": "BGR888"},
+        controls=_camera_controls_for_fps(_init_fps),
     )
     picam2.configure(cam_config)
     picam2.start()
     CAMERA_AVAILABLE = True
-    print(f"✅ Camera initialized successfully at {_init_resolution[0]}x{_init_resolution[1]}!")
+    print(f"✅ Camera initialized successfully at {_init_resolution[0]}x{_init_resolution[1]} @ {_init_fps}fps!")
 except Exception as e:
     CAMERA_AVAILABLE = False
     picam2 = None
@@ -538,6 +561,7 @@ try:
     if CAMERA_AVAILABLE and picam2 is not None:
         vision_system = VisionSystem(picam2)
         vision_system.start()
+        vision_system.stream_enabled = False
         VISION_AVAILABLE = True
         print("✅ Vision system initialized (MobileNetSSD object detection)")
     else:
@@ -626,15 +650,17 @@ def _reconfigure_camera(resolution_str, framerate):
         if new_size is None:
             print(f"❌ [Camera] Invalid resolution '{resolution_str}', cannot reconfigure")
             return False
-        print(f"📷 [Camera] Reconfiguring: '{resolution_str}' → {new_size[0]}x{new_size[1]} @ {framerate}fps...")
+        new_fps = _sanitize_camera_framerate(framerate, CAMERA_FRAMERATE)
+        print(f"📷 [Camera] Reconfiguring: '{resolution_str}' → {new_size[0]}x{new_size[1]} @ {new_fps}fps...")
         picam2.stop()
         cam_cfg = picam2.create_video_configuration(
-            main={"size": new_size, "format": "BGR888"}
+            main={"size": new_size, "format": "BGR888"},
+            controls=_camera_controls_for_fps(new_fps),
         )
         picam2.configure(cam_cfg)
         picam2.start()
         CAMERA_AVAILABLE = True
-        print(f"✅ [Camera] Reconfigured successfully to {new_size[0]}x{new_size[1]} @ {framerate}fps")
+        print(f"✅ [Camera] Reconfigured successfully to {new_size[0]}x{new_size[1]} @ {new_fps}fps")
         return True
     except Exception as e:
         print(f"❌ [Camera] Reconfiguration failed: {e}")
@@ -658,6 +684,7 @@ class CameraFrameBroadcaster:
         self._condition = threading.Condition(self._lock)
         self._frame = None          # Latest JPEG bytes
         self._frame_id = 0          # Monotonic frame counter
+        self._consumer_count = 0    # Active /video_feed generators
         self._running = False
         self._thread = None
         self._fps_frame_count = 0
@@ -672,19 +699,35 @@ class CameraFrameBroadcaster:
         print("📷 [CameraBroadcaster] ✅ Producer thread started")
 
     def stop(self):
-        self._running = False
+        with self._condition:
+            self._running = False
+            self._condition.notify_all()
+
+    def add_consumer(self):
+        with self._condition:
+            self._consumer_count += 1
+            self._condition.notify_all()
+
+    def remove_consumer(self):
+        with self._condition:
+            if self._consumer_count > 0:
+                self._consumer_count -= 1
 
     def _producer_loop(self):
         """Continuously capture, encode, and store the latest JPEG frame."""
+        last_vision_frame_id = -1
+        next_frame_time = time.monotonic()
         while self._running:
             try:
                 if not CAMERA_AVAILABLE or picam2 is None:
                     car_state["camera_actual_fps"] = 0.0
+                    next_frame_time = time.monotonic()
                     time.sleep(1)
                     continue
 
                 # Wait during camera reconfiguration
                 if _camera_restarting:
+                    next_frame_time = time.monotonic()
                     time.sleep(0.05)
                     continue
 
@@ -693,25 +736,54 @@ class CameraFrameBroadcaster:
                     car_state["camera_actual_fps"] = 0.0
                     self._fps_frame_count = 0
                     self._fps_last_time = time.time()
+                    next_frame_time = time.monotonic()
                     time.sleep(0.1)
                     continue
+
+                with self._condition:
+                    consumers = self._consumer_count
+                if consumers <= 0:
+                    car_state["camera_actual_fps"] = 0.0
+                    self._fps_frame_count = 0
+                    self._fps_last_time = time.time()
+                    next_frame_time = time.monotonic()
+                    time.sleep(0.1)
+                    continue
+
+                requested_fps = _sanitize_camera_framerate(
+                    car_state.get("camera_framerate", CAMERA_FRAMERATE),
+                    CAMERA_FRAMERATE,
+                )
+                target_stream_fps = max(1, min(requested_fps, CAMERA_MAX_STREAM_FPS))
+                frame_interval = 1.0 / target_stream_fps
+
+                now_mono = time.monotonic()
+                if now_mono < next_frame_time:
+                    time.sleep(next_frame_time - now_mono)
 
                 # Get annotated frame from vision system if available
                 frame = None
                 if VISION_AVAILABLE and vision_system is not None:
-                    frame = vision_system.get_frame()
+                    if hasattr(vision_system, "get_frame_with_id"):
+                        frame, frame_id = vision_system.get_frame_with_id()
+                        if frame is not None:
+                            if frame_id == last_vision_frame_id:
+                                # No fresh camera frame yet; skip duplicate re-encode.
+                                next_frame_time = max(next_frame_time + frame_interval, time.monotonic())
+                                continue
+                            last_vision_frame_id = frame_id
+                    else:
+                        frame = vision_system.get_frame()
 
                 # Fallback to raw capture if vision not ready
                 if frame is None:
                     frame = picam2.capture_array()
 
-                # Convert BGR to RGB for standard color representation
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
                 # Get current JPEG quality from car_state
                 jpeg_quality = car_state.get("camera_jpeg_quality", CAMERA_JPEG_QUALITY)
-                ret, buffer = cv2.imencode('.jpg', frame_rgb, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+                ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
                 if not ret:
+                    next_frame_time = max(next_frame_time + frame_interval, time.monotonic())
                     continue
                 frame_bytes = buffer.tobytes()
 
@@ -730,8 +802,11 @@ class CameraFrameBroadcaster:
                     self._frame_id += 1
                     self._condition.notify_all()
 
+                next_frame_time = max(next_frame_time + frame_interval, time.monotonic())
+
             except Exception as e:
                 print(f"❌ [CameraBroadcaster] Frame error: {e}")
+                next_frame_time = time.monotonic()
                 time.sleep(0.1)
 
     def get_frame(self, timeout=2.0):
@@ -756,21 +831,25 @@ def generate_camera_frames():
     """Generator that yields MJPEG frames from the shared broadcaster.
     Each client gets its own generator but all consume from the same
     pre-encoded frame — no per-client capture or JPEG encoding."""
-    while True:
-        try:
-            frame_bytes = _camera_broadcaster.get_frame(timeout=2.0)
-            if frame_bytes is None:
-                # Timeout or stopped — yield nothing, keep connection alive
-                time.sleep(0.1)
-                continue
+    _camera_broadcaster.add_consumer()
+    try:
+        while True:
+            try:
+                frame_bytes = _camera_broadcaster.get_frame(timeout=2.0)
+                if frame_bytes is None:
+                    # Timeout or stopped — yield nothing, keep connection alive
+                    time.sleep(0.1)
+                    continue
 
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-        except GeneratorExit:
-            return
-        except Exception as e:
-            print(f"❌ Camera frame error: {e}")
-            time.sleep(0.1)
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            except GeneratorExit:
+                return
+            except Exception as e:
+                print(f"❌ Camera frame error: {e}")
+                time.sleep(0.1)
+    finally:
+        _camera_broadcaster.remove_consumer()
 
 # ==========================================
 # 🚗 HARDWARE SETUP
@@ -2517,6 +2596,11 @@ def on_horn(data=None):
     emit('horn_response', {'status': 'ok'})
 
 
+STEERING_LOG_INTERVAL_SEC = 0.25
+_last_steering_log_ts = 0.0
+_last_steering_log_bucket = "center"
+
+
 @socketio.on('throttle')
 def on_throttle(data):
     """Handle throttle control"""
@@ -2549,6 +2633,7 @@ def on_brake(data):
 @socketio.on('steering')
 def on_steering(data):
     """Handle steering control (angle -90 to +90)"""
+    global _last_steering_log_ts, _last_steering_log_bucket
     try:
         angle = int(data.get('angle', 0))
         angle = max(-90, min(90, angle))  # Clamp to -90 to 90
@@ -2556,10 +2641,19 @@ def on_steering(data):
         if abs(angle) > 10:
             car_state["turning"] = "left" if angle < 0 else "right"
             direction = "⬅️ LEFT" if angle < 0 else "➡️ RIGHT"
-            print(f"\n⚙️ [UI Control] 🎡 STEERING: {direction} ({abs(angle)}°)")
+            bucket = "left" if angle < 0 else "right"
+            log_text = f"\n⚙️ [UI Control] 🎡 STEERING: {direction} ({abs(angle)}°)"
         else:
             car_state["turning"] = "straight"
-            print(f"\n⚙️ [UI Control] 🎡 STEERING: ⬆️ CENTER (0°)")
+            bucket = "center"
+            log_text = f"\n⚙️ [UI Control] 🎡 STEERING: ⬆️ CENTER (0°)"
+
+        now = time.monotonic()
+        if bucket != _last_steering_log_bucket or (now - _last_steering_log_ts) >= STEERING_LOG_INTERVAL_SEC:
+            print(log_text)
+            _last_steering_log_ts = now
+            _last_steering_log_bucket = bucket
+
         emit('steering_response', {'status': 'ok', 'angle': angle})
     except (ValueError, TypeError) as e:
         print(f"\n⚠️ [UI Control] ❌ Invalid steering angle: {e}")
@@ -2747,6 +2841,9 @@ def on_camera_toggle(data):
     car_state["camera_enabled"] = not car_state["camera_enabled"]
     state = '✅ ON' if car_state["camera_enabled"] else '❌ OFF'
     print(f"\n⚙️ [UI Control] 📷 CAMERA: {state}")
+
+    if VISION_AVAILABLE and vision_system is not None:
+        vision_system.stream_enabled = car_state["camera_enabled"]
     
     # When camera is disabled, turn off vision system and reset user CV preference
     if not car_state["camera_enabled"]:
@@ -2824,13 +2921,21 @@ def on_camera_config_update(data):
     
     # Update framerate
     if 'framerate' in data:
-        framerate = int(data['framerate'])
-        if 1 <= framerate <= 120:
+        requested_framerate = data['framerate']
+        try:
+            requested_framerate_int = int(requested_framerate)
+        except (TypeError, ValueError):
+            print(f"   ❌ Invalid framerate rejected: '{requested_framerate}' (must be 1-120)")
+        else:
+            framerate = _sanitize_camera_framerate(requested_framerate_int, old_framerate)
             if framerate != old_framerate:
                 needs_restart = True
             car_state["camera_framerate"] = framerate
             updated.append(f"framerate={framerate}")
-            print(f"   ✅ Framerate set to {framerate}")
+            if requested_framerate_int != framerate:
+                print(f"   ⚠️ Framerate '{requested_framerate_int}' clamped to {framerate}")
+            else:
+                print(f"   ✅ Framerate set to {framerate}")
     
     # Live reconfigure camera if resolution or framerate changed
     restart_ok = True

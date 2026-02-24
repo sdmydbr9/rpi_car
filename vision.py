@@ -79,8 +79,10 @@ class VisionSystem:
         self._latest_detections = []       # list of detection dicts
         self._latest_annotated_frame = None
         self._latest_raw_frame = None
+        self._latest_frame_id = 0
         self._detection_fps = 0.0
         self._active = False               # True = run DNN inference
+        self._stream_enabled = False       # True = capture frames for stream/MJPEG
         self._running = False              # True = thread alive
         self._camera_obstacle_distance = 999.0  # virtual distance (cm)
 
@@ -119,6 +121,14 @@ class VisionSystem:
     def detection_fps(self):
         with self._lock:
             return self._detection_fps
+
+    @property
+    def stream_enabled(self):
+        return self._stream_enabled
+
+    @stream_enabled.setter
+    def stream_enabled(self, value):
+        self._stream_enabled = bool(value)
 
     # ── Start / Stop ───────────────────────────────────
 
@@ -176,18 +186,23 @@ class VisionSystem:
                 "vision_active": self._active,
             }
 
-    def get_frame(self):
+    def get_frame_with_id(self):
         """
         Return the latest annotated frame (with bounding boxes) if
-        available, otherwise the raw frame.  Returns None if no frame
-        has been captured yet.
+        available, otherwise the raw frame, along with a monotonic
+        frame id. Returns (None, frame_id) if no frame exists yet.
         """
         with self._lock:
             if self._latest_annotated_frame is not None:
-                return self._latest_annotated_frame.copy()
+                return self._latest_annotated_frame.copy(), self._latest_frame_id
             elif self._latest_raw_frame is not None:
-                return self._latest_raw_frame.copy()
-            return None
+                return self._latest_raw_frame.copy(), self._latest_frame_id
+            return None, self._latest_frame_id
+
+    def get_frame(self):
+        """Backwards-compatible frame getter."""
+        frame, _ = self.get_frame_with_id()
+        return frame
 
     # ── Detection thread ───────────────────────────────
 
@@ -200,6 +215,11 @@ class VisionSystem:
 
         while self._running:
             try:
+                # Nothing needs camera frames right now.
+                if not self._stream_enabled and not self._active:
+                    time.sleep(0.05)
+                    continue
+
                 # ── 1. Capture frame ──────────────────
                 frame = self._picam2.capture_array()
                 if frame is None:
@@ -211,6 +231,7 @@ class VisionSystem:
                 # ── 2. Store raw frame (always, for MJPEG fallback) ───
                 with self._lock:
                     self._latest_raw_frame = frame.copy()
+                    self._latest_frame_id += 1
 
                 # ── 3. If not active, skip DNN ────────
                 if not self._active:
