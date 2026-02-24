@@ -30,6 +30,7 @@ import os
 import subprocess
 import sys
 import time
+import signal
 import threading
 import socket
 import re
@@ -3993,10 +3994,24 @@ echo "   IP Address: {ip}"
         print(f"❌ Hotspot configuration failed: {e}")
         return f"HOTSPOT_CONFIG_FAILED: {str(e)}"
 
+def _handle_service_sigterm(signum, _frame):
+    """Translate SIGTERM into graceful KeyboardInterrupt-style shutdown."""
+    try:
+        signal_name = signal.Signals(signum).name
+    except Exception:
+        signal_name = str(signum)
+    print(f"\n🛑 [System] Received {signal_name}; starting graceful shutdown...")
+    raise KeyboardInterrupt
+
+
 if __name__ == "__main__":
+    # Explicitly handle SIGTERM because systemd stop/restart sends TERM by default.
+    signal.signal(signal.SIGTERM, _handle_service_sigterm)
     try:
         # Host 0.0.0.0 makes it available on your Wi-Fi
         socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
+    except KeyboardInterrupt:
+        print("🛑 [System] Shutdown requested")
     finally:
         # Safety cleanup — car_system.cleanup() stops PWMs + releases GPIO
         _camera_broadcaster.stop()
