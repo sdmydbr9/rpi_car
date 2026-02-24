@@ -551,6 +551,12 @@ if _narration_config.get('api_key'):
     )
     print(f"\U0001f399\ufe0f [Narration] Engine configured from persisted config")
 
+# Apply persisted ElevenLabs config to the engine (primary voice path)
+narration_engine.set_elevenlabs_config(
+    api_key=_effective_elevenlabs_api_key(),
+    voice_id=_effective_elevenlabs_voice_id(),
+)
+
 # Apply persisted Kokoro TTS config to the engine
 if _narration_config.get('kokoro_enabled') and _narration_config.get('kokoro_ip') and _narration_config.get('kokoro_voice'):
     narration_engine.set_kokoro_config(
@@ -2782,6 +2788,10 @@ def on_narration_config_update(data):
             model_name=_narration_config['model'],
             interval=_narration_config.get('interval', 30),
         )
+    narration_engine.set_elevenlabs_config(
+        api_key=_effective_elevenlabs_api_key(),
+        voice_id=_effective_elevenlabs_voice_id(),
+    )
     
     emit('narration_config_response', {'status': 'ok'})
 
@@ -2810,6 +2820,10 @@ def on_narration_toggle(data):
             interval=_narration_config.get('interval', 30),
         )
         narration_engine.set_camera(picam2, vision_system)
+        narration_engine.set_elevenlabs_config(
+            api_key=_effective_elevenlabs_api_key(),
+            voice_id=_effective_elevenlabs_voice_id(),
+        )
         
         # Apply Kokoro TTS config if available
         if _narration_config.get('kokoro_enabled') and _narration_config.get('kokoro_ip') and _narration_config.get('kokoro_voice'):
@@ -2831,6 +2845,69 @@ def on_narration_toggle(data):
         _narration_config['enabled'] = False
         _save_narration_config(_narration_config)
         emit('narration_toggle_response', {'status': 'ok', 'enabled': False})
+
+@socketio.on('narration_analyze_once')
+def on_narration_analyze_once(data):
+    """Trigger one immediate AI analysis + narration pass."""
+    client_id = request.sid
+    print(f"\n🎙️ [Narration] Analyze-once requested by client {client_id[:8]}...")
+
+    # Check prerequisites
+    if not _narration_config.get('api_key'):
+        emit('narration_analyze_once_response', {'status': 'error', 'message': 'No API key configured'})
+        return
+    if not _narration_config.get('model'):
+        emit('narration_analyze_once_response', {'status': 'error', 'message': 'No model selected'})
+        return
+    if not car_state.get('camera_enabled'):
+        emit('narration_analyze_once_response', {'status': 'error', 'message': 'Camera must be enabled first'})
+        return
+
+    def analyze_once_async():
+        try:
+            # Re-apply latest persisted config before the one-shot run
+            narration_engine.configure(
+                api_key=_narration_config['api_key'],
+                model_name=_narration_config['model'],
+                interval=_narration_config.get('interval', 30),
+            )
+            narration_engine.set_camera(picam2, vision_system)
+            narration_engine.set_elevenlabs_config(
+                api_key=_effective_elevenlabs_api_key(),
+                voice_id=_effective_elevenlabs_voice_id(),
+            )
+
+            # Apply Kokoro config if available (otherwise disable for this run)
+            if _narration_config.get('kokoro_enabled') and _narration_config.get('kokoro_ip') and _narration_config.get('kokoro_voice'):
+                narration_engine.set_kokoro_config(
+                    _narration_config.get('kokoro_ip'),
+                    _narration_config.get('kokoro_voice')
+                )
+            else:
+                narration_engine.set_kokoro_config(None, None)
+
+            success, message = narration_engine.analyze_once()
+            if success:
+                socketio.emit(
+                    'narration_analyze_once_response',
+                    {'status': 'ok', 'message': 'Analysis complete'},
+                    to=client_id,
+                )
+            else:
+                socketio.emit(
+                    'narration_analyze_once_response',
+                    {'status': 'error', 'message': message or 'Analysis failed'},
+                    to=client_id,
+                )
+        except Exception as e:
+            print(f"❌ [Narration] Analyze-once failed: {e}")
+            socketio.emit(
+                'narration_analyze_once_response',
+                {'status': 'error', 'message': str(e)},
+                to=client_id,
+            )
+
+    threading.Thread(target=analyze_once_async, daemon=True).start()
 
 @socketio.on('narration_speaking_done')
 def on_narration_speaking_done(data):
@@ -2953,6 +3030,9 @@ def _trigger_startup_check_async(client_id=None, source="manual", require_enable
             gemini_key = _narration_config.get('api_key')  # Use narration API key for Gemini
             eleven_key = _startup_config.get('elevenlabs_api_key')
             voice_id = _startup_config.get('elevenlabs_voice_id', 'JBFqnCBsd6RMkjVDRZzb')
+            kokoro_enabled = _narration_config.get('kokoro_enabled', False)
+            kokoro_ip = _narration_config.get('kokoro_ip')
+            kokoro_voice = _narration_config.get('kokoro_voice')
 
             print(f"⬛ [Startup] Running diagnostics ({source}) with provided credentials...")
 
@@ -2972,6 +3052,9 @@ def _trigger_startup_check_async(client_id=None, source="manual", require_enable
                 gemini_key=gemini_key,
                 eleven_key=eleven_key,
                 voice_id=voice_id,
+                kokoro_enabled=kokoro_enabled,
+                kokoro_ip=kokoro_ip,
+                kokoro_voice=kokoro_voice,
                 audio_device=CAR_AUDIO_DEVICE,
                 on_speech_start=_on_speech_start,
                 on_speech_end=_on_speech_end,
@@ -3042,6 +3125,10 @@ def on_startup_config_update(data):
     _sync_elevenlabs_config_between_files()
     _save_startup_config(_startup_config)
     _save_narration_config(_narration_config)
+    narration_engine.set_elevenlabs_config(
+        api_key=_effective_elevenlabs_api_key(),
+        voice_id=_effective_elevenlabs_voice_id(),
+    )
     
     socketio.emit('startup_config_sync', _build_startup_config_sync_payload())
     emit('startup_config_response', {'status': 'ok'})
@@ -3106,6 +3193,10 @@ def on_elevenlabs_validate_key(data):
                 _narration_config['elevenlabs_voice_id'] = voices[0]['voice_id']
                 _save_startup_config(_startup_config)
                 _save_narration_config(_narration_config)
+                narration_engine.set_elevenlabs_config(
+                    api_key=_effective_elevenlabs_api_key(),
+                    voice_id=_effective_elevenlabs_voice_id(),
+                )
                 
                 result = {
                     'valid': True,
@@ -3162,6 +3253,10 @@ def on_elevenlabs_key_clear(data):
     _narration_config['elevenlabs_api_key'] = ''
     _save_startup_config(_startup_config)
     _save_narration_config(_narration_config)
+    narration_engine.set_elevenlabs_config(
+        api_key='',
+        voice_id=_effective_elevenlabs_voice_id(),
+    )
     
     # Broadcast cleared config to all clients
     socketio.emit('startup_config_sync', _build_startup_config_sync_payload())

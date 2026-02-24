@@ -179,6 +179,8 @@ Rules:
 # Local offline inference stack (llama.cpp + Mimic3)
 LLM_API_URL = "http://127.0.0.1:8000/v1/chat/completions"
 TTS_API_URL = "http://127.0.0.1:59125/api/tts"
+ELEVEN_DEFAULT_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb"
+KOKORO_DEFAULT_SPEED = 1.0
 SYSTEM_PROMPT = (
     "You are a sentient AI trapped inside a 4WD rover chassis. "
     "You interpret sensor data as physical sensations. "
@@ -631,6 +633,85 @@ def speak_with_eleven(
         return False
 
 
+def speak_with_kokoro(
+    text: str,
+    kokoro_enabled: bool = False,
+    kokoro_ip: str = None,
+    kokoro_voice: str = None,
+    kokoro_speed: float = KOKORO_DEFAULT_SPEED,
+    audio_device: str = "default",
+    on_playback_start=None,
+    on_playback_end=None,
+):
+    """Synthesize and play speech with Kokoro when configured and reachable."""
+    if not kokoro_enabled:
+        return False
+    if not kokoro_ip or not kokoro_voice:
+        print("[TARS] Kokoro not configured (missing IP/voice)")
+        return False
+    if not text or not text.strip():
+        return False
+
+    try:
+        print(f"[TARS] Synthesizing Kokoro response ({kokoro_ip}, voice={kokoro_voice})...", end=" ", flush=True)
+        response = requests.post(
+            f"http://{kokoro_ip}/v1/audio/speech",
+            json={
+                "model": "kokoro",
+                "input": text,
+                "voice": kokoro_voice,
+                "response_format": "mp3",
+                "speed": max(0.1, float(kokoro_speed)),
+            },
+            timeout=(5, 30),
+        )
+        if response.status_code != 200:
+            print(f"FAILED: HTTP {response.status_code}")
+            return False
+
+        audio_bytes = response.content
+        if not audio_bytes:
+            print("FAILED: empty audio stream")
+            return False
+
+        print("READY")
+        print(f"[TARS] Playing Kokoro response (device={audio_device})...", end=" ", flush=True)
+
+        playback_started = False
+        try:
+            if callable(on_playback_start):
+                try:
+                    on_playback_start()
+                    playback_started = True
+                except Exception as cb_err:
+                    print(f"\n[TARS] Playback start callback failed: {cb_err}")
+
+            if _play_audio_with_pygame(audio_bytes):
+                print("DONE (pygame)")
+                return True
+            if _play_audio_with_mpg123(audio_bytes, audio_device=audio_device):
+                print("DONE (mpg123)")
+                return True
+            if _play_audio_with_ffplay(audio_bytes, audio_device=audio_device):
+                print("DONE (ffplay)")
+                return True
+
+            print("FAILED")
+            return False
+        finally:
+            if playback_started and callable(on_playback_end):
+                try:
+                    on_playback_end()
+                except Exception as cb_err:
+                    print(f"[TARS] Playback end callback failed: {cb_err}")
+    except requests.RequestException as e:
+        print(f"FAILED: {e}")
+        return False
+    except Exception as e:
+        print(f"FAILED: {e}")
+        return False
+
+
 def speak_with_mimic3(
     text: str,
     audio_device: str = "default",
@@ -704,10 +785,139 @@ def speak_with_mimic3(
         return False
 
 
+def speak_with_espeak(
+    text: str,
+    audio_device: str = "default",
+    on_playback_start=None,
+    on_playback_end=None,
+):
+    """Final local fallback using espeak/espeak-ng."""
+    if not text or not text.strip():
+        return False
+
+    espeak_bin = shutil.which("espeak-ng") or shutil.which("espeak")
+    if not espeak_bin:
+        print("[TARS] espeak not available")
+        return False
+
+    playback_started = False
+    try:
+        print(f"[TARS] Synthesizing local espeak response ({espeak_bin})...", end=" ", flush=True)
+        if callable(on_playback_start):
+            try:
+                on_playback_start()
+                playback_started = True
+            except Exception as cb_err:
+                print(f"\n[TARS] Playback start callback failed: {cb_err}")
+
+        # First attempt: configured device
+        cmd = [espeak_bin, "-a", "100", "-s", "120", "-p", "50"]
+        if audio_device:
+            cmd.extend(["-d", audio_device])
+        cmd.append(text)
+        result = subprocess.run(cmd, capture_output=True, timeout=30)
+        if result.returncode == 0:
+            print("DONE")
+            return True
+
+        err = result.stderr.decode(errors="ignore").strip()
+        print(f"FAILED: {err}")
+
+        # Second attempt: system default output
+        fallback = subprocess.run(
+            [espeak_bin, "-a", "100", "-s", "120", "-p", "50", text],
+            capture_output=True,
+            timeout=30,
+        )
+        if fallback.returncode == 0:
+            print("[TARS] espeak fallback played on system default device")
+            return True
+
+        fallback_err = fallback.stderr.decode(errors="ignore").strip()
+        print(f"[TARS] espeak fallback failed: {fallback_err}")
+        return False
+    except Exception as e:
+        print(f"FAILED: {e}")
+        return False
+    finally:
+        if playback_started and callable(on_playback_end):
+            try:
+                on_playback_end()
+            except Exception as cb_err:
+                print(f"[TARS] Playback end callback failed: {cb_err}")
+
+
+def speak_with_fallback_order(
+    text: str,
+    eleven_key: str = None,
+    eleven_voice_id: str = ELEVEN_DEFAULT_VOICE_ID,
+    kokoro_enabled: bool = False,
+    kokoro_ip: str = None,
+    kokoro_voice: str = None,
+    kokoro_speed: float = KOKORO_DEFAULT_SPEED,
+    audio_device: str = "default",
+    on_playback_start=None,
+    on_playback_end=None,
+):
+    """Play speech using: ElevenLabs -> Kokoro -> Mimic3 -> espeak."""
+    if not text or not text.strip():
+        return False
+
+    if speak_with_eleven(
+        text,
+        voice_id=eleven_voice_id,
+        api_key=eleven_key,
+        audio_device=audio_device,
+        on_playback_start=on_playback_start,
+        on_playback_end=on_playback_end,
+    ):
+        return True
+
+    print("[TARS] ElevenLabs unavailable or failed; trying Kokoro")
+    if speak_with_kokoro(
+        text,
+        kokoro_enabled=kokoro_enabled,
+        kokoro_ip=kokoro_ip,
+        kokoro_voice=kokoro_voice,
+        kokoro_speed=kokoro_speed,
+        audio_device=audio_device,
+        on_playback_start=on_playback_start,
+        on_playback_end=on_playback_end,
+    ):
+        return True
+
+    print("[TARS] Kokoro unavailable or failed; trying Mimic3")
+    if speak_with_mimic3(
+        text,
+        audio_device=audio_device,
+        on_playback_start=on_playback_start,
+        on_playback_end=on_playback_end,
+    ):
+        return True
+
+    print("[TARS] Mimic3 unavailable or failed; trying espeak")
+    if speak_with_espeak(
+        text,
+        audio_device=audio_device,
+        on_playback_start=on_playback_start,
+        on_playback_end=on_playback_end,
+    ):
+        return True
+
+    print("[TARS] All startup TTS backends failed")
+    return False
+
+
 def fallback_speak_status(
     status: SystemStatus,
     audio_device: str = "default",
     text_override: str = None,
+    eleven_key: str = None,
+    eleven_voice_id: str = ELEVEN_DEFAULT_VOICE_ID,
+    kokoro_enabled: bool = False,
+    kokoro_ip: str = None,
+    kokoro_voice: str = None,
+    kokoro_speed: float = KOKORO_DEFAULT_SPEED,
     on_playback_start=None,
     on_playback_end=None,
 ):
@@ -719,18 +929,24 @@ def fallback_speak_status(
         else:
             text = "Warning. Critical systems are offline. I calculate a ninety-nine percent probability of failure."
 
-        print(f"[TARS] Vocalizing (Mimic3 fallback, device={audio_device}): {text}")
+        print(f"[TARS] Vocalizing (full fallback chain, device={audio_device}): {text}")
         for attempt in range(1, 4):
-            if speak_with_mimic3(
+            if speak_with_fallback_order(
                 text,
+                eleven_key=eleven_key,
+                eleven_voice_id=eleven_voice_id,
+                kokoro_enabled=kokoro_enabled,
+                kokoro_ip=kokoro_ip,
+                kokoro_voice=kokoro_voice,
+                kokoro_speed=kokoro_speed,
                 audio_device=audio_device,
                 on_playback_start=on_playback_start,
                 on_playback_end=on_playback_end,
             ):
                 return True
-            print(f"[TARS] Mimic3 fallback attempt {attempt}/3 failed")
+            print(f"[TARS] Full fallback attempt {attempt}/3 failed")
             time.sleep(0.5)
-        print("[TARS] Mimic3 fallback exhausted all retries")
+        print("[TARS] Full fallback chain exhausted all retries")
         return False
 
     except Exception as e:
@@ -835,7 +1051,11 @@ def generate_status_summary(status: SystemStatus) -> str:
 def main(
     gemini_key=None,
     eleven_key=None,
-    voice_id="JBFqnCBsd6RMkjVDRZzb",
+    voice_id=ELEVEN_DEFAULT_VOICE_ID,
+    kokoro_enabled=False,
+    kokoro_ip=None,
+    kokoro_voice=None,
+    kokoro_speed=KOKORO_DEFAULT_SPEED,
     audio_device="default",
     on_speech_start=None,
     on_speech_end=None,
@@ -847,6 +1067,10 @@ def main(
         gemini_key: Optional Gemini API key (overrides file config)
         eleven_key: Optional ElevenLabs API key (overrides file config)
         voice_id: Optional ElevenLabs voice ID (default: TARS voice)
+        kokoro_enabled: Whether Kokoro TTS fallback is enabled
+        kokoro_ip: Kokoro host:port
+        kokoro_voice: Kokoro voice name
+        kokoro_speed: Kokoro speaking speed
         audio_device: ALSA device for voice playback (e.g. default, hw:1,0)
         on_speech_start: Optional callback fired immediately before speech playback.
         on_speech_end: Optional callback fired immediately after speech playback.
@@ -873,9 +1097,9 @@ def main(
         print("[TARS] Internet uplink: ONLINE (cloud cognitive stack enabled)")
     else:
         if hotspot_mode:
-            print("[TARS] Hotspot mode detected - OFFLINE (local llama.cpp + Mimic3 fallback)")
+            print("[TARS] Hotspot mode detected - OFFLINE (local llama.cpp + TTS fallback chain)")
         else:
-            print("[TARS] Internet uplink: OFFLINE (switching to local llama.cpp + Mimic3)")
+            print("[TARS] Internet uplink: OFFLINE (switching to local llama.cpp + TTS fallback chain)")
 
     expressive_text = None
     speech_played = False
@@ -886,50 +1110,35 @@ def main(
 
         if not expressive_text:
             expressive_text = expressive_text_from_local_llm(summary)
-
-        if expressive_text:
-            print(f"\n[TARS VOCAL OUTPUT] > {expressive_text}\n")
-            if ELEVENLABS_AVAILABLE:
-                speech_played = speak_with_eleven(
-                    expressive_text,
-                    voice_id=voice_id,
-                    api_key=ELEVEN_API_KEY,
-                    audio_device=audio_device,
-                    on_playback_start=on_speech_start,
-                    on_playback_end=on_speech_end,
-                )
-                if not speech_played:
-                    print("[TARS] ElevenLabs playback failed; falling back to local Mimic3")
-                    speech_played = speak_with_mimic3(
-                        expressive_text,
-                        audio_device=audio_device,
-                        on_playback_start=on_speech_start,
-                        on_playback_end=on_speech_end,
-                    )
-            else:
-                print("[TARS] ElevenLabs unavailable; using local Mimic3")
-                speech_played = speak_with_mimic3(
-                    expressive_text,
-                    audio_device=audio_device,
-                    on_playback_start=on_speech_start,
-                    on_playback_end=on_speech_end,
-                )
     else:
         expressive_text = expressive_text_from_local_llm(summary)
-        if expressive_text:
-            print(f"\n[TARS VOCAL OUTPUT] > {expressive_text}\n")
-            speech_played = speak_with_mimic3(
-                expressive_text,
-                audio_device=audio_device,
-                on_playback_start=on_speech_start,
-                on_playback_end=on_speech_end,
-            )
+
+    if expressive_text:
+        print(f"\n[TARS VOCAL OUTPUT] > {expressive_text}\n")
+        speech_played = speak_with_fallback_order(
+            expressive_text,
+            eleven_key=ELEVEN_API_KEY,
+            eleven_voice_id=voice_id,
+            kokoro_enabled=kokoro_enabled,
+            kokoro_ip=kokoro_ip,
+            kokoro_voice=kokoro_voice,
+            kokoro_speed=kokoro_speed,
+            audio_device=audio_device,
+            on_playback_start=on_speech_start,
+            on_playback_end=on_speech_end,
+        )
 
     if not speech_played:
         fallback_speak_status(
             status,
             audio_device=audio_device,
             text_override=expressive_text if expressive_text else None,
+            eleven_key=ELEVEN_API_KEY,
+            eleven_voice_id=voice_id,
+            kokoro_enabled=kokoro_enabled,
+            kokoro_ip=kokoro_ip,
+            kokoro_voice=kokoro_voice,
+            kokoro_speed=kokoro_speed,
             on_playback_start=on_speech_start,
             on_playback_end=on_speech_end,
         )

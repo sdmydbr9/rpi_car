@@ -210,6 +210,7 @@ export const CockpitController = () => {
   });
   const [narrationSpeaking, setNarrationSpeaking] = useState(false);
   const [narrationLastText, setNarrationLastText] = useState('');
+  const [analyzeNowPending, setAnalyzeNowPending] = useState(false);
   const [showAudioUnlockPrompt, setShowAudioUnlockPrompt] = useState(false);
   const [ttsUnlocked, setTtsUnlocked] = useState(false);
   // Driver Data State
@@ -245,6 +246,7 @@ export const CockpitController = () => {
   const connectionTimeoutRef = useRef<number | null>(null);
   const autoConnectAttemptedRef = useRef(false);
   const pendingGearRef = useRef<{ gear: string; ts: number } | null>(null);
+  const analyzeNowTimeoutRef = useRef<number | null>(null);
 
   // TTS Browser Unlock: Safari and Chrome require a user gesture before speechSynthesis.speak() works.
   // We use the ttsService singleton which handles voice preloading, unlock, and the
@@ -523,6 +525,20 @@ export const CockpitController = () => {
       }
     });
 
+    socketClient.onNarrationAnalyzeOnceResponse((data) => {
+      if (analyzeNowTimeoutRef.current) {
+        window.clearTimeout(analyzeNowTimeoutRef.current);
+        analyzeNowTimeoutRef.current = null;
+      }
+      setAnalyzeNowPending(false);
+      if (data.status === 'error') {
+        toast.error('AI analysis failed', {
+          description: data.message || 'Could not analyze camera frame.',
+          duration: 3500,
+        });
+      }
+    });
+
     // Subscribe to telemetry updates
     // Note: throttle, brake, and steeringAngle are NOT updated from telemetry - they're controlled only by user input
     // This ensures continuous hold behavior works correctly (the server won't overwrite the UI state)
@@ -627,6 +643,10 @@ export const CockpitController = () => {
 
     return () => {
       socketClient.onTelemetry(() => {}); // Unsubscribe
+      if (analyzeNowTimeoutRef.current) {
+        window.clearTimeout(analyzeNowTimeoutRef.current);
+        analyzeNowTimeoutRef.current = null;
+      }
       // Clean up TTS on unmount
       if (window.speechSynthesis.speaking) {
         window.speechSynthesis.cancel();
@@ -1043,6 +1063,39 @@ export const CockpitController = () => {
     }
   }, []);
 
+  const handleAnalyzeNow = useCallback(() => {
+    if (analyzeNowPending) return;
+    if (!isConnected) {
+      toast.error('Cannot analyze image', {
+        description: 'Backend connection lost. Reconnect to trigger AI analysis.',
+        duration: 3000,
+      });
+      return;
+    }
+    if (!isCameraEnabled) {
+      toast.error('Camera is disabled', {
+        description: 'Turn on the camera before running AI analysis.',
+        duration: 3000,
+      });
+      return;
+    }
+
+    setAnalyzeNowPending(true);
+    if (analyzeNowTimeoutRef.current) {
+      window.clearTimeout(analyzeNowTimeoutRef.current);
+    }
+    analyzeNowTimeoutRef.current = window.setTimeout(() => {
+      setAnalyzeNowPending(false);
+      analyzeNowTimeoutRef.current = null;
+      toast.error('AI analysis timed out', {
+        description: 'No response received from the server.',
+        duration: 3500,
+      });
+    }, 45000);
+
+    socketClient.emitNarrationAnalyzeOnce();
+  }, [analyzeNowPending, isCameraEnabled, isConnected]);
+
   const handleNetworkModeSwitch = useCallback(async (targetMode: NetworkMode) => {
     if (networkSwitching || targetMode === networkMode) {
       return;
@@ -1215,7 +1268,17 @@ export const CockpitController = () => {
             {/* Camera Feed */}
             <div className="h-[30%] min-h-0 p-0.5 border-none border-b border-border/30">
               <div onClick={handleImmersiveViewToggle} className="cursor-pointer h-full w-full">
-                <CameraFeed isConnected={isConnected} streamUrl={streamUrl} isCameraEnabled={isCameraEnabled} onToggleCamera={handleCameraToggle} narrationEnabled={imageAnalysisEnabled} narrationSpeaking={narrationSpeaking} narrationLastText={narrationLastText} />
+                <CameraFeed
+                  isConnected={isConnected}
+                  streamUrl={streamUrl}
+                  isCameraEnabled={isCameraEnabled}
+                  onToggleCamera={handleCameraToggle}
+                  narrationEnabled={imageAnalysisEnabled}
+                  narrationSpeaking={narrationSpeaking}
+                  narrationLastText={narrationLastText}
+                  onAnalyzeNow={handleAnalyzeNow}
+                  analyzeNowPending={analyzeNowPending}
+                />
               </div>
             </div>
             

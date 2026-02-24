@@ -35,6 +35,9 @@ DEFAULT_PROMPT = (
 LOCAL_LLM_URL = os.getenv("RC_LOCAL_LLM_URL", "http://127.0.0.1:8000/v1/chat/completions")
 MIMIC3_TTS_URL = os.getenv("RC_MIMIC3_TTS_URL", "http://127.0.0.1:59125/api/tts")
 HOTSPOT_AUDIO_DEVICE = os.getenv("RC_HOTSPOT_AUDIO_DEVICE", "plughw:0,0")
+ELEVENLABS_TTS_URL = os.getenv("RC_ELEVENLABS_TTS_URL", "https://api.elevenlabs.io/v1/text-to-speech")
+ELEVENLABS_DEFAULT_VOICE_ID = os.getenv("RC_ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")
+ELEVENLABS_DEFAULT_MODEL_ID = os.getenv("RC_ELEVENLABS_MODEL_ID", "eleven_v3")
 
 def is_hotspot_mode() -> bool:
     """Check if device is in hotspot mode (no internet connectivity).
@@ -195,6 +198,155 @@ def _play_mimic3_tts(text: str, mimic3_url: str = None, audio_device: str = None
         return False
 
 
+# ==========================================
+# 🔊 SHARED MP3 PLAYBACK HELPER
+# ==========================================
+
+def _play_mp3_with_loudness(mp3_path: str, volume: float = 8.0, audio_device: str = "default") -> bool:
+    """Decode MP3 and play with compression/normalization via sox -> aplay."""
+    sox_bin = shutil.which("sox")
+    aplay_bin = shutil.which("aplay")
+    mpg123_bin = shutil.which("mpg123")
+    if not (mpg123_bin and sox_bin and aplay_bin):
+        print("⚠️ [Narration] Missing mpg123/sox/aplay for MP3 playback")
+        return False
+
+    wav_path = f"{mp3_path}.wav"
+    sox_proc = None
+    aplay_proc = None
+    try:
+        decode = subprocess.run(
+            [mpg123_bin, "-q", "-w", wav_path, mp3_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=60,
+        )
+        if decode.returncode != 0 or not os.path.exists(wav_path):
+            err = decode.stderr.decode(errors="ignore").strip()
+            print(f"❌ [Narration] mpg123 decode failed: {err}")
+            return False
+
+        sox_cmd = [
+            sox_bin,
+            "-v", str(max(0.1, volume)),
+            wav_path,
+            "-t", "wav", "-",
+            "highpass", "100",
+            "compand", "0.01,0.20",
+            "6:-90,-70,-40,-18,-20,-8,-5,-2",
+            "-2", "-90", "0.05",
+            "gain", "-n", "-0.1",
+        ]
+        sox_proc = subprocess.Popen(
+            sox_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        aplay_proc = subprocess.Popen(
+            [aplay_bin, "-D", audio_device, "-"],
+            stdin=sox_proc.stdout,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        if sox_proc.stdout is not None:
+            sox_proc.stdout.close()
+
+        aplay_err = aplay_proc.communicate(timeout=180)[1]
+        sox_err = sox_proc.communicate(timeout=180)[1]
+
+        if aplay_proc.returncode != 0:
+            print(f"❌ [Narration] aplay failed: {aplay_err.decode(errors='ignore').strip()}")
+            return False
+        if sox_proc.returncode != 0:
+            print(f"❌ [Narration] sox failed: {sox_err.decode(errors='ignore').strip()}")
+            return False
+        return True
+    except subprocess.TimeoutExpired:
+        print("❌ [Narration] Playback timed out")
+        if aplay_proc and aplay_proc.poll() is None:
+            aplay_proc.kill()
+        if sox_proc and sox_proc.poll() is None:
+            sox_proc.kill()
+        return False
+    except Exception as e:
+        print(f"❌ [Narration] MP3 playback error: {e}")
+        if aplay_proc and aplay_proc.poll() is None:
+            aplay_proc.kill()
+        if sox_proc and sox_proc.poll() is None:
+            sox_proc.kill()
+        return False
+    finally:
+        if os.path.exists(wav_path):
+            try:
+                os.remove(wav_path)
+            except OSError:
+                pass
+
+
+# ==========================================
+# 🎤 ELEVENLABS PLAYBACK HELPER
+# ==========================================
+
+def _play_elevenlabs_tts(
+    text: str,
+    api_key: str,
+    voice_id: str = ELEVENLABS_DEFAULT_VOICE_ID,
+    model_id: str = ELEVENLABS_DEFAULT_MODEL_ID,
+    audio_device: str = "default",
+    volume: float = 8.0,
+) -> bool:
+    """Synthesize speech with ElevenLabs and play it locally."""
+    if not api_key or not text or not text.strip():
+        return False
+
+    mp3_path = None
+    try:
+        headers = {
+            "xi-api-key": api_key,
+            "Content-Type": "application/json",
+            "Accept": "audio/mpeg",
+        }
+        payload = {
+            "text": text,
+            "model_id": model_id or ELEVENLABS_DEFAULT_MODEL_ID,
+        }
+        response = requests.post(
+            f"{ELEVENLABS_TTS_URL}/{voice_id}",
+            headers=headers,
+            json=payload,
+            timeout=(5, 30),
+        )
+        if response.status_code != 200:
+            body = response.text[:160].strip().replace("\n", " ")
+            print(f"❌ [Narration] ElevenLabs API error: HTTP {response.status_code} - {body}")
+            return False
+        if not response.content:
+            print("❌ [Narration] ElevenLabs returned empty audio")
+            return False
+
+        with tempfile.NamedTemporaryFile(prefix="eleven_narr_", suffix=".mp3", delete=False) as tmp:
+            mp3_path = tmp.name
+            tmp.write(response.content)
+
+        return _play_mp3_with_loudness(
+            mp3_path=mp3_path,
+            volume=volume,
+            audio_device=audio_device,
+        )
+    except requests.RequestException as e:
+        print(f"❌ [Narration] ElevenLabs request failed: {e}")
+        return False
+    except Exception as e:
+        print(f"❌ [Narration] ElevenLabs playback error: {e}")
+        return False
+    finally:
+        if mp3_path and os.path.exists(mp3_path):
+            try:
+                os.remove(mp3_path)
+            except OSError:
+                pass
+
+
 # ==========================================# � KOKORO LOUDNESS PLAYBACK HELPER
 # ==========================================
 
@@ -239,67 +391,15 @@ def _play_kokoro_with_volume(
                 if chunk:
                     tmp.write(chunk)
 
-        sox_bin = shutil.which("sox")
-        aplay_bin = shutil.which("aplay")
-        mpg123_bin = shutil.which("mpg123")
-
-        if mpg123_bin and sox_bin and aplay_bin:
-            wav_path = f"{mp3_path}.wav"
-            decode = subprocess.run(
-                [mpg123_bin, "-q", "-w", wav_path, mp3_path],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                timeout=60,
-            )
-            if decode.returncode != 0 or not os.path.exists(wav_path):
-                err = decode.stderr.decode(errors="ignore").strip()
-                print(f"❌ [Narration] mpg123 decode failed: {err}")
-                return False
-
-            sox_cmd = [
-                sox_bin,
-                "-v", str(max(0.1, volume)),
-                wav_path,
-                "-t", "wav", "-",
-                "highpass", "100",
-                "compand", "0.01,0.20",
-                "6:-90,-70,-40,-18,-20,-8,-5,-2",
-                "-2", "-90", "0.05",
-                "gain", "-n", "-0.1",
-            ]
-
-            sox_proc = subprocess.Popen(
-                sox_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            aplay_proc = subprocess.Popen(
-                [aplay_bin, "-D", audio_device, "-"],
-                stdin=sox_proc.stdout,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-            if sox_proc.stdout is not None:
-                sox_proc.stdout.close()
-
-            aplay_err = aplay_proc.communicate(timeout=180)[1]
-            sox_err = sox_proc.communicate(timeout=180)[1]
-
-            try:
-                os.remove(wav_path)
-            except OSError:
-                pass
-
-            if aplay_proc.returncode != 0:
-                print(f"❌ [Narration] aplay failed: {aplay_err.decode(errors='ignore').strip()}")
-                return False
-            if sox_proc.returncode != 0:
-                print(f"❌ [Narration] sox failed: {sox_err.decode(errors='ignore').strip()}")
-                return False
+        if _play_mp3_with_loudness(
+            mp3_path=mp3_path,
+            volume=volume,
+            audio_device=audio_device,
+        ):
             return True
 
-        # Fallback: basic mpg123 streaming (no loudness boost)
-        print("⚠️ [Narration] sox/aplay not found — falling back to kokoro_client streaming")
+        # Fallback: kokoro_client streaming when local MP3 playback pipeline fails
+        print("⚠️ [Narration] Kokoro loudness pipeline failed — falling back to kokoro_client streaming")
         kokoro = get_kokoro_client()
         return kokoro.synthesize_and_stream(ip_address=ip_address, text=text, voice=voice, speed=speed)
 
@@ -505,9 +605,15 @@ class NarrationEngine:
         self._on_narration_error = None  # callback(error: str)
         self._on_narration_done = None   # callback() — fired after audio playback finishes
         self._lock = threading.Lock()
+        self._analysis_lock = threading.Lock()  # Prevent overlap between timer/manual analysis
         self._play_local_tts = True  # Fallback to espeak-ng when Kokoro is unavailable
         self._audio_device = 'default'  # ALSA device for both Kokoro and TTS playback
         self._audio_manager = None  # Reference to CarAudioManager for volume ducking
+        # ElevenLabs TTS configuration (primary narration voice)
+        self._elevenlabs_api_key: str = ""
+        self._elevenlabs_voice_id: str = ELEVENLABS_DEFAULT_VOICE_ID
+        self._elevenlabs_model_id: str = ELEVENLABS_DEFAULT_MODEL_ID
+        self._elevenlabs_volume: float = 8.0
         # Kokoro TTS configuration
         self._kokoro_enabled = False
         self._kokoro_ip: str = ""
@@ -517,8 +623,8 @@ class NarrationEngine:
         # Local LLM configuration
         self._local_llm_url: str = LOCAL_LLM_URL
         self._use_local_llm: bool = False  # Set to True to force local LLM in hotspot mode
-        # Mimic3 TTS configuration (for hotspot mode, matches auto_voice.py)
-        self._mimic3_enabled: bool = False
+        # Mimic3 TTS configuration (tertiary fallback voice path)
+        self._mimic3_enabled: bool = True
         self._mimic3_url: str = MIMIC3_TTS_URL
         self._mimic3_audio_device: str = HOTSPOT_AUDIO_DEVICE
     
@@ -549,6 +655,33 @@ class NarrationEngine:
         tts = get_tts_synthesizer()
         tts.set_audio_device(device)
         print(f"🔊 [Narration] Audio device configured for all playback: {device}")
+
+    def set_elevenlabs_config(
+        self,
+        api_key: str | None,
+        voice_id: str | None = None,
+        model_id: str | None = None,
+        volume: float | None = None,
+    ):
+        """Configure ElevenLabs credentials used as the first playback option."""
+        with self._lock:
+            self._elevenlabs_api_key = (api_key or "").strip()
+            if voice_id:
+                self._elevenlabs_voice_id = voice_id
+            if model_id:
+                self._elevenlabs_model_id = model_id
+            if volume is not None:
+                self._elevenlabs_volume = max(0.1, float(volume))
+
+            key_set = bool(self._elevenlabs_api_key)
+            voice = self._elevenlabs_voice_id
+            model = self._elevenlabs_model_id
+            masked = ('*' * 8 + self._elevenlabs_api_key[-4:]) if len(self._elevenlabs_api_key) > 4 else ''
+
+        if key_set:
+            print(f"🎤 [Narration] ElevenLabs enabled - key={masked}, voice={voice}, model={model}")
+        else:
+            print("🎤 [Narration] ElevenLabs disabled (no API key)")
     
     
     def set_kokoro_config(
@@ -579,10 +712,9 @@ class NarrationEngine:
                 print(f"🎤 [Narration] Kokoro disabled")
     
     def set_local_llm_config(self, url: str | None = None, force_use: bool = False):
-        """Configure local LLM for hotspot mode fallback (and enable Mimic3 TTS).
+        """Configure local LLM for hotspot mode fallback.
         
-        When in hotspot mode, uses both local LLM for vision + Mimic3 TTS for playback,
-        exactly like auto_voice.py pattern.
+        Mimic3 remains enabled as a tertiary voice fallback regardless of network mode.
         
         Args:
             url: URL of the local LLM API endpoint (e.g., http://127.0.0.1:8000/v1/chat/completions)
@@ -592,17 +724,13 @@ class NarrationEngine:
             if url:
                 self._local_llm_url = url
             self._use_local_llm = force_use or is_hotspot_mode()
-            
-            # Auto-enable Mimic3 TTS if in hotspot mode or forced
+            self._mimic3_enabled = True
             if self._use_local_llm:
-                self._mimic3_enabled = True
-                print(f"🎙️ [Narration] Hotspot mode detected - enabling Mimic3 TTS")
-            else:
-                self._mimic3_enabled = False
+                print("🧠 [Narration] Hotspot mode detected - local LLM preferred")
         
         mode = "always" if force_use else ("hotspot" if self._use_local_llm else "if-available")
         print(f"🧠 [Narration] Local LLM configured - URL: {self._local_llm_url}, Mode: {mode}")
-        print(f"🎙️ [Narration] Mimic3 TTS: {'enabled' if self._mimic3_enabled else 'disabled'}")
+        print("🎙️ [Narration] Mimic3 TTS fallback enabled")
     
     def set_camera(self, picam2, vision_system):
         """Set camera references for frame capture."""
@@ -658,126 +786,191 @@ class NarrationEngine:
             self._thread.join(timeout=2.0)
             self._thread = None
         print("🎙️ [Narration] Stopped")
+
+    def _run_single_pass(self) -> tuple[bool, str, bool]:
+        """Run one capture -> describe -> speak pass.
+
+        Returns:
+            (success, message, empty_response)
+            - success: True when narration text was generated and playback attempted
+            - message: success text or error detail
+            - empty_response: True when both Gemini and local LLM returned empty text
+        """
+        with self._lock:
+            api_key = self._api_key
+            model_name = self._model_name
+            prompt = self._prompt
+            picam2 = self._picam2
+            vision_system = self._vision_system
+            elevenlabs_api_key = self._elevenlabs_api_key
+            elevenlabs_voice_id = self._elevenlabs_voice_id
+            elevenlabs_model_id = self._elevenlabs_model_id
+            elevenlabs_volume = self._elevenlabs_volume
+            kokoro_enabled = self._kokoro_enabled
+            kokoro_ip = self._kokoro_ip
+            kokoro_voice = self._kokoro_voice
+            kokoro_speed = self._kokoro_speed
+            kokoro_volume = self._kokoro_volume
+            play_local_tts = self._play_local_tts
+            audio_device = self._audio_device
+            local_llm_url = self._local_llm_url
+            use_local_llm = self._use_local_llm
+            mimic3_enabled = self._mimic3_enabled
+            mimic3_url = self._mimic3_url
+            mimic3_audio_device = self._mimic3_audio_device
+            audio_manager = self._audio_manager
+
+        if not api_key or not model_name:
+            msg = "Narration is not configured with API key and model"
+            print(f"⚠️  [Narration] {msg}")
+            return False, msg, False
+
+        # Capture frame
+        jpeg_bytes = capture_frame_as_jpeg(picam2, vision_system)
+        if jpeg_bytes is None:
+            msg = "No camera frame available — is the camera enabled?"
+            print(f"⚠️  [Narration] {msg}")
+            return False, msg, False
+
+        # Determine which AI to use: check hotspot mode and internet connectivity
+        in_hotspot = is_hotspot_mode()
+        if in_hotspot or use_local_llm:
+            print("🌐 [Narration] Hotspot mode detected or local LLM forced - using local LLM")
+            text = describe_image_local_llm(jpeg_bytes, prompt, local_llm_url)
+        else:
+            # Try Gemini first if we have API key and internet
+            start_time = time.time()
+            text = describe_image(api_key, model_name, jpeg_bytes, prompt)
+            elapsed = time.time() - start_time
+
+            # If Gemini fails, fall back to local LLM
+            if not text:
+                print("⚠️  [Narration] Gemini failed or returned empty - falling back to local LLM")
+                text = describe_image_local_llm(jpeg_bytes, prompt, local_llm_url)
+            else:
+                print(f"⏱️ [Narration] Gemini response in {elapsed:.1f}s")
+
+        if not text:
+            msg = "AI returned empty responses from both Gemini and local LLM"
+            return False, msg, True
+
+        if self._on_narration_text:
+            self._on_narration_text(text)
+
+        # Audio playback priority:
+        # 1. ElevenLabs
+        # 2. Kokoro
+        # 3. Mimic3
+        # 4. Local TTS (espeak-ng)
+        playback_success = False
+
+        # Duck engine volume during narration playback
+        if audio_manager:
+            audio_manager.duck_engine_volume(True)
+
+        try:
+            # PRIMARY: ElevenLabs
+            if elevenlabs_api_key and elevenlabs_voice_id:
+                print(f"🎤 [Narration] ElevenLabs: voice={elevenlabs_voice_id}, model={elevenlabs_model_id}...")
+                playback_success = _play_elevenlabs_tts(
+                    text=text,
+                    api_key=elevenlabs_api_key,
+                    voice_id=elevenlabs_voice_id,
+                    model_id=elevenlabs_model_id,
+                    audio_device=audio_device,
+                    volume=elevenlabs_volume,
+                )
+                if playback_success:
+                    print("✅ [Narration] ElevenLabs playback: SUCCESS")
+                else:
+                    print("⚠️  [Narration] ElevenLabs playback failed - trying Kokoro...")
+            else:
+                print("⚠️  [Narration] ElevenLabs not configured")
+
+            # SECONDARY: Kokoro TTS
+            if not playback_success and kokoro_enabled and kokoro_ip and kokoro_voice:
+                print(f"🎤 [Narration] Kokoro: IP={kokoro_ip}, Voice={kokoro_voice}...")
+                playback_success = _play_kokoro_with_volume(
+                    ip_address=kokoro_ip,
+                    text=text,
+                    voice=kokoro_voice,
+                    speed=kokoro_speed,
+                    volume=kokoro_volume,
+                    audio_device=audio_device,
+                )
+                if playback_success:
+                    print("✅ [Narration] Kokoro playback: SUCCESS")
+                else:
+                    print("⚠️  [Narration] Kokoro playback failed - trying Mimic3...")
+            elif not playback_success and not kokoro_enabled:
+                print("⚠️  [Narration] Kokoro not configured")
+
+            # TERTIARY: Mimic3 TTS
+            if not playback_success and mimic3_enabled and mimic3_url:
+                print("🎙️ [Narration] Trying Mimic3 TTS fallback...")
+                playback_success = _play_mimic3_tts(
+                    text=text,
+                    mimic3_url=mimic3_url,
+                    audio_device=mimic3_audio_device,
+                )
+                if playback_success:
+                    print("✅ [Narration] Mimic3 playback: SUCCESS")
+                else:
+                    print("⚠️  [Narration] Mimic3 playback failed - trying local TTS...")
+            elif not playback_success:
+                print("⚠️  [Narration] Mimic3 not configured")
+
+            # QUATERNARY: Local TTS fallback (espeak-ng)
+            if not playback_success and play_local_tts:
+                print("🔊 [Narration] Using local TTS fallback...")
+                tts = get_tts_synthesizer()
+                tts.speak(text)
+                playback_success = True
+            elif not playback_success:
+                print("❌ [Narration] All TTS backends failed")
+        finally:
+            # Restore engine volume after playback completes
+            if audio_manager:
+                audio_manager.duck_engine_volume(False)
+
+        # Signal that audio playback is done
+        if self._on_narration_done:
+            self._on_narration_done()
+
+        return True, text, False
+
+    def analyze_once(self) -> tuple[bool, str]:
+        """Run one immediate narration pass (for manual UI-triggered analysis)."""
+        if not self._analysis_lock.acquire(blocking=False):
+            msg = "Analysis already in progress"
+            print(f"⚠️  [Narration] {msg}")
+            return False, msg
+
+        try:
+            success, message, _empty_response = self._run_single_pass()
+            if not success and self._on_narration_error:
+                self._on_narration_error(message)
+            return success, message
+        except Exception as e:
+            msg = str(e)
+            print(f"❌ [Narration] One-shot analysis error: {msg}")
+            if self._on_narration_error:
+                self._on_narration_error(msg)
+            return False, msg
+        finally:
+            self._analysis_lock.release()
     
     def _loop(self):
         """Background narration loop."""
         consecutive_errors = 0
         while self._running:
             try:
-                with self._lock:
-                    api_key = self._api_key
-                    model_name = self._model_name
-                    interval = self._interval
-                    prompt = self._prompt
-                    picam2 = self._picam2
-                    vision_system = self._vision_system
-                    kokoro_enabled = self._kokoro_enabled
-                    kokoro_ip = self._kokoro_ip
-                    kokoro_voice = self._kokoro_voice
-                    kokoro_speed = self._kokoro_speed
-                    kokoro_volume = self._kokoro_volume
-                    play_local_tts = self._play_local_tts
-                    audio_device = self._audio_device
-                    local_llm_url = self._local_llm_url
-                    use_local_llm = self._use_local_llm
-                    mimic3_enabled = self._mimic3_enabled
-                    mimic3_url = self._mimic3_url
-                    mimic3_audio_device = self._mimic3_audio_device
-                
-                # Capture frame
-                jpeg_bytes = capture_frame_as_jpeg(picam2, vision_system)
-                if jpeg_bytes is None:
-                    msg = "No camera frame available — is the camera enabled?"
-                    print(f"⚠️  [Narration] {msg}")
-                    if self._on_narration_error:
-                        self._on_narration_error(msg)
-                    time.sleep(interval)
-                    continue
-                
-                # Determine which AI to use: check hotspot mode and internet connectivity
-                in_hotspot = is_hotspot_mode()
-                if in_hotspot or use_local_llm:
-                    print(f"🌐 [Narration] Hotspot mode detected or local LLM forced - using local LLM")
-                    text = describe_image_local_llm(jpeg_bytes, prompt, local_llm_url)
-                else:
-                    # Try Gemini first if we have API key and internet
-                    start_time = time.time()
-                    text = describe_image(api_key, model_name, jpeg_bytes, prompt)
-                    elapsed = time.time() - start_time
-                    
-                    # If Gemini fails, fall back to local LLM
-                    if not text:
-                        print(f"⚠️  [Narration] Gemini failed or returned empty - falling back to local LLM")
-                        text = describe_image_local_llm(jpeg_bytes, prompt, local_llm_url)
-                    else:
-                        print(f"⏱️ [Narration] Gemini response in {elapsed:.1f}s")
-                
-                if text and self._on_narration_text:
-                    self._on_narration_text(text)
+                with self._analysis_lock:
+                    success, message, empty_response = self._run_single_pass()
+
+                if success:
                     consecutive_errors = 0
-                    
-                    # Audio playback priority:
-                    # 1. Mimic3 TTS if in hotspot mode (exactly like auto_voice.py)
-                    # 2. Kokoro TTS (with loudness pipeline) for online mode
-                    # 3. Local TTS (espeak-ng) as final fallback
-                    playback_success = False
-                    
-                    # Get audio manager reference for volume ducking
-                    audio_manager = None
-                    with self._lock:
-                        audio_manager = self._audio_manager
-                    
-                    # Duck engine volume during narration playback
-                    if audio_manager:
-                        audio_manager.duck_engine_volume(True)
-                    
-                    try:
-                        # PRIMARY: Mimic3 TTS for hotspot mode (matches auto_voice.py)
-                        if mimic3_enabled and mimic3_url:
-                            print(f"🎙️ [Narration] Mimic3 enabled (hotspot mode) - using Mimic3 TTS...")
-                            playback_success = _play_mimic3_tts(
-                                text=text,
-                                mimic3_url=mimic3_url,
-                                audio_device=mimic3_audio_device
-                            )
-                            if playback_success:
-                                print(f"✅ [Narration] Mimic3 playback: SUCCESS")
-                            else:
-                                print(f"⚠️  [Narration] Mimic3 playback failed - trying Kokoro...")
-                        
-                        # SECONDARY: Kokoro TTS for online mode (with loudness pipeline)
-                        if not playback_success and kokoro_enabled and kokoro_ip and kokoro_voice:
-                            print(f"🎤 [Narration] Kokoro: IP={kokoro_ip}, Voice={kokoro_voice}...")
-                            playback_success = _play_kokoro_with_volume(
-                                ip_address=kokoro_ip,
-                                text=text,
-                                voice=kokoro_voice,
-                                speed=kokoro_speed,
-                                volume=kokoro_volume,
-                                audio_device=audio_device,
-                            )
-                            if playback_success:
-                                print(f"✅ [Narration] Kokoro playback: SUCCESS")
-                            else:
-                                print(f"⚠️  [Narration] Kokoro playback failed - trying local TTS...")
-                        elif not playback_success and not kokoro_enabled:
-                            print(f"⚠️  [Narration] Kokoro not configured")
-
-                        # TERTIARY: Local TTS fallback (espeak-ng)
-                        if not playback_success and play_local_tts:
-                            print(f"🔊 [Narration] Using local TTS fallback...") 
-                            tts = get_tts_synthesizer()
-                            tts.speak(text)
-                            playback_success = True
-                    finally:
-                        # Restore engine volume after playback completes
-                        if audio_manager:
-                            audio_manager.duck_engine_volume(False)
-
-                    # Signal that audio playback is done
-                    if self._on_narration_done:
-                        self._on_narration_done()
-                elif not text:
+                elif empty_response:
                     consecutive_errors += 1
                     print(f"⚠️  [Narration] Empty response from both Gemini and local LLM (attempt {consecutive_errors})")
                     if consecutive_errors >= 3 and self._on_narration_error:
@@ -785,11 +978,18 @@ class NarrationEngine:
                             "AI returned empty responses from both Gemini and local LLM — check connectivity and LLM availability"
                         )
                         consecutive_errors = 0
+                else:
+                    consecutive_errors = 0
+                    if message and self._on_narration_error:
+                        self._on_narration_error(message)
 
             except Exception as e:
                 print(f"❌ [Narration] Loop error: {e}")
                 if self._on_narration_error:
                     self._on_narration_error(str(e))
+
+            with self._lock:
+                interval = self._interval
 
             # Wait for the configured interval
             # Use small sleep increments so we can stop quickly

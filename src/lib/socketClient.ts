@@ -161,6 +161,11 @@ export function connectToServer(serverIp: string, port: number = 5000): Promise<
       if (narrationToggleResponseCallback) narrationToggleResponseCallback(data);
     });
 
+    socket.on('narration_analyze_once_response', (data: NarrationAnalyzeOnceResponse) => {
+      console.log(`[Socket] 🎙️ Narration analyze-once response:`, data);
+      if (narrationAnalyzeOnceResponseCallback) narrationAnalyzeOnceResponseCallback(data);
+    });
+
     // Register Kokoro TTS event listeners at connect time so they persist
     socket.on('kokoro_validation_result', (data: KokoroValidationResult) => {
       console.log(`[Socket] 🎤 Kokoro validation result:`, data);
@@ -313,10 +318,16 @@ export interface NarrationKeyResult {
   error: string;
 }
 
+export interface NarrationAnalyzeOnceResponse {
+  status: 'ok' | 'error';
+  message?: string;
+}
+
 let narrationConfigSyncCallback: ((data: NarrationConfig) => void) | null = null;
 let narrationKeyResultCallback: ((data: NarrationKeyResult) => void) | null = null;
 let narrationTextCallback: ((data: { text: string; timestamp: number }) => void) | null = null;
 let narrationToggleResponseCallback: ((data: { status: string; enabled: boolean; message?: string }) => void) | null = null;
+let narrationAnalyzeOnceResponseCallback: ((data: NarrationAnalyzeOnceResponse) => void) | null = null;
 let narrationSpeakingDoneCallback: (() => void) | null = null;
 
 /**
@@ -364,6 +375,14 @@ export function onNarrationToggleResponse(callback: (data: { status: string; ena
 }
 
 /**
+ * Subscribe to one-shot narration analysis responses
+ */
+export function onNarrationAnalyzeOnceResponse(callback: (data: NarrationAnalyzeOnceResponse) => void): void {
+  narrationAnalyzeOnceResponseCallback = callback;
+  // Don't re-register the socket listener here — it's registered once at connect time
+}
+
+/**
  * Subscribe to narration_speaking_done — emitted by the Pi after Kokoro audio playback finishes
  */
 export function onNarrationSpeakingDone(callback: () => void): void {
@@ -404,6 +423,16 @@ export function emitNarrationToggle(enabled: boolean): void {
   if (socket && socket.connected) {
     console.log(`[UI Control] 🎙️ NARRATION: ${enabled ? 'ENABLE' : 'DISABLE'}`);
     socket.emit('narration_toggle', { enabled });
+  }
+}
+
+/**
+ * Trigger one immediate AI image analysis + narration pass
+ */
+export function emitNarrationAnalyzeOnce(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎙️ NARRATION: ANALYZE ONCE`);
+    socket.emit('narration_analyze_once', {});
   }
 }
 
@@ -1033,10 +1062,12 @@ export default {
   onNarrationKeyResult,
   onNarrationText,
   onNarrationToggleResponse,
+  onNarrationAnalyzeOnceResponse,
   onNarrationSpeakingDone,
   emitNarrationValidateKey,
   emitNarrationConfigUpdate,
   emitNarrationToggle,
+  emitNarrationAnalyzeOnce,
   emitNarrationSpeakingDone,
   // Driver Data
   onDriverDataSync,

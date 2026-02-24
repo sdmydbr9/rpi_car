@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Video, VideoOff, Mic, RefreshCw } from "lucide-react";
+import { Video, VideoOff, Mic, RefreshCw, Sparkles, Loader2 } from "lucide-react";
 
 const MAX_AUTO_RETRIES = 5;
 const RETRY_DELAY_MS = 2000;
@@ -12,9 +12,11 @@ interface CameraFeedProps {
   narrationEnabled?: boolean;
   narrationSpeaking?: boolean;
   narrationLastText?: string;
+  onAnalyzeNow?: () => void;
+  analyzeNowPending?: boolean;
 }
 
-export const CameraFeed = ({ isConnected, streamUrl, isCameraEnabled = true, onToggleCamera, narrationEnabled = false, narrationSpeaking = false, narrationLastText = '' }: CameraFeedProps) => {
+export const CameraFeed = ({ isConnected, streamUrl, isCameraEnabled = true, onToggleCamera, narrationEnabled = false, narrationSpeaking = false, narrationLastText = '', onAnalyzeNow, analyzeNowPending = false }: CameraFeedProps) => {
   const [hasError, setHasError] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
@@ -173,6 +175,26 @@ export const CameraFeed = ({ isConnected, streamUrl, isCameraEnabled = true, onT
                 <div className="w-1 h-1 rounded-full bg-destructive animate-pulse" />
                 <span className="text-[4px] sm:text-[5px] text-destructive racing-text">REC</span>
               </div>
+            )}
+
+            {/* Analyze current frame button */}
+            {isCameraEnabled && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onAnalyzeNow?.();
+                }}
+                disabled={!isConnected || !onAnalyzeNow || analyzeNowPending}
+                title={analyzeNowPending ? 'Analyzing frame...' : 'Analyze current frame'}
+                className="absolute top-0.5 left-2 z-10 flex items-center justify-center w-4 h-4 sm:w-5 sm:h-5 rounded border border-primary/50 bg-black/60 text-primary hover:bg-primary/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                {analyzeNowPending ? (
+                  <Loader2 className="w-2 h-2 sm:w-2.5 sm:h-2.5 animate-spin" />
+                ) : (
+                  <Sparkles className="w-2 h-2 sm:w-2.5 sm:h-2.5" />
+                )}
+              </button>
             )}
 
             {/* Narration indicator */}
