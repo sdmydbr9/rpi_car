@@ -453,52 +453,56 @@ export const GearShifter = ({
 
       {/* NOW PLAYING HUD */}
       <div className="w-full px-0.5 mb-0.5">
-        <div className="flex items-center gap-1.5 px-2 py-1 border border-primary/20 rounded-sm bg-card/40 backdrop-blur-sm">
-          <div
-            className="w-6 h-6 rounded-sm overflow-hidden flex items-center justify-center flex-shrink-0 border border-primary/30 bg-black/20"
-            style={{ borderColor: hasAlbumArt ? nowPlaying.bg_color : undefined }}
-          >
-            {hasAlbumArt ? (
-              <img src={nowPlaying.image} alt="Album art" className="w-full h-full object-cover" />
-            ) : (
-              <Music
-                className="w-3 h-3 text-primary"
-                style={{ filter: "drop-shadow(0 0 3px hsl(var(--primary)))" }}
-              />
-            )}
-          </div>
-
-          <div className="flex flex-col min-w-0 flex-1 overflow-hidden">
-            <span className="text-[7px] sm:text-[9px] font-bold text-foreground truncate leading-tight tracking-wide">
-              {displayTrack}
-            </span>
-            <span className="text-[5px] sm:text-[7px] text-muted-foreground truncate leading-tight tracking-wider uppercase">
-              {displayArtist}
-            </span>
-            <span className="text-[5px] text-muted-foreground/80 truncate leading-tight">
-              {displayAlbum}
-            </span>
-          </div>
-
-        </div>
-
-        <div className="mt-0.5 flex items-center gap-1">
-          <div className="flex-1 h-[3px] bg-muted rounded-full overflow-hidden">
+        <div className="px-2 py-1.5 border border-primary/20 rounded-sm bg-card/40 backdrop-blur-sm">
+          <div className="flex items-center gap-1.5">
             <div
-              className="h-full bg-primary rounded-full transition-all duration-150"
-              style={{
-                width: `${clampProgress(nowPlaying.progress_pct)}%`,
-                boxShadow: "0 0 4px hsl(var(--primary))",
-              }}
-            />
-          </div>
-          <span className="text-[5px] text-muted-foreground min-w-[22px] text-right">{nowPlaying.volume}</span>
-          <span className="text-[5px] text-muted-foreground min-w-[50px] text-right">{nowPlaying.time_str}</span>
-        </div>
+              className="w-7 h-7 rounded-sm overflow-hidden flex items-center justify-center flex-shrink-0 border border-primary/30 bg-black/20"
+              style={{ borderColor: hasAlbumArt ? nowPlaying.bg_color : undefined }}
+            >
+              {hasAlbumArt ? (
+                <img src={nowPlaying.image} alt="Album art" className="w-full h-full object-cover" />
+              ) : (
+                <Music
+                  className="w-3.5 h-3.5 text-primary"
+                  style={{ filter: "drop-shadow(0 0 3px hsl(var(--primary)))" }}
+                />
+              )}
+            </div>
 
-        {metadataUnavailable && (
-          <div className="text-[5px] text-muted-foreground/80 mt-0.5 text-right">Metadata unavailable</div>
-        )}
+            <div className="flex flex-col min-w-0 flex-1 overflow-hidden">
+              <span className="text-[7px] sm:text-[9px] font-bold text-foreground truncate leading-tight tracking-wide">
+                {displayTrack}
+              </span>
+              <span className="text-[5px] sm:text-[7px] text-muted-foreground truncate leading-tight tracking-wider uppercase">
+                {displayArtist}
+              </span>
+              <span className="text-[5px] text-muted-foreground/80 truncate leading-tight">
+                {displayAlbum}
+              </span>
+            </div>
+          </div>
+
+          <div className="mt-1 flex items-center gap-1">
+            <div className="flex-1 h-[3px] bg-muted rounded-full overflow-hidden">
+              <div
+                className="h-full bg-primary rounded-full transition-all duration-150"
+                style={{
+                  width: `${clampProgress(nowPlaying.progress_pct)}%`,
+                  boxShadow: "0 0 4px hsl(var(--primary))",
+                }}
+              />
+            </div>
+            <div className="flex items-center gap-0.5 min-w-[30px] justify-end text-[5px] text-muted-foreground">
+              <Volume2 className="w-[7px] h-[7px]" />
+              <span>{nowPlaying.volume}</span>
+            </div>
+            <span className="text-[5px] text-muted-foreground min-w-[50px] text-right">{nowPlaying.time_str}</span>
+          </div>
+
+          {metadataUnavailable && (
+            <div className="text-[5px] text-muted-foreground/80 mt-0.5 text-right">Metadata unavailable</div>
+          )}
+        </div>
       </div>
 
       {/* START, STOP, and HORN Buttons - Always visible, fixed at bottom */}
