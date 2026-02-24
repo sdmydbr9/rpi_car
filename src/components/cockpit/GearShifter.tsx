@@ -1,4 +1,5 @@
-import { OctagonX, Power, PowerOff, Radio, Volume2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Music, OctagonX, Power, PowerOff, Radio, Volume2 } from "lucide-react";
 
 interface GearShifterProps {
   currentGear: string;
@@ -26,6 +27,36 @@ interface GearShifterProps {
 }
 
 const GEARS = ["S", "3", "2", "1", "N", "R"];
+
+interface NowPlayingState {
+  status: string;
+  volume: string;
+  track: string;
+  artist: string;
+  album: string;
+  image: string;
+  bg_color: string;
+  time_str: string;
+  progress_pct: number;
+}
+
+const DEFAULT_NOW_PLAYING: NowPlayingState = {
+  status: "Waiting for AirPlay...",
+  volume: "--",
+  track: "--",
+  artist: "--",
+  album: "--",
+  image: "",
+  bg_color: "#121212",
+  time_str: "0:00 / 0:00",
+  progress_pct: 0,
+};
+
+const clampProgress = (value: unknown): number => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 0;
+  return Math.max(0, Math.min(100, numeric));
+};
 
 export const GearShifter = ({ 
   currentGear, 
@@ -77,6 +108,50 @@ export const GearShifter = ({
     ["S", "3", "2"],
     ["1", "N", "R"]
   ];
+  const [nowPlaying, setNowPlaying] = useState<NowPlayingState>(DEFAULT_NOW_PLAYING);
+  const [metadataUnavailable, setMetadataUnavailable] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const fetchNowPlaying = async () => {
+      try {
+        const response = await fetch("/api/now-playing", {
+          cache: "no-store",
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json() as Partial<NowPlayingState>;
+        if (!mounted) return;
+        setNowPlaying({
+          status: typeof data.status === "string" ? data.status : DEFAULT_NOW_PLAYING.status,
+          volume: typeof data.volume === "string" ? data.volume : DEFAULT_NOW_PLAYING.volume,
+          track: typeof data.track === "string" ? data.track : DEFAULT_NOW_PLAYING.track,
+          artist: typeof data.artist === "string" ? data.artist : DEFAULT_NOW_PLAYING.artist,
+          album: typeof data.album === "string" ? data.album : DEFAULT_NOW_PLAYING.album,
+          image: typeof data.image === "string" ? data.image : DEFAULT_NOW_PLAYING.image,
+          bg_color: typeof data.bg_color === "string" ? data.bg_color : DEFAULT_NOW_PLAYING.bg_color,
+          time_str: typeof data.time_str === "string" ? data.time_str : DEFAULT_NOW_PLAYING.time_str,
+          progress_pct: clampProgress(data.progress_pct),
+        });
+        setMetadataUnavailable(false);
+      } catch {
+        if (!mounted) return;
+        setMetadataUnavailable(true);
+      }
+    };
+
+    void fetchNowPlaying();
+    const intervalId = window.setInterval(fetchNowPlaying, 1000);
+    return () => {
+      mounted = false;
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  const hasAlbumArt = Boolean(nowPlaying.image);
+  const displayTrack = nowPlaying.track && nowPlaying.track !== "--" ? nowPlaying.track : "No Track";
+  const displayArtist = nowPlaying.artist && nowPlaying.artist !== "--" ? nowPlaying.artist : "Unknown Artist";
+  const displayAlbum = nowPlaying.album && nowPlaying.album !== "--" ? nowPlaying.album : "Unknown Album";
 
   return (
     <div className="flex flex-col items-center h-full pt-0.5 pb-0.5 px-1 overflow-hidden bg-gradient-to-b from-background to-background/80">
@@ -374,6 +449,56 @@ export const GearShifter = ({
             N
           </text>
         </svg>
+      </div>
+
+      {/* NOW PLAYING HUD */}
+      <div className="w-full px-0.5 mb-0.5">
+        <div className="flex items-center gap-1.5 px-2 py-1 border border-primary/20 rounded-sm bg-card/40 backdrop-blur-sm">
+          <div
+            className="w-6 h-6 rounded-sm overflow-hidden flex items-center justify-center flex-shrink-0 border border-primary/30 bg-black/20"
+            style={{ borderColor: hasAlbumArt ? nowPlaying.bg_color : undefined }}
+          >
+            {hasAlbumArt ? (
+              <img src={nowPlaying.image} alt="Album art" className="w-full h-full object-cover" />
+            ) : (
+              <Music
+                className="w-3 h-3 text-primary"
+                style={{ filter: "drop-shadow(0 0 3px hsl(var(--primary)))" }}
+              />
+            )}
+          </div>
+
+          <div className="flex flex-col min-w-0 flex-1 overflow-hidden">
+            <span className="text-[7px] sm:text-[9px] font-bold text-foreground truncate leading-tight tracking-wide">
+              {displayTrack}
+            </span>
+            <span className="text-[5px] sm:text-[7px] text-muted-foreground truncate leading-tight tracking-wider uppercase">
+              {displayArtist}
+            </span>
+            <span className="text-[5px] text-muted-foreground/80 truncate leading-tight">
+              {displayAlbum}
+            </span>
+          </div>
+
+        </div>
+
+        <div className="mt-0.5 flex items-center gap-1">
+          <div className="flex-1 h-[3px] bg-muted rounded-full overflow-hidden">
+            <div
+              className="h-full bg-primary rounded-full transition-all duration-150"
+              style={{
+                width: `${clampProgress(nowPlaying.progress_pct)}%`,
+                boxShadow: "0 0 4px hsl(var(--primary))",
+              }}
+            />
+          </div>
+          <span className="text-[5px] text-muted-foreground min-w-[22px] text-right">{nowPlaying.volume}</span>
+          <span className="text-[5px] text-muted-foreground min-w-[50px] text-right">{nowPlaying.time_str}</span>
+        </div>
+
+        {metadataUnavailable && (
+          <div className="text-[5px] text-muted-foreground/80 mt-0.5 text-right">Metadata unavailable</div>
+        )}
       </div>
 
       {/* START, STOP, and HORN Buttons - Always visible, fixed at bottom */}

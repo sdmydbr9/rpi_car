@@ -30,6 +30,30 @@ ENGINE_SAMPLE_RATE = 44100
 AUDIO_BACKEND_FALLBACK_ORDER = ("pulseaudio", "alsa")
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _wait_for_pulse_socket() -> bool:
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    pulse_native = os.path.join(runtime_dir, "pulse", "native")
+    wait_s = max(0.0, float(os.environ.get("CAR_AUDIO_PULSE_WAIT_SECS", "12")))
+    poll_s = max(0.05, float(os.environ.get("CAR_AUDIO_PULSE_POLL_SECS", "0.25")))
+
+    deadline = time.monotonic() + wait_s
+    while True:
+        if os.path.exists(pulse_native):
+            os.environ.setdefault("XDG_RUNTIME_DIR", runtime_dir)
+            os.environ.setdefault("PULSE_SERVER", f"unix:{pulse_native}")
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_s)
+
+
 def process_track(filename, target_dbfs, target_channels, offset_db=0.0):
     """Helper function to normalize and trim any audio file."""
     base_name = filename.split('.')[0]
@@ -226,6 +250,16 @@ class CarAudioManager:
         for candidate in AUDIO_BACKEND_FALLBACK_ORDER:
             if candidate not in fallback_order:
                 fallback_order.append(candidate)
+
+        # For mixed playback with Shairport Sync, require PulseAudio when asked.
+        require_pulse = _env_bool("CAR_AUDIO_REQUIRE_PULSE", False)
+        if require_pulse:
+            fallback_order = ["pulseaudio"]
+
+        if "pulseaudio" in fallback_order:
+            pulse_ready = _wait_for_pulse_socket()
+            if not pulse_ready:
+                print("⚠️  PulseAudio socket not available before mixer init timeout.")
 
         self._active_backend = None
         init_errors = []

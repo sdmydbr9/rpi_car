@@ -35,6 +35,9 @@ import socket
 import re
 import cv2
 import json
+import base64
+import xml.etree.ElementTree as ET
+from io import BytesIO
 from enum import Enum
 from collections import deque
 from sensors import SensorSystem
@@ -56,6 +59,16 @@ from pico_sensor_reader import (
     get_current_sense as pico_get_current_sense,
     get_sensor_packet as pico_get_sensor_packet,
 )
+
+try:
+    from PIL import Image
+except Exception:
+    Image = None
+
+try:
+    from colorthief import ColorThief
+except Exception:
+    ColorThief = None
 
 # ==========================================
 # ⚙️ CONFIGURATION
@@ -931,6 +944,181 @@ car_state = {
 }
 
 # ==========================================
+# 🎵 AIRPLAY NOW-PLAYING METADATA
+# ==========================================
+AIRPLAY_METADATA_PIPE_PATH = os.getenv("RC_AIRPLAY_METADATA_PIPE", "/tmp/shairport-sync-metadata")
+
+_now_playing_lock = threading.Lock()
+_now_playing_state = {
+    "status": "Waiting for AirPlay...",
+    "volume": "--",
+    "track": "--",
+    "artist": "--",
+    "album": "--",
+    "image": "",
+    "bg_color": "#121212",
+    "progress": None,  # {"current_sec": float, "total_sec": float, "sync_time": float}
+}
+
+def _decode_airplay_text_payload(data_text: str):
+    if not data_text:
+        return None
+    try:
+        return base64.b64decode(data_text).decode("utf-8")
+    except Exception:
+        return None
+
+def _extract_album_bg_color(clean_b64: str) -> str:
+    if not clean_b64 or Image is None or ColorThief is None:
+        return "#121212"
+    try:
+        image_data = base64.b64decode(clean_b64)
+        with BytesIO(image_data) as img_io:
+            with Image.open(img_io) as img:
+                img = img.convert("RGB")
+                img.thumbnail((150, 150))
+                with BytesIO() as thumb_io:
+                    img.save(thumb_io, format="JPEG")
+                    thumb_io.seek(0)
+                    color_thief = ColorThief(thumb_io)
+                    dominant_color = color_thief.get_color(quality=1)
+                    r, g, b = [int(c * 0.6) for c in dominant_color]
+                    return f"rgb({r}, {g}, {b})"
+    except Exception:
+        return "#121212"
+
+def _process_airplay_metadata_item(xml_string: str):
+    try:
+        root = ET.fromstring(xml_string)
+        type_hex = root.findtext("type") or ""
+        code_hex = root.findtext("code") or ""
+        type_tag = bytes.fromhex(type_hex).decode("utf-8")
+        code_tag = bytes.fromhex(code_hex).decode("utf-8")
+        data_node = root.find("data")
+        data_text = data_node.text if data_node is not None else None
+    except Exception:
+        return
+
+    if type_tag == "ssnc":
+        if code_tag in ("pbeg", "prsm"):
+            with _now_playing_lock:
+                _now_playing_state["status"] = "Playing"
+                progress = _now_playing_state.get("progress")
+                if isinstance(progress, dict):
+                    progress["sync_time"] = time.time()
+        elif code_tag == "paus":
+            with _now_playing_lock:
+                _now_playing_state["status"] = "Paused"
+                progress = _now_playing_state.get("progress")
+                if isinstance(progress, dict):
+                    elapsed = time.time() - progress.get("sync_time", time.time())
+                    progress["current_sec"] = progress.get("current_sec", 0.0) + elapsed
+                    progress["sync_time"] = time.time()
+        elif code_tag == "pend":
+            with _now_playing_lock:
+                _now_playing_state["status"] = "Stopped"
+                _now_playing_state["progress"] = None
+        elif code_tag == "pvol":
+            vol_data = _decode_airplay_text_payload(data_text)
+            if vol_data:
+                parts = vol_data.split(",")
+                if len(parts) >= 4:
+                    try:
+                        current_vol = float(parts[0])
+                        low_vol = float(parts[2])
+                        high_vol = float(parts[3])
+                        pct = int(((current_vol - low_vol) / (high_vol - low_vol)) * 100) if high_vol != low_vol else 100
+                        pct = max(0, min(100, pct))
+                        with _now_playing_lock:
+                            _now_playing_state["volume"] = f"{pct}%"
+                    except Exception:
+                        with _now_playing_lock:
+                            _now_playing_state["volume"] = "--"
+        elif code_tag == "prgr":
+            prgr_data = _decode_airplay_text_payload(data_text)
+            if prgr_data:
+                parts = prgr_data.split("/")
+                if len(parts) == 3:
+                    try:
+                        start_rtp, current_rtp, end_rtp = [int(p) for p in parts]
+                        total_frames = (end_rtp - start_rtp) % (2 ** 32)
+                        current_frames = (current_rtp - start_rtp) % (2 ** 32)
+                        with _now_playing_lock:
+                            _now_playing_state["progress"] = {
+                                "current_sec": current_frames / 44100.0,
+                                "total_sec": total_frames / 44100.0,
+                                "sync_time": time.time(),
+                            }
+                    except Exception:
+                        pass
+        elif code_tag == "PICT" and data_text:
+            clean_b64 = data_text.replace("\n", "").replace("\r", "")
+            bg_color = _extract_album_bg_color(clean_b64)
+            with _now_playing_lock:
+                _now_playing_state["image"] = f"data:image/jpeg;base64,{clean_b64}"
+                _now_playing_state["bg_color"] = bg_color
+    elif type_tag == "core":
+        value = _decode_airplay_text_payload(data_text) or "--"
+        with _now_playing_lock:
+            if code_tag == "minm":
+                _now_playing_state["track"] = value
+            elif code_tag == "asar":
+                _now_playing_state["artist"] = value
+            elif code_tag == "asal":
+                _now_playing_state["album"] = value
+
+def _format_now_playing_time(seconds: float) -> str:
+    if seconds < 0:
+        seconds = 0
+    minutes = int(seconds) // 60
+    remainder = int(seconds) % 60
+    return f"{minutes}:{remainder:02d}"
+
+def _build_now_playing_response():
+    with _now_playing_lock:
+        snapshot = _now_playing_state.copy()
+        progress = snapshot.get("progress")
+        if isinstance(progress, dict):
+            progress = progress.copy()
+        snapshot["progress"] = progress
+
+    if isinstance(progress, dict):
+        current_sec = float(progress.get("current_sec", 0.0))
+        total_sec = float(progress.get("total_sec", 0.0))
+        if snapshot.get("status") == "Playing":
+            elapsed = time.time() - float(progress.get("sync_time", time.time()))
+            current_sec = min(current_sec + elapsed, total_sec)
+        snapshot["time_str"] = f"{_format_now_playing_time(current_sec)} / {_format_now_playing_time(total_sec)}"
+        snapshot["progress_pct"] = (current_sec / total_sec * 100.0) if total_sec > 0 else 0.0
+    else:
+        snapshot["time_str"] = "0:00 / 0:00"
+        snapshot["progress_pct"] = 0.0
+
+    snapshot.pop("progress", None)
+    return snapshot
+
+def _airplay_metadata_reader():
+    while True:
+        if not os.path.exists(AIRPLAY_METADATA_PIPE_PATH):
+            time.sleep(1.0)
+            continue
+        try:
+            with open(AIRPLAY_METADATA_PIPE_PATH, "r") as pipe:
+                item_xml = ""
+                in_item = False
+                for line in pipe:
+                    if "<item>" in line:
+                        in_item = True
+                        item_xml = line
+                    elif in_item:
+                        item_xml += line
+                    if "</item>" in line and in_item:
+                        _process_airplay_metadata_item(item_xml)
+                        in_item = False
+        except Exception:
+            time.sleep(0.2)
+
+# ==========================================
 # 💗 HEARTBEAT / PING TRACKING
 # ==========================================
 # Dictionary to track last ping time from each connected client
@@ -1736,6 +1924,11 @@ sensor_monitor_thread = threading.Thread(target=sensor_monitor, daemon=True)
 sensor_monitor_thread.start()
 print("🚨 Sensor health monitor initialized")
 
+# Start AirPlay metadata reader thread (integrated from metadata.py)
+airplay_metadata_thread = threading.Thread(target=_airplay_metadata_reader, daemon=True)
+airplay_metadata_thread.start()
+print(f"🎵 AirPlay metadata reader initialized (pipe: {AIRPLAY_METADATA_PIPE_PATH})")
+
 # ==========================================
 # 🌐 WEB SERVER (Flask + SocketIO)
 # ==========================================
@@ -1852,6 +2045,11 @@ def api_server_ip():
         "hotspot_active": hotspot_active,
         "transport": "hotspot" if hotspot_active else "wifi"
     })
+
+@app.route("/api/now-playing")
+def api_now_playing():
+    """Return integrated AirPlay now-playing metadata."""
+    return jsonify(_build_now_playing_response())
 
 # Catch-all for React files (vite.svg, etc.)
 @app.route('/<path:filename>')
@@ -1992,6 +2190,56 @@ def emergency_stop():
     state = '🔴 ON' if car_state["emergency_brake_active"] else '🟢 OFF'
     print(f"🚨 EMERGENCY BRAKE: {state}")
     return "EMERGENCY_BRAKE"
+
+@app.route("/engine/start")
+def http_engine_start():
+    """HTTP engine start endpoint for ROS / API clients."""
+    car_state["engine_running"] = True
+    car_state["brake_pressed"] = False
+    car_state["is_braking"] = False
+    car_audio.set_engine_running(True)
+    print("⚙️ [HTTP Control] 🔊 ENGINE: STARTED")
+    return "ENGINE_STARTED"
+
+@app.route("/engine/stop")
+def http_engine_stop():
+    """HTTP engine stop endpoint for ROS / API clients."""
+    car_state["engine_running"] = False
+    car_state["auto_accel_enabled"] = False
+    car_state["gas_pressed"] = False
+    car_state["brake_pressed"] = True
+    car_state["is_braking"] = True
+    car_state["current_pwm"] = 0
+    car_state["obstacle_state"] = "IDLE"
+    try:
+        car_system.brake()
+    except Exception:
+        pass
+    car_audio.set_engine_running(False)
+    print("⚙️ [HTTP Control] 🔊 ENGINE: STOPPED")
+    return "ENGINE_STOPPED"
+
+@app.route("/emergency_brake/on")
+def http_emergency_brake_on():
+    """Explicitly enable emergency brake (idempotent)."""
+    car_state["emergency_brake_active"] = True
+    car_state["current_pwm"] = 0
+    car_state["obstacle_state"] = "IDLE"
+    car_state["steer_angle"] = 0
+    save_gear_before_ebrake()
+    car_state["gear"] = "N"
+    print("⚙️ [HTTP Control] 🚨 EMERGENCY BRAKE: ON")
+    return "EMERGENCY_BRAKE_ON"
+
+@app.route("/emergency_brake/off")
+def http_emergency_brake_off():
+    """Explicitly disable emergency brake (idempotent)."""
+    car_state["emergency_brake_active"] = False
+    restore_gear_after_ebrake()
+    car_state["obstacle_state"] = "IDLE"
+    car_state["steer_angle"] = 0
+    print("⚙️ [HTTP Control] 🚨 EMERGENCY BRAKE: OFF")
+    return "EMERGENCY_BRAKE_OFF"
 
 @app.route("/autonomous_enable")
 def enable_autonomous():
