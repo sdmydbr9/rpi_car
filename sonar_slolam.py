@@ -3,6 +3,9 @@ import time
 import curses
 import threading
 import random
+import csv
+import os
+from datetime import datetime
 
 # Import the Pico bridge for ALL sensors
 from pico_sensor_reader import (
@@ -32,18 +35,35 @@ RR_IN3 = 10; RR_IN4 = 7;  RR_ENB = 16
 TRIG_F = 25; ECHO_F = 24
 SERVO_PIN = 20  
 
-# --- AGGRESSIVE TUNING ---
-MAX_SPEED = 100
-MIN_SPEED = 20
-RAMP_STEP = 35
+# --- SLALOM TUNING ---
+MAX_SPEED = 90      
+MIN_SPEED = 35      
+RAMP_STEP = 20      
 
 # --- GYRO TUNING ---
-GYRO_KP = 0.5        # Proportional gain for drift correction
-MAX_YAW_RATE = 150.0 # Expected degrees/sec at 100% steering
+GYRO_KP = 0.15      
+MAX_YAW_RATE = 120.0 
 
 # Trims
 TRIM_FL = 0.6; TRIM_FR = 0.6
 TRIM_RL = 1.0; TRIM_RR = 1.0
+
+# =================================================================
+# 📊 TELEMETRY LOGGER SETUP
+# =================================================================
+if not os.path.exists("rover_logs"):
+    os.makedirs("rover_logs")
+
+log_filename = datetime.now().strftime("rover_logs/rover_log_%Y%m%d_%H%M%S.csv")
+log_file = open(log_filename, mode='w', newline='')
+log_writer = csv.writer(log_file)
+
+log_writer.writerow([
+    "Timestamp", "Sonar_Dist_cm", "IR_Left", "IR_Right", 
+    "Laser_Left_cm", "Laser_Right_cm", "Laser_Active", "Gyro_Z_degs", 
+    "Target_Throttle", "Target_Steering", "Actual_PWM_L", "Actual_PWM_R", 
+    "Battery_V", "Current_A", "RPM", "Status_Msg"
+])
 
 # =================================================================
 # 🔧 SETUP
@@ -69,6 +89,10 @@ running = False
 status_msg = "Ready"
 curr_L = 0.0; curr_R = 0.0
 global_max_duty = 95.0
+
+# FILTER VARIABLES (The Anti-Wiggle System)
+smoothed_steering = 0.0
+smoothed_throttle = 0.0
 
 # =================================================================
 # 🎯 WIDE-ANGLE LASER TARGETING SYSTEM
@@ -105,7 +129,6 @@ class LaserTargetingSystem:
     def _scan_loop(self):
         while self.running:
             if self.active:
-                # WIDER FOV: -60 (Left) and +60 (Right)
                 self._set_angle(-60)
                 self.left_clearance = self._get_laser_cm()
                 
@@ -187,22 +210,14 @@ def ramp_motors(target_L, target_R, dir_L, dir_R):
         GPIO.output([FR_IN3, RR_IN3, FR_IN4, RR_IN4], 0)
 
 def drive_like_a_car(throttle, steering, current_gz):
-    """
-    throttle: -100 to 100
-    steering: -100 (Hard Left) to +100 (Hard Right)
-    current_gz: The Z-axis gyro reading in deg/s
-    """
-    # 1. Active Yaw Rate Control
     target_yaw_rate = (steering / 100.0) * MAX_YAW_RATE
     yaw_error = target_yaw_rate - current_gz
     corrected_steering = steering + (yaw_error * GYRO_KP)
     corrected_steering = max(-100, min(100, corrected_steering))
 
-    # 2. Car Steering Mixer
     left_target = throttle + corrected_steering
     right_target = throttle - corrected_steering
 
-    # Normalize limits
     max_val = max(abs(left_target), abs(right_target))
     if max_val > 100.0:
         left_target = (left_target / max_val) * 100.0
@@ -226,8 +241,12 @@ def calculate_dynamic_speed(dist):
     return int(MIN_SPEED + (dist - 40) * ((MAX_SPEED - MIN_SPEED) / 110.0))
 
 def execute_soft_escape():
-    global status_msg
+    global status_msg, smoothed_steering, smoothed_throttle
     status_msg = "🚨 ESCAPING..."
+    
+    # Reset filters during a panic maneuver so it doesn't drag
+    smoothed_steering = 0.0
+    smoothed_throttle = 0.0
     
     drive_like_a_car(0, 0, 0)
     time.sleep(0.1)
@@ -245,12 +264,15 @@ def execute_soft_escape():
         time.sleep(0.05)
 
 def auto_pilot():
-    global running, status_msg
+    global running, status_msg, curr_L, curr_R
+    global smoothed_steering, smoothed_throttle
 
     while True:
         if not running:
             drive_like_a_car(0, 0, 0)
             laser.active = False
+            smoothed_steering = 0.0
+            smoothed_throttle = 0.0
             time.sleep(0.1)
             continue
 
@@ -262,54 +284,106 @@ def auto_pilot():
         except:
             ir_left, ir_right = False, False
 
-        # 1. Wake up the laser scanner EARLY (Proactive mapping)
         if dist < 180:
             laser.active = True
         else:
             laser.active = False
 
-        # 2. PANIC ZONE (Imminent collision)
+        # 2. PANIC ZONE (Safety Net)
         if (ir_left and ir_right) or (dist < 20):
             execute_soft_escape()
             continue
 
-        throttle = calculate_dynamic_speed(dist)
+        # Calculate base raw targets
+        raw_throttle = calculate_dynamic_speed(dist)
+        raw_steering_pull = 0.0
+        steer_filter_weight = 0.20  # Default: 20% snappy, 80% smooth gliding
         
-        # 3. PROACTIVE ARC STEERING (The "Car" Logic)
+        # 3. PROACTIVE ARC STEERING
         if laser.active:
-            # Calculate urgency: 180cm = 0.0 (straight), 40cm = 1.0 (max turn)
-            urgency = max(0.0, min(1.0, (180.0 - dist) / 140.0))
-            
+            urgency = max(0.3, min(1.0, (200.0 - dist) / 160.0))
             clearance_diff = laser.right_clearance - laser.left_clearance
             
-            # THE FLAT WALL FIX: If the wall is flat, force a decision!
             if abs(clearance_diff) < 20.0:
-                if laser.left_clearance > 150: 
-                    clearance_diff = -60 # Pass on the left if it's wide open
+                clearance_diff = -35 if laser.left_clearance > laser.right_clearance else 35
+            
+            steer_mult = 0.55 # Default gentle slalom
+            
+            # 🚀 THE "CARVE, DON'T BRAKE" OVERRIDE 🚀
+            # If an obstacle is close, but we have a clear escape route...
+            if dist < 70.0:
+                max_clearance = max(laser.left_clearance, laser.right_clearance)
+                
+                # If the most open side has more than 80cm of room...
+                if max_clearance > 80.0:
+                    # 1. Keep the speed up! Don't let it drop below 80% of MAX_SPEED
+                    raw_throttle = max(raw_throttle, MAX_SPEED * 0.80) 
+                    
+                    # 2. Crank up the steering multiplier to take a sharp curve
+                    steer_mult = 1.3 
+                    
+                    # 3. Make the filter react 3x faster to snap into the turn
+                    steer_filter_weight = 0.60 
+                    
+                    status_msg = f"🔥 HIGH-SPEED CARVE!"
                 else:
-                    clearance_diff = 60  # Default to passing on the right
+                    status_msg = f"🐍 SLALOM (Urg: {urgency:.2f})"
+            else:
+                status_msg = f"🐍 SLALOM (Urg: {urgency:.2f})"
             
-            # Apply the continuous curve. 
-            steering_pull = clearance_diff * urgency * 1.5 
-            status_msg = f"🚙 CARVING ARC (Urg: {urgency:.2f})"
-            
+            raw_steering_pull = clearance_diff * urgency * steer_mult 
         else:
-            steering_pull = 0 
-            status_msg = f"🛣️ CRUISING (Throt {throttle}%)"
+            status_msg = f"🛣️ CRUISING (Throt {int(smoothed_throttle)}%)"
 
         # 4. HARD OVERRIDES FOR IR SENSORS
         if ir_left:
             status_msg = "⚡ SWERVE RIGHT (IR)"
-            steering_pull = 90
+            raw_steering_pull = 90
+            steer_filter_weight = 0.80 # Snap away instantly
         elif ir_right:
             status_msg = "⚡ SWERVE LEFT (IR)"
-            steering_pull = -90
+            raw_steering_pull = -90
+            steer_filter_weight = 0.80 # Snap away instantly
 
-        # Clamp steering to valid mixer range
-        steering_pull = max(-100, min(100, steering_pull))
+        raw_steering_pull = max(-100, min(100, raw_steering_pull))
+
+        # --- THE DYNAMIC LOW-PASS FILTERS ---
+        # The steer_filter_weight changes depending on if we are cruising or carving!
+        smoothed_steering = ((1.0 - steer_filter_weight) * smoothed_steering) + (steer_filter_weight * raw_steering_pull)
+        smoothed_throttle = (0.70 * smoothed_throttle) + (0.30 * raw_throttle)
 
         # Drive!
-        drive_like_a_car(throttle, steering_pull, gz)
+        drive_like_a_car(smoothed_throttle, smoothed_steering, gz)
+
+        # Log Data
+        try:
+            timestamp = time.time()
+            v_batt = get_battery_voltage()
+            amps = get_current_sense()
+            rpm = get_rpm()
+
+            log_writer.writerow([
+                f"{timestamp:.3f}", 
+                f"{dist:.1f}", 
+                int(ir_left), 
+                int(ir_right), 
+                f"{laser.left_clearance:.1f}", 
+                f"{laser.right_clearance:.1f}", 
+                int(laser.active), 
+                f"{gz:.2f}", 
+                f"{smoothed_throttle:.1f}", 
+                f"{smoothed_steering:.1f}", 
+                f"{curr_L:.1f}", 
+                f"{curr_R:.1f}", 
+                f"{v_batt:.2f}", 
+                f"{amps:.2f}", 
+                f"{rpm:.1f}", 
+                status_msg
+            ])
+            log_file.flush() 
+        except Exception:
+            pass 
+
         time.sleep(0.05)
 
 # Start Thread
@@ -328,7 +402,7 @@ def main(stdscr):
 
     while True:
         stdscr.erase()
-        stdscr.addstr(0, 0, "--- 🏎️  PROACTIVE ARC-CARVING ROVER (WITH ACTIVE YAW) ---", curses.A_BOLD)
+        stdscr.addstr(0, 0, "--- 🏎️  PROACTIVE SLALOM ROVER (CARVE OVERRIDE) ---", curses.A_BOLD)
 
         v_batt = get_battery_voltage()
         amps = get_current_sense()
@@ -350,6 +424,7 @@ def main(stdscr):
 
         stdscr.addstr(9, 0, f"STATUS:   {status_msg}")
         stdscr.addstr(11, 0, "[S] Start  [SPACE] Pause  [Q] Quit")
+        stdscr.addstr(12, 0, f"LOGGING TO: {log_filename}")
 
         if running: stdscr.addstr(11, 40, "● ON AIR", curses.A_BLINK)
 
@@ -366,6 +441,11 @@ def main(stdscr):
 def stop_all():
     pwm_fl.stop(); pwm_fr.stop(); pwm_rl.stop(); pwm_rr.stop()
     GPIO.cleanup()
+    
+    try:
+        log_file.close()
+    except:
+        pass
 
 if __name__ == "__main__":
     curses.wrapper(main)

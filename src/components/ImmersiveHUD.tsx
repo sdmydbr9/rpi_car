@@ -95,6 +95,7 @@ export const ImmersiveHUD = ({
 }: ImmersiveHUDProps) => {
   const { triggerHaptic, playSound } = useGameFeedback();
   const [steeringDirection, setSteeringDirection] = useState<'left' | 'right' | null>(null);
+  const [useH264Feed, setUseH264Feed] = useState(true);
   
   // Progressive steering constants
   const STEER_INCREMENT = 5;       // degrees per tick
@@ -114,6 +115,10 @@ export const ImmersiveHUD = ({
     };
   }, []);
 
+  useEffect(() => {
+    setUseH264Feed(true);
+  }, [streamUrl, isCameraEnabled]);
+
   // Refs for multitouch-tracked interactive zones
   const steerLeftRef = useRef<HTMLButtonElement>(null);
   const steerRightRef = useRef<HTMLButtonElement>(null);
@@ -128,6 +133,10 @@ export const ImmersiveHUD = ({
   
   // RPM simulation based on speed and throttle
   const rpm = Math.min(100, (speed / 100) * 80 + (throttle ? 20 : 0));
+  const h264StreamUrl = useMemo(() => {
+    if (!streamUrl) return undefined;
+    return streamUrl.replace('/video_feed', '/video_feed_h264');
+  }, [streamUrl]);
   const isRedline = rpm > 85;
 
   // Converted speed for HUD display
@@ -303,15 +312,26 @@ export const ImmersiveHUD = ({
           </div>
         ) : streamUrl ? (
           <>
-            <img
-              src={streamUrl}
-              alt="Live Camera Feed"
-              className="w-full h-full object-cover"
-              onError={(e) => {
-                // Hide the broken image and show fallback
-                (e.target as HTMLImageElement).style.display = 'none';
-              }}
-            />
+            {useH264Feed && h264StreamUrl ? (
+              <video
+                src={h264StreamUrl}
+                autoPlay
+                muted
+                playsInline
+                className="w-full h-full object-cover"
+                onError={() => setUseH264Feed(false)}
+              />
+            ) : (
+              <img
+                src={streamUrl}
+                alt="Live Camera Feed"
+                className="w-full h-full object-cover"
+                onError={(e) => {
+                  // Hide the broken image and show fallback
+                  (e.target as HTMLImageElement).style.display = 'none';
+                }}
+              />
+            )}
             {/* Subtle vignette overlay for better HUD readability */}
             <div 
               className="absolute inset-0"

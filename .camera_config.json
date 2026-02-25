@@ -1,5 +1,6 @@
 {
   "resolution": "1920x1080",
   "jpeg_quality": 70,
-  "framerate": 60
+  "framerate": 60,
+  "stream_backend": "mjpeg"
 }

@@ -11,6 +11,11 @@ export default defineConfig(({ mode }) => ({
     hmr: {
       overlay: false,
     },
+    watch: {
+      // This repo contains a self-referential symlink used by tooling.
+      // Ignore it to prevent Vite watcher ELOOP crashes (blank screen in dev).
+      ignored: ["**/_codeql_detected_source_root/**", "**/_codeql_detected_source_root"],
+    },
   },
   build: {
     outDir: "dist",

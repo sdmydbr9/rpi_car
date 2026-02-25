@@ -37,6 +37,7 @@ import re
 import cv2
 import json
 import base64
+import shutil
 import xml.etree.ElementTree as ET
 from io import BytesIO
 from enum import Enum
@@ -166,6 +167,17 @@ CAMERA_JPEG_QUALITY = 70           # JPEG compression quality (1-100, higher = b
 CAMERA_FRAMERATE = 30              # Camera framerate (FPS)
 # Keep encode/stream work bounded so control latency stays predictable.
 CAMERA_MAX_STREAM_FPS = 30
+CAMERA_DRIVING_MAX_STREAM_FPS = 20
+CAMERA_MIN_STREAM_FPS = 8
+CAMERA_MIN_JPEG_QUALITY = 25
+CAMERA_STREAM_MAX_WIDTH = 1280
+CAMERA_STREAM_MAX_HEIGHT = 720
+CAMERA_STREAM_BACKEND_DEFAULT = "mjpeg"  # "mjpeg" or "h264_rtsp"
+
+# Isolated hardware H264/RTSP service (external process)
+H264_RTSP_PORT = int(os.getenv("RC_H264_RTSP_PORT", "8554"))
+H264_RTSP_PATH = os.getenv("RC_H264_RTSP_PATH", "rpi_car")
+H264_RTSP_DEFAULT_BITRATE = int(os.getenv("RC_H264_BITRATE", "3000000"))
 
 
 def _sanitize_camera_framerate(value, fallback=30):
@@ -182,6 +194,51 @@ def _camera_controls_for_fps(framerate):
     fps = _sanitize_camera_framerate(framerate, CAMERA_FRAMERATE)
     frame_duration_us = max(1, int(1_000_000 / fps))
     return {"FrameDurationLimits": (frame_duration_us, frame_duration_us)}
+
+
+def _stream_size_for_frame(frame):
+    """Downscale large frames before JPEG encode to cut CPU/network load."""
+    if frame is None or not hasattr(frame, "shape") or len(frame.shape) < 2:
+        return frame
+    h, w = frame.shape[:2]
+    if w <= CAMERA_STREAM_MAX_WIDTH and h <= CAMERA_STREAM_MAX_HEIGHT:
+        return frame
+    scale = min(CAMERA_STREAM_MAX_WIDTH / float(w), CAMERA_STREAM_MAX_HEIGHT / float(h))
+    new_w = max(2, int(w * scale) // 2 * 2)
+    new_h = max(2, int(h * scale) // 2 * 2)
+    return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
+def _driving_stream_load_active():
+    """Return True when car is actively moving/being driven."""
+    if car_state.get("autonomous_mode", False):
+        return True
+    if car_state.get("emergency_brake_active", False):
+        return False
+    return (
+        car_state.get("gas_pressed", False)
+        and car_state.get("gear", "N") != "N"
+        and float(car_state.get("current_pwm", 0.0) or 0.0) > 1.0
+    )
+
+
+def _h264_bitrate_for_resolution(resolution_str, framerate):
+    """Pick a practical default bitrate for H264 RTSP stream."""
+    size = _parse_resolution(resolution_str) or (1280, 720)
+    w, h = size
+    fps = _sanitize_camera_framerate(framerate, 30)
+    pixels = w * h
+    if pixels <= 640 * 480:
+        base = 1_200_000
+    elif pixels <= 1280 * 720:
+        base = 2_500_000
+    elif pixels <= 1920 * 1080:
+        base = 4_000_000
+    else:
+        base = 6_000_000
+    if fps > 30:
+        base = int(base * min(2.0, fps / 30.0))
+    return max(800_000, min(12_000_000, max(base, H264_RTSP_DEFAULT_BITRATE)))
 
 # --- CAMERA CONFIG PERSISTENCE ---
 CAMERA_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.camera_config.json')
@@ -390,6 +447,12 @@ _sync_elevenlabs_config_between_files()
 # Load persisted camera config (overrides defaults)
 _persisted_camera_config = _load_camera_config()
 if _persisted_camera_config:
+    if 'stream_backend' in _persisted_camera_config:
+        requested_backend = str(_persisted_camera_config['stream_backend']).strip().lower()
+        if requested_backend in {"mjpeg", "h264_rtsp"}:
+            CAMERA_STREAM_BACKEND_DEFAULT = requested_backend
+        else:
+            print(f"⚠️  [Camera Config] Unsupported stream_backend '{requested_backend}', using {CAMERA_STREAM_BACKEND_DEFAULT}")
     if 'resolution' in _persisted_camera_config and _parse_resolution(_persisted_camera_config['resolution']) is not None:
         CAMERA_DEFAULT_RESOLUTION = _normalize_resolution(_persisted_camera_config['resolution'])
         print(f"📷 [Camera Config] Loaded persisted resolution: '{_persisted_camera_config['resolution']}' → {CAMERA_DEFAULT_RESOLUTION}")
@@ -402,7 +465,10 @@ if _persisted_camera_config:
         CAMERA_FRAMERATE = _sanitize_camera_framerate(requested_fps, CAMERA_FRAMERATE)
         if str(requested_fps) != str(CAMERA_FRAMERATE):
             print(f"⚠️  [Camera Config] Persisted framerate '{requested_fps}' clamped to {CAMERA_FRAMERATE}")
-    print(f"📷 [Camera Config] Active config: res={CAMERA_DEFAULT_RESOLUTION}, quality={CAMERA_JPEG_QUALITY}, fps={CAMERA_FRAMERATE}")
+    print(
+        f"📷 [Camera Config] Active config: res={CAMERA_DEFAULT_RESOLUTION}, quality={CAMERA_JPEG_QUALITY}, "
+        f"fps={CAMERA_FRAMERATE}, backend={CAMERA_STREAM_BACKEND_DEFAULT}"
+    )
 
 # ==========================================
 # 🛠️ AUTO-BUILDER
@@ -533,21 +599,263 @@ camera_specs = detect_camera_specs()
 # Lock for camera reconfiguration
 _camera_lock = threading.Lock()
 _camera_restarting = False
+_integrated_camera_paused_for_h264 = False
+
+
+def _start_integrated_camera(resolution_str, framerate):
+    """Configure and start Picamera2 in integrated MJPEG mode."""
+    global CAMERA_AVAILABLE
+    if picam2 is None:
+        CAMERA_AVAILABLE = False
+        return False
+
+    size = _parse_resolution(resolution_str)
+    if size is None:
+        print(f"❌ [Camera] Invalid resolution '{resolution_str}', cannot start integrated camera")
+        CAMERA_AVAILABLE = False
+        return False
+
+    fps = _sanitize_camera_framerate(framerate, CAMERA_FRAMERATE)
+    try:
+        cam_cfg = picam2.create_video_configuration(
+            main={"size": size, "format": "BGR888"},
+            controls=_camera_controls_for_fps(fps),
+        )
+        picam2.configure(cam_cfg)
+        picam2.start()
+        CAMERA_AVAILABLE = True
+        print(f"✅ [Camera] Integrated stream active at {size[0]}x{size[1]} @ {fps}fps")
+        return True
+    except Exception as e:
+        CAMERA_AVAILABLE = False
+        print(f"❌ [Camera] Failed to start integrated camera: {e}")
+        return False
+
+
+def _pause_integrated_camera_for_h264():
+    """Release camera device from Picamera2 so external H264 process can use it."""
+    global CAMERA_AVAILABLE, _integrated_camera_paused_for_h264
+    if picam2 is None:
+        CAMERA_AVAILABLE = False
+        return
+    try:
+        picam2.stop()
+    except Exception:
+        pass
+    CAMERA_AVAILABLE = False
+    _integrated_camera_paused_for_h264 = True
+
+
+def _resume_integrated_camera_from_h264(force=False):
+    """Re-acquire camera for integrated MJPEG path after H264 process stops."""
+    global _integrated_camera_paused_for_h264
+    if not _integrated_camera_paused_for_h264:
+        return
+    if (
+        not force
+        and "car_state" in globals()
+        and car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT) == "h264_rtsp"
+    ):
+        return
+    if (
+        not force
+        and "car_state" in globals()
+        and not car_state.get("camera_enabled", False)
+    ):
+        _integrated_camera_paused_for_h264 = False
+        return
+    _integrated_camera_paused_for_h264 = False
+    if "car_state" in globals():
+        resolution = car_state.get("camera_resolution", CAMERA_DEFAULT_RESOLUTION)
+        framerate = car_state.get("camera_framerate", CAMERA_FRAMERATE)
+    else:
+        resolution = CAMERA_DEFAULT_RESOLUTION
+        framerate = CAMERA_FRAMERATE
+    _start_integrated_camera(resolution, framerate)
+
+
+class H264RtspService:
+    """Hardware H264 isolated stream service.
+
+    Prefers ffmpeg RTSP-server mode when available; otherwise falls back to a
+    raw H264-over-TCP listener that stays isolated from the control process.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._proc = None
+        self._stderr_thread = None
+        self._last_error = ""
+        self._port = H264_RTSP_PORT
+        self._path = H264_RTSP_PATH
+        self._transport = "rtsp"  # "rtsp" or "tcp_raw"
+        self._ffmpeg_rtsp_listen_supported = None
+
+    def _url(self, host):
+        if self._transport == "rtsp":
+            return f"rtsp://{host}:{self._port}/{self._path}"
+        return f"tcp://{host}:{self._port}"
+
+    def _ffmpeg_can_listen_rtsp(self):
+        with self._lock:
+            cached = self._ffmpeg_rtsp_listen_supported
+        if cached is not None:
+            return cached
+        if shutil.which("ffmpeg") is None:
+            with self._lock:
+                self._ffmpeg_rtsp_listen_supported = False
+            return False
+        supported = False
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-h", "muxer=rtsp"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            info = f"{result.stdout}\n{result.stderr}".lower()
+            # Some builds expose no server/listen mode for RTSP muxing.
+            supported = ("rtsp_flags" in info and "listen" in info)
+        except Exception:
+            supported = False
+        with self._lock:
+            self._ffmpeg_rtsp_listen_supported = supported
+        return supported
+
+    @property
+    def running(self):
+        with self._lock:
+            return self._proc is not None and self._proc.poll() is None
+
+    @property
+    def last_error(self):
+        with self._lock:
+            return self._last_error
+
+    def _drain_stderr(self, proc):
+        try:
+            for line in proc.stderr:
+                txt = line.strip()
+                if not txt:
+                    continue
+                low = txt.lower()
+                # Keep only likely error lines; suppress routine libcamera info logs.
+                if (
+                    "error" in low
+                    or "failed" in low
+                    or "invalid" in low
+                    or "unable" in low
+                    or "refused" in low
+                ):
+                    with self._lock:
+                        self._last_error = txt
+        except Exception:
+            pass
+
+    def start(self, resolution_str, framerate):
+        with self._lock:
+            if self._proc is not None and self._proc.poll() is None:
+                return True
+            self._last_error = ""
+
+        if shutil.which("rpicam-vid") is None:
+            with self._lock:
+                self._last_error = "rpicam-vid not found"
+            return False
+
+        size = _parse_resolution(resolution_str) or (1280, 720)
+        fps = _sanitize_camera_framerate(framerate, 30)
+        bitrate = _h264_bitrate_for_resolution(resolution_str, fps)
+
+        if self._ffmpeg_can_listen_rtsp():
+            transport = "rtsp"
+            cmd = (
+                "set -o pipefail; "
+                f"rpicam-vid -n -t 0 --codec h264 --inline --width {size[0]} --height {size[1]} "
+                f"--framerate {fps} --bitrate {bitrate} -o - "
+                "| ffmpeg -loglevel error -fflags nobuffer -flags low_delay "
+                "-f h264 -i - -an -c:v copy "
+                f"-f rtsp -rtsp_transport tcp -rtsp_flags listen rtsp://0.0.0.0:{self._port}/{self._path}"
+            )
+        else:
+            transport = "tcp_raw"
+            cmd = (
+                "set -o pipefail; "
+                f"rpicam-vid -n -t 0 --codec h264 --inline --width {size[0]} --height {size[1]} "
+                f"--framerate {fps} --bitrate {bitrate} --listen -o tcp://0.0.0.0:{self._port}"
+            )
+
+        try:
+            proc = subprocess.Popen(
+                ["/bin/bash", "-lc", cmd],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+        except Exception as e:
+            with self._lock:
+                self._last_error = str(e)
+            return False
+
+        stderr_thread = threading.Thread(target=self._drain_stderr, args=(proc,), daemon=True)
+        stderr_thread.start()
+
+        time.sleep(0.6)
+        if proc.poll() is not None:
+            with self._lock:
+                self._last_error = self._last_error or "H264 stream process exited immediately"
+            return False
+
+        with self._lock:
+            self._proc = proc
+            self._stderr_thread = stderr_thread
+            self._transport = transport
+        return True
+
+    def stop(self):
+        with self._lock:
+            proc = self._proc
+            self._proc = None
+        if proc is None:
+            return
+        try:
+            proc.terminate()
+            proc.wait(timeout=2.0)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def status(self, host):
+        with self._lock:
+            running = self._proc is not None and self._proc.poll() is None
+            err = self._last_error
+            transport = self._transport
+        return {
+            "running": running,
+            "url": self._url(host),
+            "error": err,
+            "transport": transport,
+        }
+
+
+_h264_rtsp_service = H264RtspService()
 
 try:
     from picamera2 import Picamera2
     picam2 = Picamera2()
     _init_resolution = _parse_resolution(CAMERA_DEFAULT_RESOLUTION) or (640, 480)
     _init_fps = _sanitize_camera_framerate(CAMERA_FRAMERATE, 30)
-    print(f"📷 [Camera Init] Starting with resolution {CAMERA_DEFAULT_RESOLUTION} → {_init_resolution[0]}x{_init_resolution[1]} @ {_init_fps}fps")
-    cam_config = picam2.create_video_configuration(
-        main={"size": _init_resolution, "format": "BGR888"},
-        controls=_camera_controls_for_fps(_init_fps),
+    print(
+        f"📷 [Camera Init] Starting integrated camera with {CAMERA_DEFAULT_RESOLUTION} → "
+        f"{_init_resolution[0]}x{_init_resolution[1]} @ {_init_fps}fps"
     )
-    picam2.configure(cam_config)
-    picam2.start()
-    CAMERA_AVAILABLE = True
-    print(f"✅ Camera initialized successfully at {_init_resolution[0]}x{_init_resolution[1]} @ {_init_fps}fps!")
+    _start_integrated_camera(CAMERA_DEFAULT_RESOLUTION, _init_fps)
+    if CAMERA_STREAM_BACKEND_DEFAULT == "h264_rtsp":
+        _pause_integrated_camera_for_h264()
+        print("📷 [Camera Init] Stream backend set to h264_rtsp; integrated camera paused")
 except Exception as e:
     CAMERA_AVAILABLE = False
     picam2 = None
@@ -644,6 +952,9 @@ def _reconfigure_camera(resolution_str, framerate):
     if picam2 is None:
         print(f"❌ [Camera] Cannot reconfigure - picam2 is None")
         return False
+    if "car_state" in globals() and car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT) == "h264_rtsp":
+        print("📷 [Camera] Integrated reconfigure skipped (h264_rtsp backend active)")
+        return True
     _camera_restarting = True
     try:
         new_size = _parse_resolution(resolution_str)
@@ -652,27 +963,106 @@ def _reconfigure_camera(resolution_str, framerate):
             return False
         new_fps = _sanitize_camera_framerate(framerate, CAMERA_FRAMERATE)
         print(f"📷 [Camera] Reconfiguring: '{resolution_str}' → {new_size[0]}x{new_size[1]} @ {new_fps}fps...")
-        picam2.stop()
-        cam_cfg = picam2.create_video_configuration(
-            main={"size": new_size, "format": "BGR888"},
-            controls=_camera_controls_for_fps(new_fps),
-        )
-        picam2.configure(cam_cfg)
-        picam2.start()
-        CAMERA_AVAILABLE = True
-        print(f"✅ [Camera] Reconfigured successfully to {new_size[0]}x{new_size[1]} @ {new_fps}fps")
-        return True
+        try:
+            picam2.stop()
+        except Exception:
+            pass
+        ok = _start_integrated_camera(resolution_str, new_fps)
+        if ok:
+            print(f"✅ [Camera] Reconfigured successfully to {new_size[0]}x{new_size[1]} @ {new_fps}fps")
+        return ok
     except Exception as e:
         print(f"❌ [Camera] Reconfiguration failed: {e}")
         # Try to recover with previous settings
         try:
-            picam2.start()
-            CAMERA_AVAILABLE = True
+            _start_integrated_camera(CAMERA_DEFAULT_RESOLUTION, CAMERA_FRAMERATE)
         except:
             CAMERA_AVAILABLE = False
         return False
     finally:
         _camera_restarting = False
+
+
+def _apply_stream_backend_switch(new_backend):
+    """Switch between integrated MJPEG and isolated H264 RTSP stream backends."""
+    global _integrated_camera_paused_for_h264
+    backend = str(new_backend or "").strip().lower()
+    if backend not in {"mjpeg", "h264_rtsp"}:
+        return False, f"Unsupported backend '{new_backend}'"
+
+    current = car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT)
+    if backend == current:
+        if backend == "h264_rtsp" and car_state.get("camera_enabled", False) and not _h264_rtsp_service.running:
+            started = _h264_rtsp_service.start(
+                car_state.get("camera_resolution", CAMERA_DEFAULT_RESOLUTION),
+                car_state.get("camera_framerate", CAMERA_FRAMERATE),
+            )
+            _refresh_h264_rtsp_state()
+            if not started:
+                return False, _h264_rtsp_service.last_error or "Failed to start H264 RTSP service"
+        return True, "unchanged"
+
+    if backend == "h264_rtsp":
+        # H264 backend isolates streaming in an external process.
+        with _camera_lock:
+            if VISION_AVAILABLE and vision_system is not None:
+                vision_system.active = False
+                vision_system.stream_enabled = False
+            car_state["user_wants_vision"] = False
+            if car_state.get("narration_enabled"):
+                narration_engine.stop()
+                car_state["narration_enabled"] = False
+                car_state["narration_speaking"] = False
+                _narration_config['enabled'] = False
+                _save_narration_config(_narration_config)
+            _pause_integrated_camera_for_h264()
+
+        if car_state.get("camera_enabled", False):
+            started = _h264_rtsp_service.start(
+                car_state.get("camera_resolution", CAMERA_DEFAULT_RESOLUTION),
+                car_state.get("camera_framerate", CAMERA_FRAMERATE),
+            )
+            if not started:
+                _resume_integrated_camera_from_h264()
+                return False, _h264_rtsp_service.last_error or "Failed to start H264 RTSP service"
+
+        car_state["camera_stream_backend"] = "h264_rtsp"
+        _refresh_h264_rtsp_state()
+        print("📷 [Camera] Stream backend switched to h264_rtsp (isolated process)")
+        return True, "h264_rtsp active"
+
+    # Switching back to integrated MJPEG.
+    _h264_rtsp_service.stop()
+    with _camera_lock:
+        if car_state.get("camera_enabled", False):
+            _resume_integrated_camera_from_h264(force=True)
+        else:
+            # Camera stays off; just clear the paused flag so integrated mode
+            # can be restarted on next camera enable.
+            _integrated_camera_paused_for_h264 = False
+        if VISION_AVAILABLE and vision_system is not None:
+            vision_system.stream_enabled = car_state.get("camera_enabled", False)
+    if car_state.get("camera_enabled", False):
+        _camera_broadcaster.start()
+    car_state["camera_stream_backend"] = "mjpeg"
+    _refresh_h264_rtsp_state()
+    print("📷 [Camera] Stream backend switched to mjpeg (integrated)")
+    return True, "mjpeg active"
+
+
+def _refresh_h264_rtsp_state():
+    """Mirror RTSP process status in car_state for telemetry/UI."""
+    running = _h264_rtsp_service.running
+    car_state["camera_h264_rtsp_running"] = running
+    host = "127.0.0.1"
+    if running:
+        try:
+            host = get_local_ip()
+        except Exception:
+            pass
+    status = _h264_rtsp_service.status(host)
+    car_state["camera_h264_rtsp_transport"] = status.get("transport", "rtsp")
+    car_state["camera_h264_rtsp_url"] = status["url"] if running else ""
 
 class CameraFrameBroadcaster:
     """Shared camera frame broadcaster — one producer thread encodes frames,
@@ -689,6 +1079,10 @@ class CameraFrameBroadcaster:
         self._thread = None
         self._fps_frame_count = 0
         self._fps_last_time = time.time()
+        self._adaptive_fps_limit = CAMERA_MAX_STREAM_FPS
+        self._adaptive_quality_drop = 0
+        self._overload_score = 0
+        self._stable_score = 0
 
     def start(self):
         if self._running:
@@ -719,8 +1113,21 @@ class CameraFrameBroadcaster:
         next_frame_time = time.monotonic()
         while self._running:
             try:
+                # External isolated backend owns the stream path.
+                if car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT) != "mjpeg":
+                    car_state["camera_actual_fps"] = 0.0
+                    car_state["camera_effective_stream_fps_limit"] = 0
+                    car_state["camera_effective_jpeg_quality"] = 0
+                    car_state["camera_adaptive_overloaded"] = False
+                    next_frame_time = time.monotonic()
+                    time.sleep(0.1)
+                    continue
+
                 if not CAMERA_AVAILABLE or picam2 is None:
                     car_state["camera_actual_fps"] = 0.0
+                    car_state["camera_effective_stream_fps_limit"] = 0
+                    car_state["camera_effective_jpeg_quality"] = 0
+                    car_state["camera_adaptive_overloaded"] = False
                     next_frame_time = time.monotonic()
                     time.sleep(1)
                     continue
@@ -734,6 +1141,9 @@ class CameraFrameBroadcaster:
                 # Check if camera is enabled
                 if not car_state["camera_enabled"]:
                     car_state["camera_actual_fps"] = 0.0
+                    car_state["camera_effective_stream_fps_limit"] = 0
+                    car_state["camera_effective_jpeg_quality"] = 0
+                    car_state["camera_adaptive_overloaded"] = False
                     self._fps_frame_count = 0
                     self._fps_last_time = time.time()
                     next_frame_time = time.monotonic()
@@ -744,17 +1154,26 @@ class CameraFrameBroadcaster:
                     consumers = self._consumer_count
                 if consumers <= 0:
                     car_state["camera_actual_fps"] = 0.0
+                    car_state["camera_effective_stream_fps_limit"] = 0
+                    car_state["camera_effective_jpeg_quality"] = 0
+                    car_state["camera_adaptive_overloaded"] = False
                     self._fps_frame_count = 0
                     self._fps_last_time = time.time()
                     next_frame_time = time.monotonic()
                     time.sleep(0.1)
                     continue
 
+                loop_start = time.monotonic()
                 requested_fps = _sanitize_camera_framerate(
                     car_state.get("camera_framerate", CAMERA_FRAMERATE),
                     CAMERA_FRAMERATE,
                 )
-                target_stream_fps = max(1, min(requested_fps, CAMERA_MAX_STREAM_FPS))
+                stream_cap = CAMERA_DRIVING_MAX_STREAM_FPS if _driving_stream_load_active() else CAMERA_MAX_STREAM_FPS
+                self._adaptive_fps_limit = max(CAMERA_MIN_STREAM_FPS, min(self._adaptive_fps_limit, stream_cap))
+                target_stream_fps = max(
+                    1,
+                    min(requested_fps, stream_cap, self._adaptive_fps_limit),
+                )
                 frame_interval = 1.0 / target_stream_fps
 
                 now_mono = time.monotonic()
@@ -779,8 +1198,11 @@ class CameraFrameBroadcaster:
                 if frame is None:
                     frame = picam2.capture_array()
 
+                frame = _stream_size_for_frame(frame)
+
                 # Get current JPEG quality from car_state
-                jpeg_quality = car_state.get("camera_jpeg_quality", CAMERA_JPEG_QUALITY)
+                user_quality = int(car_state.get("camera_jpeg_quality", CAMERA_JPEG_QUALITY) or CAMERA_JPEG_QUALITY)
+                jpeg_quality = max(CAMERA_MIN_JPEG_QUALITY, min(100, user_quality - self._adaptive_quality_drop))
                 ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
                 if not ret:
                     next_frame_time = max(next_frame_time + frame_interval, time.monotonic())
@@ -802,10 +1224,33 @@ class CameraFrameBroadcaster:
                     self._frame_id += 1
                     self._condition.notify_all()
 
+                processing_time = time.monotonic() - loop_start
+                overloaded = processing_time > (frame_interval * 1.15)
+                if overloaded:
+                    self._overload_score += 1
+                    self._stable_score = 0
+                else:
+                    self._stable_score += 1
+                    self._overload_score = max(0, self._overload_score - 1)
+
+                if self._overload_score >= 5:
+                    self._adaptive_fps_limit = max(CAMERA_MIN_STREAM_FPS, self._adaptive_fps_limit - 2)
+                    self._adaptive_quality_drop = min(35, self._adaptive_quality_drop + 5)
+                    self._overload_score = 0
+                elif self._stable_score >= 60:
+                    self._adaptive_fps_limit = min(stream_cap, self._adaptive_fps_limit + 1)
+                    self._adaptive_quality_drop = max(0, self._adaptive_quality_drop - 1)
+                    self._stable_score = 0
+
+                car_state["camera_effective_stream_fps_limit"] = int(target_stream_fps)
+                car_state["camera_effective_jpeg_quality"] = int(jpeg_quality)
+                car_state["camera_adaptive_overloaded"] = bool(self._adaptive_quality_drop > 0)
+
                 next_frame_time = max(next_frame_time + frame_interval, time.monotonic())
 
             except Exception as e:
                 print(f"❌ [CameraBroadcaster] Frame error: {e}")
+                car_state["camera_adaptive_overloaded"] = False
                 next_frame_time = time.monotonic()
                 time.sleep(0.1)
 
@@ -850,6 +1295,90 @@ def generate_camera_frames():
                 time.sleep(0.1)
     finally:
         _camera_broadcaster.remove_consumer()
+
+
+_h264_http_viewer_lock = threading.Lock()
+_h264_http_viewer_count = 0
+
+
+def _build_h264_fmp4_command():
+    """Build external hardware-H264 pipeline command for browser playback."""
+    resolution = car_state.get("camera_resolution", CAMERA_DEFAULT_RESOLUTION)
+    size = _parse_resolution(resolution) or (1280, 720)
+    fps = _sanitize_camera_framerate(car_state.get("camera_framerate", CAMERA_FRAMERATE), CAMERA_FRAMERATE)
+    bitrate = _h264_bitrate_for_resolution(resolution, fps)
+    return (
+        "set -o pipefail; "
+        f"rpicam-vid -n -t 0 --codec h264 --inline --width {size[0]} --height {size[1]} "
+        f"--framerate {fps} --bitrate {bitrate} -o - "
+        "| ffmpeg -loglevel error -fflags nobuffer -flags low_delay "
+        "-f h264 -i - -an -c:v copy "
+        "-movflags frag_keyframe+empty_moov+default_base_moof "
+        "-f mp4 -"
+    )
+
+
+def generate_h264_fmp4():
+    """Yield fragmented MP4 from hardware H264 encoder in isolated subprocess."""
+    global _h264_http_viewer_count
+
+    with _h264_http_viewer_lock:
+        first_viewer = _h264_http_viewer_count == 0
+        _h264_http_viewer_count += 1
+
+    if first_viewer:
+        with _camera_lock:
+            if VISION_AVAILABLE and vision_system is not None:
+                vision_system.active = False
+                vision_system.stream_enabled = False
+            car_state["user_wants_vision"] = False
+            if car_state.get("narration_enabled"):
+                narration_engine.stop()
+                car_state["narration_enabled"] = False
+                car_state["narration_speaking"] = False
+                _narration_config['enabled'] = False
+                _save_narration_config(_narration_config)
+            _pause_integrated_camera_for_h264()
+            _refresh_h264_rtsp_state()
+
+    cmd = _build_h264_fmp4_command()
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            ["/bin/bash", "-lc", cmd],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+        while True:
+            chunk = proc.stdout.read(16384)
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        if proc is not None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=1.5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+        with _h264_http_viewer_lock:
+            _h264_http_viewer_count = max(0, _h264_http_viewer_count - 1)
+            no_viewers = (_h264_http_viewer_count == 0)
+
+        if no_viewers:
+            with _camera_lock:
+                _resume_integrated_camera_from_h264()
+                if VISION_AVAILABLE and vision_system is not None:
+                    vision_system.stream_enabled = (
+                        car_state.get("camera_enabled", False)
+                        and car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT) == "mjpeg"
+                    )
+                _refresh_h264_rtsp_state()
 
 # ==========================================
 # 🚗 HARDWARE SETUP
@@ -995,6 +1524,13 @@ car_state = {
     "camera_closest_confidence": 0,   # Confidence % of closest detection
     "vision_fps": 0.0,               # DNN inference FPS
     "camera_actual_fps": 0.0,        # Measured streaming FPS (actual frames/sec)
+    "camera_effective_stream_fps_limit": CAMERA_MAX_STREAM_FPS,  # Adaptive effective stream FPS cap
+    "camera_effective_jpeg_quality": CAMERA_JPEG_QUALITY,        # Adaptive effective JPEG quality
+    "camera_adaptive_overloaded": False,     # True when adaptive throttling is active
+    "camera_stream_backend": CAMERA_STREAM_BACKEND_DEFAULT,  # "mjpeg" or "h264_rtsp"
+    "camera_h264_rtsp_url": "",              # External H264 RTSP URL
+    "camera_h264_rtsp_running": False,       # True when external H264 RTSP service is running
+    "camera_h264_rtsp_transport": "rtsp",    # "rtsp" or "tcp_raw" fallback mode
     # 🧭 MPU6050 Gyro telemetry
     "gyro_z": 0.0,                     # Current Z-axis yaw rate (°/s)
     "pid_correction": 0.0,             # Current PID heading correction
@@ -2140,16 +2676,88 @@ def serve_root_files(filename):
 @app.route('/video_feed')
 def video_feed():
     """MJPEG streaming route for live camera feed."""
+    if car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT) != "mjpeg":
+        return jsonify({
+            "error": "Integrated MJPEG backend is disabled",
+            "stream_backend": car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT),
+            "h264_rtsp_url": car_state.get("camera_h264_rtsp_url", ""),
+        }), 409
     if not CAMERA_AVAILABLE:
         return "Camera not available", 503
     return Response(generate_camera_frames(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+@app.route('/video_feed_h264')
+def video_feed_h264():
+    """Hardware H264 fragmented MP4 stream (isolated subprocess)."""
+    if not car_state.get("camera_enabled", False):
+        return "Camera is disabled", 409
+    if _h264_rtsp_service.running:
+        return jsonify({
+            "error": "H264 RTSP backend is active; stop it before using HTTP H264 feed.",
+            "h264_rtsp_url": car_state.get("camera_h264_rtsp_url", ""),
+        }), 409
+    if shutil.which("rpicam-vid") is None or shutil.which("ffmpeg") is None:
+        return "H264 stream dependencies unavailable", 503
+    headers = {
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    }
+    return Response(generate_h264_fmp4(), mimetype='video/mp4', headers=headers)
+
+
+@app.route('/api/camera/rtsp/status')
+def camera_rtsp_status():
+    _refresh_h264_rtsp_state()
+    return jsonify({
+        "running": car_state["camera_h264_rtsp_running"],
+        "url": car_state["camera_h264_rtsp_url"],
+        "transport": car_state.get("camera_h264_rtsp_transport", "rtsp"),
+        "backend": car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT),
+        "error": _h264_rtsp_service.last_error,
+    })
+
+
+@app.route('/api/camera/rtsp/start', methods=['POST'])
+def camera_rtsp_start():
+    if not car_state.get("camera_enabled", False):
+        car_state["camera_enabled"] = True
+    ok, msg = _apply_stream_backend_switch("h264_rtsp")
+    if not ok:
+        return jsonify({"status": "error", "message": msg}), 500
+    _refresh_h264_rtsp_state()
+    return jsonify({
+        "status": "ok",
+        "running": car_state["camera_h264_rtsp_running"],
+        "url": car_state["camera_h264_rtsp_url"],
+        "transport": car_state.get("camera_h264_rtsp_transport", "rtsp"),
+        "backend": car_state["camera_stream_backend"],
+    })
+
+
+@app.route('/api/camera/rtsp/stop', methods=['POST'])
+def camera_rtsp_stop():
+    ok, msg = _apply_stream_backend_switch("mjpeg")
+    if not ok:
+        return jsonify({"status": "error", "message": msg}), 500
+    _refresh_h264_rtsp_state()
+    return jsonify({
+        "status": "ok",
+        "running": car_state["camera_h264_rtsp_running"],
+        "url": car_state["camera_h264_rtsp_url"],
+        "transport": car_state.get("camera_h264_rtsp_transport", "rtsp"),
+        "backend": car_state["camera_stream_backend"],
+    })
 
 # Print server info on startup
 print(f"🌐 Server IP Address: {get_local_ip()}")
 print(f"📱 Mobile devices can connect via: http://{get_local_ip()}:5000")
 if CAMERA_AVAILABLE:
     print(f"📷 Camera feed available at: http://{get_local_ip()}:5000/video_feed")
+print(f"📷 H264 feed endpoint: http://{get_local_ip()}:5000/video_feed_h264")
+print(f"📡 H264 RTSP status endpoint: http://{get_local_ip()}:5000/api/camera/rtsp/status")
 
 # --- CONTROLS ---
 
@@ -2473,6 +3081,22 @@ def on_connect():
     })
     # Send camera specs for dynamic resolution dropdown
     emit('camera_specs_sync', camera_specs)
+    _refresh_h264_rtsp_state()
+    emit('camera_config_response', {
+        'status': 'ok',
+        'updated': [],
+        'current_config': {
+            'resolution': car_state["camera_resolution"],
+            'jpeg_quality': car_state["camera_jpeg_quality"],
+            'framerate': car_state["camera_framerate"],
+            'stream_backend': car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT),
+        },
+        'h264_rtsp': {
+            'running': car_state["camera_h264_rtsp_running"],
+            'url': car_state["camera_h264_rtsp_url"],
+            'transport': car_state.get("camera_h264_rtsp_transport", "rtsp"),
+        },
+    })
     # Send narration config
     # Always include cached models from the config file to avoid "revalidate" prompts on browser refresh
     api_key = _narration_config.get('api_key', '')
@@ -2839,13 +3463,39 @@ def on_mpu6050_toggle(data):
 def on_camera_toggle(data):
     """Toggle camera and all vision-related functions on/off."""
     car_state["camera_enabled"] = not car_state["camera_enabled"]
+    backend = car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT)
     state = '✅ ON' if car_state["camera_enabled"] else '❌ OFF'
-    print(f"\n⚙️ [UI Control] 📷 CAMERA: {state}")
+    print(f"\n⚙️ [UI Control] 📷 CAMERA: {state} (backend={backend})")
 
-    if VISION_AVAILABLE and vision_system is not None:
-        vision_system.stream_enabled = car_state["camera_enabled"]
-    
-    # When camera is disabled, turn off vision system and reset user CV preference
+    if backend == "h264_rtsp":
+        if car_state["camera_enabled"]:
+            ok, msg = _apply_stream_backend_switch("h264_rtsp")
+            if not ok:
+                car_state["camera_enabled"] = False
+                print(f"❌ [H264 RTSP] Failed to start: {msg}")
+                emit('camera_response', {
+                    'status': 'error',
+                    'camera_enabled': False,
+                    'backend': backend,
+                    'message': f'H264 RTSP failed: {msg}'
+                })
+                return
+        else:
+            _h264_rtsp_service.stop()
+            _refresh_h264_rtsp_state()
+    else:
+        if car_state["camera_enabled"]:
+            with _camera_lock:
+                if not CAMERA_AVAILABLE and picam2 is not None:
+                    _start_integrated_camera(car_state["camera_resolution"], car_state["camera_framerate"])
+            _camera_broadcaster.start()
+            if VISION_AVAILABLE and vision_system is not None:
+                vision_system.stream_enabled = True
+        else:
+            if VISION_AVAILABLE and vision_system is not None:
+                vision_system.stream_enabled = False
+
+    # When camera is disabled, turn off vision and narration state.
     if not car_state["camera_enabled"]:
         car_state["user_wants_vision"] = False
         if VISION_AVAILABLE and vision_system is not None:
@@ -2860,8 +3510,16 @@ def on_camera_toggle(data):
             _save_narration_config(_narration_config)
             print(f"\U0001f399\ufe0f NARRATION: Disabled (camera off)")
             emit('narration_toggle_response', {'status': 'ok', 'enabled': False})
-    
-    emit('camera_response', {'status': 'ok', 'camera_enabled': car_state["camera_enabled"]})
+
+    _refresh_h264_rtsp_state()
+    emit('camera_response', {
+        'status': 'ok',
+        'camera_enabled': car_state["camera_enabled"],
+        'backend': backend,
+        'h264_rtsp_running': car_state["camera_h264_rtsp_running"],
+        'h264_rtsp_url': car_state["camera_h264_rtsp_url"],
+        'h264_rtsp_transport': car_state.get("camera_h264_rtsp_transport", "rtsp"),
+    })
 
 @socketio.on('vision_toggle')
 def on_vision_toggle(data):
@@ -2870,6 +3528,12 @@ def on_vision_toggle(data):
     autonomous loop to decide whether to activate the DNN."""
     if not car_state["camera_enabled"]:
         emit('vision_response', {'status': 'error', 'message': 'Camera must be enabled first. Please enable the camera before activating vision detection.'})
+        return
+    if car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT) == "h264_rtsp":
+        emit('vision_response', {
+            'status': 'error',
+            'message': 'Vision is unavailable while isolated H264 RTSP backend is active.'
+        })
         return
     if not VISION_AVAILABLE or vision_system is None:
         emit('vision_response', {'status': 'error', 'message': 'Vision system not available'})
@@ -2893,6 +3557,7 @@ def on_camera_config_update(data):
     needs_restart = False
     old_resolution = car_state["camera_resolution"]
     old_framerate = car_state["camera_framerate"]
+    old_backend = car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT)
     
     # Update JPEG quality (applied immediately - no restart needed)
     if 'jpeg_quality' in data:
@@ -2936,10 +3601,30 @@ def on_camera_config_update(data):
                 print(f"   ⚠️ Framerate '{requested_framerate_int}' clamped to {framerate}")
             else:
                 print(f"   ✅ Framerate set to {framerate}")
+
+    backend_switch_ok = True
+    backend_message = ""
+    if 'stream_backend' in data:
+        requested_backend = str(data.get('stream_backend', '')).strip().lower()
+        if requested_backend in {"mjpeg", "h264_rtsp"}:
+            if requested_backend != old_backend:
+                backend_switch_ok, backend_message = _apply_stream_backend_switch(requested_backend)
+                if backend_switch_ok:
+                    updated.append(f"stream_backend={requested_backend}")
+                    print(f"   ✅ Stream backend set to {requested_backend}")
+                else:
+                    print(f"   ❌ Stream backend switch failed: {backend_message}")
+            else:
+                print(f"   📷 Stream backend unchanged: '{requested_backend}'")
+        else:
+            backend_switch_ok = False
+            backend_message = f"Invalid stream_backend '{requested_backend}'"
+            print(f"   ❌ {backend_message}")
     
     # Live reconfigure camera if resolution or framerate changed
     restart_ok = True
-    if needs_restart and CAMERA_AVAILABLE and picam2 is not None:
+    active_backend = car_state.get("camera_stream_backend", old_backend)
+    if needs_restart and active_backend == "mjpeg" and CAMERA_AVAILABLE and picam2 is not None:
         print(f"   🔄 Reconfiguring camera (resolution={car_state['camera_resolution']}, fps={car_state['camera_framerate']})...")
         with _camera_lock:
             restart_ok = _reconfigure_camera(
@@ -2954,26 +3639,74 @@ def on_camera_config_update(data):
                 print(f"   ❌ Camera reconfiguration FAILED, reverted to {old_resolution}")
             else:
                 print(f"   ✅ Camera reconfiguration SUCCESS")
-    elif needs_restart:
+    elif needs_restart and active_backend == "mjpeg":
         print(f"   ⚠️ Camera restart needed but camera not available (CAMERA_AVAILABLE={CAMERA_AVAILABLE})")
-    
+    elif needs_restart and active_backend == "h264_rtsp" and car_state.get("camera_enabled", False):
+        # Restart isolated H264 service to apply new size/fps.
+        _h264_rtsp_service.stop()
+        started = _h264_rtsp_service.start(
+            car_state["camera_resolution"],
+            car_state["camera_framerate"],
+        )
+        restart_ok = bool(started)
+        if restart_ok:
+            print("   ✅ H264 RTSP service restarted with new camera settings")
+        else:
+            print(f"   ❌ H264 RTSP restart failed: {_h264_rtsp_service.last_error}")
+        _refresh_h264_rtsp_state()
+
     # Persist camera config to disk
     _save_camera_config({
         'resolution': car_state["camera_resolution"],
         'jpeg_quality': car_state["camera_jpeg_quality"],
         'framerate': car_state["camera_framerate"],
+        'stream_backend': car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT),
     })
-    
-    result_status = 'ok' if restart_ok else 'partial'
+
+    _refresh_h264_rtsp_state()
+    result_status = 'ok' if (restart_ok and backend_switch_ok) else 'partial'
+    if not backend_switch_ok and not restart_ok:
+        result_status = 'error'
     print(f"   📷 [Camera Config] Result: status={result_status}, applied={', '.join(updated) if updated else 'none'}, current_resolution={car_state['camera_resolution']}")
     emit('camera_config_response', {
         'status': result_status, 
         'updated': updated,
+        'message': backend_message,
         'current_config': {
             'resolution': car_state["camera_resolution"],
             'jpeg_quality': car_state["camera_jpeg_quality"],
             'framerate': car_state["camera_framerate"],
-        }
+            'stream_backend': car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT),
+        },
+        'h264_rtsp': {
+            'running': car_state["camera_h264_rtsp_running"],
+            'url': car_state["camera_h264_rtsp_url"],
+            'transport': car_state.get("camera_h264_rtsp_transport", "rtsp"),
+        },
+    })
+
+
+@socketio.on('camera_stream_backend_update')
+def on_camera_stream_backend_update(data):
+    """Switch stream backend between integrated MJPEG and isolated H264 RTSP."""
+    backend = str((data or {}).get('backend', '')).strip().lower()
+    ok, msg = _apply_stream_backend_switch(backend)
+    _save_camera_config({
+        'resolution': car_state["camera_resolution"],
+        'jpeg_quality': car_state["camera_jpeg_quality"],
+        'framerate': car_state["camera_framerate"],
+        'stream_backend': car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT),
+    })
+    _refresh_h264_rtsp_state()
+    emit('camera_stream_backend_response', {
+        'status': 'ok' if ok else 'error',
+        'backend': car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT),
+        'message': msg,
+        'h264_rtsp': {
+            'running': car_state["camera_h264_rtsp_running"],
+            'url': car_state["camera_h264_rtsp_url"],
+            'transport': car_state.get("camera_h264_rtsp_transport", "rtsp"),
+        },
     })
 
 @socketio.on('autonomous_enable')
@@ -3754,6 +4487,8 @@ def telemetry_broadcast():
     while True:
         try:
             pwm = car_state["current_pwm"]
+            if car_state.get("camera_h264_rtsp_running") and not _h264_rtsp_service.running:
+                _refresh_h264_rtsp_state()
             
             # Use real encoder data when available, fall back to PWM estimates
             if car_state["encoder_available"]:
@@ -3830,6 +4565,13 @@ def telemetry_broadcast():
                 "camera_jpeg_quality": car_state["camera_jpeg_quality"],
                 "camera_framerate": car_state["camera_framerate"],
                 "camera_actual_fps": car_state["camera_actual_fps"],
+                "camera_effective_stream_fps_limit": car_state["camera_effective_stream_fps_limit"],
+                "camera_effective_jpeg_quality": car_state["camera_effective_jpeg_quality"],
+                "camera_adaptive_overloaded": car_state["camera_adaptive_overloaded"],
+                "camera_stream_backend": car_state["camera_stream_backend"],
+                "camera_h264_rtsp_running": car_state["camera_h264_rtsp_running"],
+                "camera_h264_rtsp_url": car_state["camera_h264_rtsp_url"],
+                "camera_h264_rtsp_transport": car_state.get("camera_h264_rtsp_transport", "rtsp"),
                 # 🎙️ Narration telemetry
                 "narration_enabled": car_state["narration_enabled"],
                 "narration_speaking": car_state["narration_speaking"],
@@ -4120,6 +4862,7 @@ if __name__ == "__main__":
     finally:
         # Safety cleanup — car_system.cleanup() stops PWMs + releases GPIO
         _camera_broadcaster.stop()
+        _h264_rtsp_service.stop()
         car_audio.shutdown()
         narration_engine.stop()
         autopilot.stop()

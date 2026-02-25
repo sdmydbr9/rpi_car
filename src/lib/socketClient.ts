@@ -66,6 +66,13 @@ export interface TelemetryData {
   narration_speaking?: boolean;
   // Camera actual FPS
   camera_actual_fps?: number;
+  camera_effective_stream_fps_limit?: number;
+  camera_effective_jpeg_quality?: number;
+  camera_adaptive_overloaded?: boolean;
+  camera_stream_backend?: 'mjpeg' | 'h264_rtsp';
+  camera_h264_rtsp_running?: boolean;
+  camera_h264_rtsp_url?: string;
+  camera_h264_rtsp_transport?: 'rtsp' | 'tcp_raw';
   // Speed Encoder telemetry
   speed_mpm?: number;
   encoder_available?: boolean;
@@ -239,14 +246,30 @@ export function onCameraSpecsSync(callback: (data: CameraSpecs) => void): void {
   }
 }
 
+interface CameraConfigResponse {
+  status: string;
+  message?: string;
+  current_config: {
+    resolution: string;
+    jpeg_quality: number;
+    framerate: number;
+    stream_backend?: 'mjpeg' | 'h264_rtsp';
+  };
+  h264_rtsp?: {
+    running: boolean;
+    url: string;
+    transport?: 'rtsp' | 'tcp_raw';
+  };
+}
+
 // Camera config response callback
-let cameraConfigResponseCallback: ((data: { status: string; current_config: { resolution: string; jpeg_quality: number; framerate: number } }) => void) | null = null;
+let cameraConfigResponseCallback: ((data: CameraConfigResponse) => void) | null = null;
 
 /**
  * Subscribe to camera config response events from the backend.
  * Called after camera_config_update is processed.
  */
-export function onCameraConfigResponse(callback: (data: { status: string; current_config: { resolution: string; jpeg_quality: number; framerate: number } }) => void): void {
+export function onCameraConfigResponse(callback: (data: CameraConfigResponse) => void): void {
   cameraConfigResponseCallback = callback;
   if (socket) {
     socket.off('camera_config_response');  // avoid duplicate listeners

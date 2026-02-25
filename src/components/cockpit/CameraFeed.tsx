@@ -21,6 +21,7 @@ export const CameraFeed = ({ isConnected, streamUrl, isCameraEnabled = true, onT
   const [isLoaded, setIsLoaded] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
   const [imgKey, setImgKey] = useState(0); // Force remount of <img> on retry
+  const [transport, setTransport] = useState<'h264' | 'mjpeg'>('h264');
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevStreamUrlRef = useRef(streamUrl);
 
@@ -31,6 +32,7 @@ export const CameraFeed = ({ isConnected, streamUrl, isCameraEnabled = true, onT
       setHasError(false);
       setIsLoaded(false);
       setRetryCount(0);
+      setTransport('h264');
       setImgKey(k => k + 1);
       if (retryTimerRef.current) {
         clearTimeout(retryTimerRef.current);
@@ -45,6 +47,7 @@ export const CameraFeed = ({ isConnected, streamUrl, isCameraEnabled = true, onT
       setRetryCount(0);
       setHasError(false);
       setIsLoaded(false);
+      setTransport('h264');
       setImgKey(k => k + 1);
     }
   }, [isCameraEnabled]);
@@ -76,15 +79,26 @@ export const CameraFeed = ({ isConnected, streamUrl, isCameraEnabled = true, onT
     setRetryCount(0);
     setHasError(false);
     setIsLoaded(false);
+    setTransport('h264');
     setImgKey(k => k + 1);
   }, []);
 
-  // Build the actual src with cache-busting per retry
-  const effectiveStreamUrl = streamUrl
+  // Build actual MJPEG src with cache-busting per retry
+  const effectiveMjpegUrl = streamUrl
     ? `${streamUrl}${streamUrl.includes('?') ? '&' : '?'}retry=${imgKey}`
     : undefined;
+  const h264BaseUrl = streamUrl?.replace('/video_feed', '/video_feed_h264');
+  const effectiveH264Url = h264BaseUrl
+    ? `${h264BaseUrl}${h264BaseUrl.includes('?') ? '&' : '?'}retry=${imgKey}`
+    : undefined;
 
-  const showStream = isCameraEnabled && isConnected && effectiveStreamUrl && !hasError;
+  useEffect(() => {
+    if (transport === 'h264' && !effectiveH264Url) {
+      setTransport('mjpeg');
+    }
+  }, [transport, effectiveH264Url]);
+
+  const showStream = isCameraEnabled && isConnected && !!(effectiveH264Url || effectiveMjpegUrl) && !hasError;
   const permanentError = hasError && retryCount > MAX_AUTO_RETRIES;
 
   return (
@@ -108,11 +122,29 @@ export const CameraFeed = ({ isConnected, streamUrl, isCameraEnabled = true, onT
           </div>
         ) : (
           <>
-            {/* Live MJPEG stream */}
-            {showStream && (
+            {/* Preferred: hardware H264 feed, fallback: MJPEG */}
+            {showStream && transport === 'h264' && effectiveH264Url && (
+              <video
+                key={`h264-${imgKey}`}
+                src={effectiveH264Url}
+                autoPlay
+                muted
+                playsInline
+                className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-300 ${isLoaded ? 'opacity-100' : 'opacity-0'}`}
+                onLoadedData={() => { setIsLoaded(true); setRetryCount(0); }}
+                onError={() => {
+                  setIsLoaded(false);
+                  setTransport('mjpeg');
+                  setHasError(false);
+                  setRetryCount(0);
+                }}
+              />
+            )}
+
+            {showStream && transport === 'mjpeg' && effectiveMjpegUrl && (
               <img
                 key={imgKey}
-                src={effectiveStreamUrl}
+                src={effectiveMjpegUrl}
                 alt="Live Camera Feed"
                 className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-300 ${isLoaded ? 'opacity-100' : 'opacity-0'}`}
                 onLoad={() => { setIsLoaded(true); setRetryCount(0); }}
