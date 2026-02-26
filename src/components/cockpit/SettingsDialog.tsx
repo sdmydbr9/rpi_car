@@ -905,6 +905,16 @@ export const SettingsDialog = ({
 
   const handleParamChange = useCallback(
     (key: keyof TuningConstants, value: number | string | boolean) => {
+      if (key === "VISION_ENABLED" && value === true) {
+        toast.error("CV Mode unavailable", {
+          description: "MediaMTX-only camera mode does not support integrated vision analysis.",
+          duration: 3500,
+        });
+        onTuningChange({ ...tuning, VISION_ENABLED: false });
+        setSynced(false);
+        return;
+      }
+
       let updatedTuning = { ...tuning, [key]: value };
 
       // When VISION_ENABLED changes to true, enforce high-quality video settings

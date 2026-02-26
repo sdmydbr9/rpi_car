@@ -1,6 +1,6 @@
 {
-  "resolution": "1920x1080",
+  "resolution": "1280x720",
   "jpeg_quality": 70,
-  "framerate": 60,
-  "stream_backend": "mjpeg"
+  "framerate": 30,
+  "stream_backend": "mediamtx_webrtc"
 }

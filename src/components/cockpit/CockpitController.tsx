@@ -149,7 +149,8 @@ export const CockpitController = () => {
         if (config.resolution) base.CAMERA_RESOLUTION = config.resolution;
         if (config.jpeg_quality) base.CAMERA_JPEG_QUALITY = config.jpeg_quality;
         if (config.framerate) base.CAMERA_FRAMERATE = config.framerate;
-        if (config.vision_enabled !== undefined) base.VISION_ENABLED = config.vision_enabled;
+        // MediaMTX-only camera mode does not support integrated CV pipeline.
+        base.VISION_ENABLED = false;
       }
     } catch { /* ignore corrupt localStorage */ }
     return base;
@@ -247,6 +248,11 @@ export const CockpitController = () => {
   const autoConnectAttemptedRef = useRef(false);
   const pendingGearRef = useRef<{ gear: string; ts: number } | null>(null);
   const analyzeNowTimeoutRef = useRef<number | null>(null);
+  const lastMediaMtxUrlRef = useRef<string>("");
+
+  const buildMediaMtxWebRtcUrl = useCallback((ip: string) => {
+    return `http://${ip}:8889/rpi_car/`;
+  }, []);
 
   // TTS Browser Unlock: Safari and Chrome require a user gesture before speechSynthesis.speak() works.
   // We use the ttsService singleton which handles voice preloading, unlock, and the
@@ -333,7 +339,9 @@ export const CockpitController = () => {
             await socketClient.connectToServer(ip, 5000);
             setServerIp(ip);
             setIsConnected(true);
-            setStreamUrl(`http://${ip}:5000/video_feed?t=${Date.now()}`);
+            const url = buildMediaMtxWebRtcUrl(ip);
+            lastMediaMtxUrlRef.current = url;
+            setStreamUrl(`${url}?t=${Date.now()}`);
             console.log(`✅ [Startup] Successfully connected to ${ip}`);
             return true;
           } catch (error) {
@@ -376,7 +384,20 @@ export const CockpitController = () => {
       };
       smartAutoConnect();
     }
-  }, []);
+  }, [buildMediaMtxWebRtcUrl]);
+
+  // When camera is enabled, force a fresh stream URL so the browser
+  // immediately reloads the MediaMTX WebRTC viewer.
+  useEffect(() => {
+    if (!isCameraEnabled) return;
+    setStreamUrl((prev) => {
+      const base = prev
+        ? prev.split('?')[0]
+        : (serverIp ? buildMediaMtxWebRtcUrl(serverIp) : '');
+      if (!base) return prev;
+      return `${base}?t=${Date.now()}`;
+    });
+  }, [isCameraEnabled, serverIp, buildMediaMtxWebRtcUrl]);
 
   // Sync userWantsVision with tuning.VISION_ENABLED
   useEffect(() => {
@@ -450,11 +471,39 @@ export const CockpitController = () => {
           CAMERA_RESOLUTION: data.current_config.resolution,
           CAMERA_JPEG_QUALITY: data.current_config.jpeg_quality,
           CAMERA_FRAMERATE: data.current_config.framerate,
+          VISION_ENABLED: false,
         }));
         // Also update live state so HUD badge reflects confirmed values
         setLiveCameraResolution(data.current_config.resolution);
         setLiveCameraJpegQuality(data.current_config.jpeg_quality);
         setLiveCameraFramerate(data.current_config.framerate);
+      }
+      if (data.mediamtx?.webrtc_url) {
+        const nextBase = data.mediamtx.webrtc_url.trim();
+        if (nextBase && nextBase !== lastMediaMtxUrlRef.current) {
+          lastMediaMtxUrlRef.current = nextBase;
+          setStreamUrl(`${nextBase}${nextBase.includes('?') ? '&' : '?'}t=${Date.now()}`);
+        }
+      }
+    });
+
+    socketClient.onCameraResponse((data) => {
+      if (data.camera_enabled !== undefined) {
+        setIsCameraEnabled(data.camera_enabled);
+        localStorage.setItem('cameraEnabled', String(data.camera_enabled));
+      }
+      if (data.mediamtx_webrtc_url) {
+        const nextBase = data.mediamtx_webrtc_url.trim();
+        if (nextBase && nextBase !== lastMediaMtxUrlRef.current) {
+          lastMediaMtxUrlRef.current = nextBase;
+          setStreamUrl(`${nextBase}${nextBase.includes('?') ? '&' : '?'}t=${Date.now()}`);
+        }
+      }
+      if (data.status === 'error') {
+        toast.error('Camera failed to start', {
+          description: data.message || data.mediamtx_error || 'MediaMTX pipeline failed',
+          duration: 4500,
+        });
       }
     });
 
@@ -639,6 +688,13 @@ export const CockpitController = () => {
       if (data.camera_resolution) setLiveCameraResolution(data.camera_resolution);
       if (data.camera_jpeg_quality !== undefined) setLiveCameraJpegQuality(data.camera_jpeg_quality);
       if (data.camera_framerate !== undefined) setLiveCameraFramerate(data.camera_framerate);
+      if (data.camera_mediamtx_webrtc_url) {
+        const nextBase = data.camera_mediamtx_webrtc_url.trim();
+        if (nextBase && nextBase !== lastMediaMtxUrlRef.current) {
+          lastMediaMtxUrlRef.current = nextBase;
+          setStreamUrl(`${nextBase}${nextBase.includes('?') ? '&' : '?'}t=${Date.now()}`);
+        }
+      }
     });
 
     return () => {
@@ -931,14 +987,15 @@ export const CockpitController = () => {
 
   const handleCameraToggle = useCallback(() => {
     console.log('🎮 CAMERA toggle');
-    // Toggle local state immediately for instant feedback
-    setIsCameraEnabled(prev => {
-      const newState = !prev;
-      localStorage.setItem('cameraEnabled', String(newState));
-      return newState;
-    });
+    if (!isConnected) {
+      toast.error('Cannot toggle camera', {
+        description: 'Backend connection lost. Reconnect and try again.',
+        duration: 3500,
+      });
+      return;
+    }
     socketClient.emitCameraToggle();
-  }, []);
+  }, [isConnected]);
 
   // Toggle autopilot VIEW (does not start/stop the autopilot FSM)
   const handleAutopilotToggle = useCallback(() => {

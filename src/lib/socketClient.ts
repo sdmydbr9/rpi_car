@@ -5,6 +5,7 @@ let socket: Socket | null = null;
 
 // Telemetry callback
 let telemetryCallback: ((data: TelemetryData) => void) | null = null;
+let cameraResponseCallback: ((data: CameraResponse) => void) | null = null;
 
 // Connection state callback - fired when socket connects/disconnects
 let connectionStateCallback: ((isConnected: boolean) => void) | null = null;
@@ -69,15 +70,29 @@ export interface TelemetryData {
   camera_effective_stream_fps_limit?: number;
   camera_effective_jpeg_quality?: number;
   camera_adaptive_overloaded?: boolean;
-  camera_stream_backend?: 'mjpeg' | 'h264_rtsp';
+  camera_stream_backend?: 'mediamtx_webrtc';
   camera_h264_rtsp_running?: boolean;
   camera_h264_rtsp_url?: string;
-  camera_h264_rtsp_transport?: 'rtsp' | 'tcp_raw';
+  camera_h264_rtsp_transport?: 'rtsp';
+  camera_mediamtx_running?: boolean;
+  camera_mediamtx_webrtc_url?: string;
+  camera_mediamtx_rtsp_ingest_url?: string;
+  camera_mediamtx_error?: string;
   // Speed Encoder telemetry
   speed_mpm?: number;
   encoder_available?: boolean;
   // Battery telemetry
   battery_voltage?: number;
+}
+
+export interface CameraResponse {
+  status: 'ok' | 'error' | 'blocked';
+  message?: string;
+  camera_enabled?: boolean;
+  backend?: string;
+  mediamtx_running?: boolean;
+  mediamtx_webrtc_url?: string;
+  mediamtx_error?: string;
 }
 
 /**
@@ -132,6 +147,13 @@ export function connectToServer(serverIp: string, port: number = 5000): Promise<
     socket.on('telemetry_update', (data: TelemetryData) => {
       if (telemetryCallback) {
         telemetryCallback(data);
+      }
+    });
+
+    socket.on('camera_response', (data: CameraResponse) => {
+      console.log(`[Socket] 📷 Camera response:`, data);
+      if (cameraResponseCallback) {
+        cameraResponseCallback(data);
       }
     });
 
@@ -253,12 +275,18 @@ interface CameraConfigResponse {
     resolution: string;
     jpeg_quality: number;
     framerate: number;
-    stream_backend?: 'mjpeg' | 'h264_rtsp';
+    stream_backend?: 'mediamtx_webrtc';
+  };
+  mediamtx?: {
+    running: boolean;
+    webrtc_url: string;
+    rtsp_ingest_url?: string;
+    error?: string;
   };
   h264_rtsp?: {
     running: boolean;
     url: string;
-    transport?: 'rtsp' | 'tcp_raw';
+    transport?: 'rtsp';
   };
 }
 
@@ -276,6 +304,20 @@ export function onCameraConfigResponse(callback: (data: CameraConfigResponse) =>
     socket.on('camera_config_response', (data) => {
       console.log(`[Socket] 📷 Camera config response:`, data);
       if (cameraConfigResponseCallback) cameraConfigResponseCallback(data);
+    });
+  }
+}
+
+/**
+ * Subscribe to camera toggle/status responses.
+ */
+export function onCameraResponse(callback: (data: CameraResponse) => void): void {
+  cameraResponseCallback = callback;
+  if (socket) {
+    socket.off('camera_response');
+    socket.on('camera_response', (data: CameraResponse) => {
+      console.log(`[Socket] 📷 Camera response:`, data);
+      if (cameraResponseCallback) cameraResponseCallback(data);
     });
   }
 }
@@ -1079,6 +1121,7 @@ export default {
   onTuningSync,
   onCameraSpecsSync,
   onCameraConfigResponse,
+  onCameraResponse,
   requestTuning,
   // Narration
   onNarrationConfigSync,

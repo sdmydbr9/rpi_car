@@ -95,7 +95,7 @@ export const ImmersiveHUD = ({
 }: ImmersiveHUDProps) => {
   const { triggerHaptic, playSound } = useGameFeedback();
   const [steeringDirection, setSteeringDirection] = useState<'left' | 'right' | null>(null);
-  const [useH264Feed, setUseH264Feed] = useState(true);
+  const [feedViewerKey, setFeedViewerKey] = useState(0);
   
   // Progressive steering constants
   const STEER_INCREMENT = 5;       // degrees per tick
@@ -116,7 +116,7 @@ export const ImmersiveHUD = ({
   }, []);
 
   useEffect(() => {
-    setUseH264Feed(true);
+    setFeedViewerKey((k) => k + 1);
   }, [streamUrl, isCameraEnabled]);
 
   // Refs for multitouch-tracked interactive zones
@@ -133,9 +133,9 @@ export const ImmersiveHUD = ({
   
   // RPM simulation based on speed and throttle
   const rpm = Math.min(100, (speed / 100) * 80 + (throttle ? 20 : 0));
-  const h264StreamUrl = useMemo(() => {
+  const effectiveViewerUrl = useMemo(() => {
     if (!streamUrl) return undefined;
-    return streamUrl.replace('/video_feed', '/video_feed_h264');
+    return `${streamUrl}${streamUrl.includes('?') ? '&' : '?'}autoplay=1&muted=1`;
   }, [streamUrl]);
   const isRedline = rpm > 85;
 
@@ -166,7 +166,7 @@ export const ImmersiveHUD = ({
       if (fadeTimerRef.current) clearTimeout(fadeTimerRef.current);
     };
   }, [narrationSpeaking, narrationLastText]);
-  
+
   const handleBrakeStart = useCallback(() => {
     triggerHaptic('heavy');
     onBrakeChange(true);
@@ -285,6 +285,8 @@ export const ImmersiveHUD = ({
 
   if (!isOpen) return null;
 
+  const showStream = isCameraEnabled && isConnected && !!effectiveViewerUrl;
+
   return (
     <div className="fixed inset-0 z-50">
       {/* Emergency border flash */}
@@ -310,27 +312,25 @@ export const ImmersiveHUD = ({
               </div>
             </div>
           </div>
-        ) : streamUrl ? (
+        ) : effectiveViewerUrl ? (
           <>
-            {useH264Feed && h264StreamUrl ? (
-              <video
-                src={h264StreamUrl}
-                autoPlay
-                muted
-                playsInline
+            {showStream && (
+              <iframe
+                key={feedViewerKey}
+                src={effectiveViewerUrl}
+                title="Live Camera Feed"
                 className="w-full h-full object-cover"
-                onError={() => setUseH264Feed(false)}
+                allow="autoplay; fullscreen; picture-in-picture"
+                sandbox="allow-scripts allow-same-origin allow-forms allow-pointer-lock"
               />
-            ) : (
-              <img
-                src={streamUrl}
-                alt="Live Camera Feed"
-                className="w-full h-full object-cover"
-                onError={(e) => {
-                  // Hide the broken image and show fallback
-                  (e.target as HTMLImageElement).style.display = 'none';
-                }}
-              />
+            )}
+            {!showStream && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/25">
+                <VideoOff className="w-10 h-10 text-primary animate-pulse" />
+                <div className="mt-2 text-sm racing-text text-muted-foreground">
+                  CONNECTING...
+                </div>
+              </div>
             )}
             {/* Subtle vignette overlay for better HUD readability */}
             <div 

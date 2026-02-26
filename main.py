@@ -39,6 +39,8 @@ import json
 import base64
 import shutil
 import xml.etree.ElementTree as ET
+from urllib import request as urllib_request
+from urllib import error as urllib_error
 from io import BytesIO
 from enum import Enum
 from collections import deque
@@ -172,11 +174,24 @@ CAMERA_MIN_STREAM_FPS = 8
 CAMERA_MIN_JPEG_QUALITY = 25
 CAMERA_STREAM_MAX_WIDTH = 1280
 CAMERA_STREAM_MAX_HEIGHT = 720
-CAMERA_STREAM_BACKEND_DEFAULT = "mjpeg"  # "mjpeg" or "h264_rtsp"
+CAMERA_STREAM_BACKEND_DEFAULT = "mediamtx_webrtc"
 
-# Isolated hardware H264/RTSP service (external process)
-H264_RTSP_PORT = int(os.getenv("RC_H264_RTSP_PORT", "8554"))
-H264_RTSP_PATH = os.getenv("RC_H264_RTSP_PATH", "rpi_car")
+# MediaMTX streaming configuration
+MEDIAMTX_BIN = os.getenv("RC_MEDIAMTX_BIN", "mediamtx")
+MEDIAMTX_RTSP_PORT = int(os.getenv("RC_MEDIAMTX_RTSP_PORT", "8554"))
+MEDIAMTX_WEBRTC_PORT = int(os.getenv("RC_MEDIAMTX_WEBRTC_PORT", "8889"))
+MEDIAMTX_STREAM_PATH = (os.getenv("RC_MEDIAMTX_STREAM_PATH", "rpi_car") or "rpi_car").strip().strip("/")
+if not MEDIAMTX_STREAM_PATH:
+    MEDIAMTX_STREAM_PATH = "rpi_car"
+
+# Stable publish envelope for low-latency RTSP ingest into MediaMTX.
+CAMERA_PUBLISH_MAX_WIDTH = int(os.getenv("RC_CAMERA_PUBLISH_MAX_WIDTH", "1280"))
+CAMERA_PUBLISH_MAX_HEIGHT = int(os.getenv("RC_CAMERA_PUBLISH_MAX_HEIGHT", "720"))
+CAMERA_PUBLISH_MAX_FPS = int(os.getenv("RC_CAMERA_PUBLISH_MAX_FPS", "30"))
+
+# Isolated hardware H264 publisher (publishes into MediaMTX RTSP ingest)
+H264_RTSP_PORT = MEDIAMTX_RTSP_PORT
+H264_RTSP_PATH = MEDIAMTX_STREAM_PATH
 H264_RTSP_DEFAULT_BITRATE = int(os.getenv("RC_H264_BITRATE", "3000000"))
 
 
@@ -187,6 +202,35 @@ def _sanitize_camera_framerate(value, fallback=30):
     except (TypeError, ValueError):
         return max(1, min(120, int(fallback)))
     return max(1, min(120, fps))
+
+
+def _camera_publish_profile(resolution_str, framerate):
+    """Return a stable effective resolution/fps profile for RTSP publishing."""
+    requested_size = _parse_resolution(resolution_str) or (640, 480)
+    requested_fps = _sanitize_camera_framerate(framerate, 30)
+
+    max_w = max(160, int(CAMERA_PUBLISH_MAX_WIDTH))
+    max_h = max(120, int(CAMERA_PUBLISH_MAX_HEIGHT))
+    max_fps = max(1, int(CAMERA_PUBLISH_MAX_FPS))
+
+    w, h = requested_size
+    if w > max_w or h > max_h:
+        scale = min(max_w / float(w), max_h / float(h))
+        w = max(2, int(w * scale) // 2 * 2)
+        h = max(2, int(h * scale) // 2 * 2)
+
+    effective_fps = min(requested_fps, max_fps)
+    effective_resolution = f"{w}x{h}"
+    requested_resolution = f"{requested_size[0]}x{requested_size[1]}"
+
+    return {
+        "requested_resolution": requested_resolution,
+        "requested_fps": requested_fps,
+        "resolution": effective_resolution,
+        "size": (w, h),
+        "fps": effective_fps,
+        "clamped": (effective_resolution != requested_resolution) or (effective_fps != requested_fps),
+    }
 
 
 def _camera_controls_for_fps(framerate):
@@ -447,24 +491,40 @@ _sync_elevenlabs_config_between_files()
 # Load persisted camera config (overrides defaults)
 _persisted_camera_config = _load_camera_config()
 if _persisted_camera_config:
+    requested_resolution = CAMERA_DEFAULT_RESOLUTION
+    requested_fps = CAMERA_FRAMERATE
     if 'stream_backend' in _persisted_camera_config:
         requested_backend = str(_persisted_camera_config['stream_backend']).strip().lower()
-        if requested_backend in {"mjpeg", "h264_rtsp"}:
-            CAMERA_STREAM_BACKEND_DEFAULT = requested_backend
-        else:
-            print(f"⚠️  [Camera Config] Unsupported stream_backend '{requested_backend}', using {CAMERA_STREAM_BACKEND_DEFAULT}")
+        if requested_backend != CAMERA_STREAM_BACKEND_DEFAULT:
+            print(
+                f"ℹ️  [Camera Config] Ignoring persisted stream_backend '{requested_backend}' "
+                f"(MediaMTX-only mode active)"
+            )
     if 'resolution' in _persisted_camera_config and _parse_resolution(_persisted_camera_config['resolution']) is not None:
-        CAMERA_DEFAULT_RESOLUTION = _normalize_resolution(_persisted_camera_config['resolution'])
-        print(f"📷 [Camera Config] Loaded persisted resolution: '{_persisted_camera_config['resolution']}' → {CAMERA_DEFAULT_RESOLUTION}")
+        requested_resolution = _normalize_resolution(_persisted_camera_config['resolution'])
+        print(f"📷 [Camera Config] Loaded persisted resolution: '{_persisted_camera_config['resolution']}' → {requested_resolution}")
     else:
         print(f"⚠️  [Camera Config] Persisted resolution '{_persisted_camera_config.get('resolution', 'N/A')}' is invalid, using default {CAMERA_DEFAULT_RESOLUTION}")
     if 'jpeg_quality' in _persisted_camera_config:
         CAMERA_JPEG_QUALITY = int(_persisted_camera_config['jpeg_quality'])
     if 'framerate' in _persisted_camera_config:
         requested_fps = _persisted_camera_config['framerate']
-        CAMERA_FRAMERATE = _sanitize_camera_framerate(requested_fps, CAMERA_FRAMERATE)
-        if str(requested_fps) != str(CAMERA_FRAMERATE):
-            print(f"⚠️  [Camera Config] Persisted framerate '{requested_fps}' clamped to {CAMERA_FRAMERATE}")
+
+    publish_profile = _camera_publish_profile(requested_resolution, requested_fps)
+    CAMERA_DEFAULT_RESOLUTION = publish_profile["resolution"]
+    CAMERA_FRAMERATE = publish_profile["fps"]
+    if publish_profile["clamped"]:
+        print(
+            "⚠️  [Camera Config] Persisted camera profile adjusted for MediaMTX stability: "
+            f"{publish_profile['requested_resolution']}@{publish_profile['requested_fps']}fps → "
+            f"{publish_profile['resolution']}@{publish_profile['fps']}fps"
+        )
+        _save_camera_config({
+            'resolution': CAMERA_DEFAULT_RESOLUTION,
+            'jpeg_quality': CAMERA_JPEG_QUALITY,
+            'framerate': CAMERA_FRAMERATE,
+            'stream_backend': CAMERA_STREAM_BACKEND_DEFAULT,
+        })
     print(
         f"📷 [Camera Config] Active config: res={CAMERA_DEFAULT_RESOLUTION}, quality={CAMERA_JPEG_QUALITY}, "
         f"fps={CAMERA_FRAMERATE}, backend={CAMERA_STREAM_BACKEND_DEFAULT}"
@@ -633,7 +693,7 @@ def _start_integrated_camera(resolution_str, framerate):
 
 
 def _pause_integrated_camera_for_h264():
-    """Release camera device from Picamera2 so external H264 process can use it."""
+    """Release camera device from Picamera2 so MediaMTX rpiCamera source can use it."""
     global CAMERA_AVAILABLE, _integrated_camera_paused_for_h264
     if picam2 is None:
         CAMERA_AVAILABLE = False
@@ -642,19 +702,26 @@ def _pause_integrated_camera_for_h264():
         picam2.stop()
     except Exception:
         pass
+    try:
+        picam2.close()
+        print("📷 [Camera] Picamera2 closed (libcamera device released)")
+    except Exception as e:
+        print(f"⚠️  [Camera] picam2.close() failed: {e}")
+    # Give libcamera a moment to fully release the device node.
+    time.sleep(0.5)
     CAMERA_AVAILABLE = False
     _integrated_camera_paused_for_h264 = True
 
 
 def _resume_integrated_camera_from_h264(force=False):
-    """Re-acquire camera for integrated MJPEG path after H264 process stops."""
+    """Re-acquire camera for integrated path after MediaMTX/external publisher stops."""
     global _integrated_camera_paused_for_h264
     if not _integrated_camera_paused_for_h264:
         return
     if (
         not force
         and "car_state" in globals()
-        and car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT) == "h264_rtsp"
+        and car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT) == CAMERA_STREAM_BACKEND_DEFAULT
     ):
         return
     if (
@@ -665,6 +732,17 @@ def _resume_integrated_camera_from_h264(force=False):
         _integrated_camera_paused_for_h264 = False
         return
     _integrated_camera_paused_for_h264 = False
+    # Re-initialize picam2 after close()
+    if picam2 is not None:
+        try:
+            picam2.close()
+        except Exception:
+            pass
+        try:
+            picam2.__init__()
+            print("📷 [Camera] Picamera2 re-initialized after close")
+        except Exception as e:
+            print(f"⚠️  [Camera] Picamera2 re-init failed: {e}")
     if "car_state" in globals():
         resolution = car_state.get("camera_resolution", CAMERA_DEFAULT_RESOLUTION)
         framerate = car_state.get("camera_framerate", CAMERA_FRAMERATE)
@@ -674,12 +752,45 @@ def _resume_integrated_camera_from_h264(force=False):
     _start_integrated_camera(resolution, framerate)
 
 
-class H264RtspService:
-    """Hardware H264 isolated stream service.
+def _camera_webrtc_url(host):
+    return f"http://{host}:{MEDIAMTX_WEBRTC_PORT}/{MEDIAMTX_STREAM_PATH}/"
 
-    Prefers ffmpeg RTSP-server mode when available; otherwise falls back to a
-    raw H264-over-TCP listener that stays isolated from the control process.
-    """
+
+def _camera_webrtc_whep_url(host):
+    return f"http://{host}:{MEDIAMTX_WEBRTC_PORT}/{MEDIAMTX_STREAM_PATH}/whep"
+
+
+def _is_camera_webrtc_stream_available(host="127.0.0.1", timeout_s=0.4):
+    """Probe MediaMTX WHEP endpoint; 404 means path has no active publisher."""
+    url = _camera_webrtc_whep_url(host)
+    req = urllib_request.Request(url, data=b"v=0\r\n", method="POST")
+    req.add_header("Content-Type", "application/sdp")
+    try:
+        with urllib_request.urlopen(req, timeout=max(0.1, float(timeout_s))):
+            return True
+    except urllib_error.HTTPError as e:
+        # MediaMTX returns:
+        # - 404 when no stream is available on the path
+        # - 4xx (typically 400) when stream exists but SDP is invalid.
+        return e.code != 404
+    except Exception:
+        return False
+
+
+def _wait_for_camera_webrtc_stream(timeout_s=5.0):
+    """Wait until MediaMTX confirms the stream path has an active publisher."""
+    deadline = time.time() + max(0.2, float(timeout_s))
+    while time.time() < deadline:
+        if not _mediamtx_service.running:
+            return False
+        if _is_camera_webrtc_stream_available():
+            return True
+        time.sleep(0.15)
+    return _mediamtx_service.running and _is_camera_webrtc_stream_available()
+
+
+class H264RtspService:
+    """Hardware H264 publisher that pushes stream into local MediaMTX RTSP ingest."""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -688,39 +799,10 @@ class H264RtspService:
         self._last_error = ""
         self._port = H264_RTSP_PORT
         self._path = H264_RTSP_PATH
-        self._transport = "rtsp"  # "rtsp" or "tcp_raw"
-        self._ffmpeg_rtsp_listen_supported = None
+        self._transport = "rtsp"
 
     def _url(self, host):
-        if self._transport == "rtsp":
-            return f"rtsp://{host}:{self._port}/{self._path}"
-        return f"tcp://{host}:{self._port}"
-
-    def _ffmpeg_can_listen_rtsp(self):
-        with self._lock:
-            cached = self._ffmpeg_rtsp_listen_supported
-        if cached is not None:
-            return cached
-        if shutil.which("ffmpeg") is None:
-            with self._lock:
-                self._ffmpeg_rtsp_listen_supported = False
-            return False
-        supported = False
-        try:
-            result = subprocess.run(
-                ["ffmpeg", "-hide_banner", "-h", "muxer=rtsp"],
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-            info = f"{result.stdout}\n{result.stderr}".lower()
-            # Some builds expose no server/listen mode for RTSP muxing.
-            supported = ("rtsp_flags" in info and "listen" in info)
-        except Exception:
-            supported = False
-        with self._lock:
-            self._ffmpeg_rtsp_listen_supported = supported
-        return supported
+        return f"rtsp://{host}:{self._port}/{self._path}"
 
     @property
     def running(self):
@@ -762,56 +844,65 @@ class H264RtspService:
             with self._lock:
                 self._last_error = "rpicam-vid not found"
             return False
-
-        size = _parse_resolution(resolution_str) or (1280, 720)
-        fps = _sanitize_camera_framerate(framerate, 30)
-        bitrate = _h264_bitrate_for_resolution(resolution_str, fps)
-
-        if self._ffmpeg_can_listen_rtsp():
-            transport = "rtsp"
-            cmd = (
-                "set -o pipefail; "
-                f"rpicam-vid -n -t 0 --codec h264 --inline --width {size[0]} --height {size[1]} "
-                f"--framerate {fps} --bitrate {bitrate} -o - "
-                "| ffmpeg -loglevel error -fflags nobuffer -flags low_delay "
-                "-f h264 -i - -an -c:v copy "
-                f"-f rtsp -rtsp_transport tcp -rtsp_flags listen rtsp://0.0.0.0:{self._port}/{self._path}"
-            )
-        else:
-            transport = "tcp_raw"
-            cmd = (
-                "set -o pipefail; "
-                f"rpicam-vid -n -t 0 --codec h264 --inline --width {size[0]} --height {size[1]} "
-                f"--framerate {fps} --bitrate {bitrate} --listen -o tcp://0.0.0.0:{self._port}"
-            )
-
-        try:
-            proc = subprocess.Popen(
-                ["/bin/bash", "-lc", cmd],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-            )
-        except Exception as e:
+        if shutil.which("ffmpeg") is None:
             with self._lock:
-                self._last_error = str(e)
+                self._last_error = "ffmpeg not found"
             return False
 
-        stderr_thread = threading.Thread(target=self._drain_stderr, args=(proc,), daemon=True)
-        stderr_thread.start()
+        profile = _camera_publish_profile(resolution_str, framerate)
+        size = profile["size"]
+        fps = profile["fps"]
+        if profile["clamped"]:
+            print(
+                "ℹ️  [MediaMTX] Publisher profile adjusted: "
+                f"{profile['requested_resolution']}@{profile['requested_fps']}fps → "
+                f"{profile['resolution']}@{profile['fps']}fps"
+            )
+        bitrate = _h264_bitrate_for_resolution(profile["resolution"], fps)
+        cmd = (
+            "set -o pipefail; "
+            f"rpicam-vid -n -t 0 --codec h264 --inline --width {size[0]} --height {size[1]} "
+            f"--framerate {fps} --bitrate {bitrate} -o - "
+            "| ffmpeg -loglevel error -fflags nobuffer -flags low_delay "
+            "-f h264 -i - -an -c:v copy "
+            f"-f rtsp -rtsp_transport tcp rtsp://127.0.0.1:{self._port}/{self._path}"
+        )
 
-        time.sleep(0.6)
-        if proc.poll() is not None:
+        attempts = 3
+        last_error = ""
+        for attempt in range(1, attempts + 1):
+            try:
+                proc = subprocess.Popen(
+                    ["/bin/bash", "-lc", cmd],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                )
+            except Exception as e:
+                last_error = str(e)
+                break
+
+            stderr_thread = threading.Thread(target=self._drain_stderr, args=(proc,), daemon=True)
+            stderr_thread.start()
+
+            time.sleep(0.9)
+            if proc.poll() is None:
+                with self._lock:
+                    self._proc = proc
+                    self._stderr_thread = stderr_thread
+                    self._transport = "rtsp"
+                return True
+
             with self._lock:
-                self._last_error = self._last_error or "H264 stream process exited immediately"
-            return False
+                last_error = self._last_error or f"H264 stream process exited immediately (attempt {attempt}/{attempts})"
+
+            if attempt < attempts:
+                time.sleep(0.35)
 
         with self._lock:
-            self._proc = proc
-            self._stderr_thread = stderr_thread
-            self._transport = transport
-        return True
+            self._last_error = last_error or "H264 stream process exited immediately"
+        return False
 
     def stop(self):
         with self._lock:
@@ -841,6 +932,222 @@ class H264RtspService:
         }
 
 
+class MediaMtxService:
+    """MediaMTX process manager for WebRTC playback."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._proc = None
+        self._stderr_thread = None
+        self._last_error = ""
+        self._bin = MEDIAMTX_BIN
+        self._rtsp_port = MEDIAMTX_RTSP_PORT
+        self._webrtc_port = MEDIAMTX_WEBRTC_PORT
+        self._path = MEDIAMTX_STREAM_PATH
+        self._config_path = "/tmp/rpi_car_mediamtx.yml"
+        self._resolved_bin = ""
+        self._project_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "mediamtx")
+
+    def _resolve_bin(self):
+        # Allow absolute override via RC_MEDIAMTX_BIN and common install locations.
+        candidates = [
+            self._bin,
+            self._project_bin,
+            "/usr/local/bin/mediamtx",
+            "/usr/bin/mediamtx",
+            "/opt/mediamtx/mediamtx",
+            "/home/pi/mediamtx",
+            "/home/pi/mediamtx/mediamtx",
+        ]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            if os.path.isabs(candidate):
+                if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                    return candidate
+                continue
+            found = shutil.which(candidate)
+            if found:
+                return found
+        return ""
+
+    def _is_port_open(self, port, timeout=0.25):
+        try:
+            with socket.create_connection(("127.0.0.1", int(port)), timeout=timeout):
+                return True
+        except Exception:
+            return False
+
+    def _is_external_running(self):
+        # MediaMTX must expose both RTSP ingest and WebRTC playback ports.
+        return self._is_port_open(self._rtsp_port) and self._is_port_open(self._webrtc_port)
+
+    def _wait_ready(self, timeout_s=2.0):
+        deadline = time.time() + max(0.1, float(timeout_s))
+        while time.time() < deadline:
+            if self._is_external_running():
+                return True
+            time.sleep(0.05)
+        return self._is_external_running()
+
+    @property
+    def running(self):
+        with self._lock:
+            managed_running = self._proc is not None and self._proc.poll() is None
+        if managed_running:
+            return True
+        return self._is_external_running()
+
+    @property
+    def last_error(self):
+        with self._lock:
+            return self._last_error
+
+    def _build_config_text(self, width=1280, height=720, fps=30, bitrate=2500000):
+        return (
+            "logLevel: info\n"
+            f"rtspAddress: :{self._rtsp_port}\n"
+            f"webrtcAddress: :{self._webrtc_port}\n"
+            "hls: no\n"
+            "rtmp: no\n"
+            "srt: no\n"
+            "paths:\n"
+            f"  {self._path}:\n"
+            "    source: rpiCamera\n"
+            f"    rpiCameraWidth: {width}\n"
+            f"    rpiCameraHeight: {height}\n"
+            f"    rpiCameraFPS: {fps}\n"
+            f"    rpiCameraBitrate: {bitrate}\n"
+            "    rpiCameraIDRPeriod: 30\n"
+        )
+
+    def _drain_stderr(self, proc):
+        try:
+            stream = proc.stdout if proc.stdout else proc.stderr
+            if stream is None:
+                return
+            for line in stream:
+                txt = line.strip()
+                if not txt:
+                    continue
+                # Log all MediaMTX output for debugging
+                print(f"📡 [MediaMTX] {txt}")
+                low = txt.lower()
+                if (
+                    "error" in low
+                    or "failed" in low
+                    or "invalid" in low
+                    or "unable" in low
+                    or "refused" in low
+                ):
+                    with self._lock:
+                        self._last_error = txt
+        except Exception:
+            pass
+
+    def start(self, width=1280, height=720, fps=30, bitrate=2500000):
+        with self._lock:
+            if self._proc is not None and self._proc.poll() is None:
+                return True
+            self._last_error = ""
+            self._resolved_bin = ""
+
+        # If MediaMTX is already running (system service / external process),
+        # treat startup as successful.
+        if self._is_external_running():
+            return True
+
+        resolved_bin = self._resolve_bin()
+        if not resolved_bin:
+            with self._lock:
+                self._last_error = (
+                    f"{self._bin} not found and no existing MediaMTX detected "
+                    f"on ports {self._rtsp_port}/{self._webrtc_port}"
+                )
+            return False
+
+        try:
+            with open(self._config_path, "w") as f:
+                f.write(self._build_config_text(width, height, fps, bitrate))
+        except Exception as e:
+            with self._lock:
+                self._last_error = f"config write failed: {e}"
+            return False
+
+        try:
+            proc = subprocess.Popen(
+                [resolved_bin, self._config_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        except Exception as e:
+            with self._lock:
+                self._last_error = str(e)
+            return False
+
+        stderr_thread = threading.Thread(target=self._drain_stderr, args=(proc,), daemon=True)
+        stderr_thread.start()
+
+        # rpiCamera source needs time to init libcamera internally
+        time.sleep(1.5)
+        if proc.poll() is not None:
+            # Another MediaMTX instance may already be bound to the required ports.
+            if self._is_external_running():
+                return True
+            with self._lock:
+                self._last_error = self._last_error or "MediaMTX process exited immediately"
+            return False
+
+        if not self._wait_ready(timeout_s=5.0):
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            with self._lock:
+                self._last_error = self._last_error or "MediaMTX started but ports were not ready"
+            return False
+
+        with self._lock:
+            self._proc = proc
+            self._stderr_thread = stderr_thread
+            self._resolved_bin = resolved_bin
+        return True
+
+    def stop(self):
+        with self._lock:
+            proc = self._proc
+            self._proc = None
+        if proc is None:
+            return
+        try:
+            proc.terminate()
+            proc.wait(timeout=2.0)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def status(self, host):
+        external_running = self._is_external_running()
+        with self._lock:
+            managed_running = self._proc is not None and self._proc.poll() is None
+            err = self._last_error
+            resolved_bin = self._resolved_bin
+        return {
+            "running": managed_running or external_running,
+            "managed_running": managed_running,
+            "external_running": external_running,
+            "bin": resolved_bin or self._bin,
+            "webrtc_url": _camera_webrtc_url(host),
+            "rtsp_ingest_url": f"rtsp://{host}:{self._rtsp_port}/{self._path}",
+            "error": err if not (managed_running or external_running) else "",
+        }
+
+
+_mediamtx_service = MediaMtxService()
 _h264_rtsp_service = H264RtspService()
 
 try:
@@ -853,9 +1160,6 @@ try:
         f"{_init_resolution[0]}x{_init_resolution[1]} @ {_init_fps}fps"
     )
     _start_integrated_camera(CAMERA_DEFAULT_RESOLUTION, _init_fps)
-    if CAMERA_STREAM_BACKEND_DEFAULT == "h264_rtsp":
-        _pause_integrated_camera_for_h264()
-        print("📷 [Camera Init] Stream backend set to h264_rtsp; integrated camera paused")
 except Exception as e:
     CAMERA_AVAILABLE = False
     picam2 = None
@@ -952,8 +1256,11 @@ def _reconfigure_camera(resolution_str, framerate):
     if picam2 is None:
         print(f"❌ [Camera] Cannot reconfigure - picam2 is None")
         return False
-    if "car_state" in globals() and car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT) == "h264_rtsp":
-        print("📷 [Camera] Integrated reconfigure skipped (h264_rtsp backend active)")
+    if (
+        "car_state" in globals()
+        and car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT) == CAMERA_STREAM_BACKEND_DEFAULT
+    ):
+        print("📷 [Camera] Integrated reconfigure skipped (MediaMTX external pipeline active)")
         return True
     _camera_restarting = True
     try:
@@ -984,85 +1291,109 @@ def _reconfigure_camera(resolution_str, framerate):
 
 
 def _apply_stream_backend_switch(new_backend):
-    """Switch between integrated MJPEG and isolated H264 RTSP stream backends."""
-    global _integrated_camera_paused_for_h264
+    """Set stream backend (MediaMTX-only)."""
     backend = str(new_backend or "").strip().lower()
-    if backend not in {"mjpeg", "h264_rtsp"}:
-        return False, f"Unsupported backend '{new_backend}'"
+    if backend and backend != CAMERA_STREAM_BACKEND_DEFAULT:
+        return False, f"Unsupported backend '{new_backend}'. Only '{CAMERA_STREAM_BACKEND_DEFAULT}' is available."
 
-    current = car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT)
-    if backend == current:
-        if backend == "h264_rtsp" and car_state.get("camera_enabled", False) and not _h264_rtsp_service.running:
-            started = _h264_rtsp_service.start(
-                car_state.get("camera_resolution", CAMERA_DEFAULT_RESOLUTION),
-                car_state.get("camera_framerate", CAMERA_FRAMERATE),
-            )
-            _refresh_h264_rtsp_state()
-            if not started:
-                return False, _h264_rtsp_service.last_error or "Failed to start H264 RTSP service"
-        return True, "unchanged"
-
-    if backend == "h264_rtsp":
-        # H264 backend isolates streaming in an external process.
-        with _camera_lock:
-            if VISION_AVAILABLE and vision_system is not None:
-                vision_system.active = False
-                vision_system.stream_enabled = False
-            car_state["user_wants_vision"] = False
-            if car_state.get("narration_enabled"):
-                narration_engine.stop()
-                car_state["narration_enabled"] = False
-                car_state["narration_speaking"] = False
-                _narration_config['enabled'] = False
-                _save_narration_config(_narration_config)
-            _pause_integrated_camera_for_h264()
-
-        if car_state.get("camera_enabled", False):
-            started = _h264_rtsp_service.start(
-                car_state.get("camera_resolution", CAMERA_DEFAULT_RESOLUTION),
-                car_state.get("camera_framerate", CAMERA_FRAMERATE),
-            )
-            if not started:
-                _resume_integrated_camera_from_h264()
-                return False, _h264_rtsp_service.last_error or "Failed to start H264 RTSP service"
-
-        car_state["camera_stream_backend"] = "h264_rtsp"
-        _refresh_h264_rtsp_state()
-        print("📷 [Camera] Stream backend switched to h264_rtsp (isolated process)")
-        return True, "h264_rtsp active"
-
-    # Switching back to integrated MJPEG.
-    _h264_rtsp_service.stop()
-    with _camera_lock:
-        if car_state.get("camera_enabled", False):
-            _resume_integrated_camera_from_h264(force=True)
-        else:
-            # Camera stays off; just clear the paused flag so integrated mode
-            # can be restarted on next camera enable.
-            _integrated_camera_paused_for_h264 = False
-        if VISION_AVAILABLE and vision_system is not None:
-            vision_system.stream_enabled = car_state.get("camera_enabled", False)
+    car_state["camera_stream_backend"] = CAMERA_STREAM_BACKEND_DEFAULT
     if car_state.get("camera_enabled", False):
-        _camera_broadcaster.start()
-    car_state["camera_stream_backend"] = "mjpeg"
-    _refresh_h264_rtsp_state()
-    print("📷 [Camera] Stream backend switched to mjpeg (integrated)")
-    return True, "mjpeg active"
+        return _start_mediamtx_pipeline()
+    _refresh_mediamtx_state()
+    return True, "mediamtx_webrtc active"
 
 
-def _refresh_h264_rtsp_state():
-    """Mirror RTSP process status in car_state for telemetry/UI."""
-    running = _h264_rtsp_service.running
-    car_state["camera_h264_rtsp_running"] = running
+def _refresh_mediamtx_state():
+    """Mirror MediaMTX + RTSP publisher status in car_state for telemetry/UI."""
+    h264_running = _h264_rtsp_service.running
+    mediamtx_running = _mediamtx_service.running
     host = "127.0.0.1"
-    if running:
-        try:
-            host = get_local_ip()
-        except Exception:
-            pass
-    status = _h264_rtsp_service.status(host)
-    car_state["camera_h264_rtsp_transport"] = status.get("transport", "rtsp")
-    car_state["camera_h264_rtsp_url"] = status["url"] if running else ""
+    try:
+        host = get_local_ip()
+    except Exception:
+        pass
+    h264_status = _h264_rtsp_service.status(host)
+    mediamtx_status = _mediamtx_service.status(host)
+    car_state["camera_stream_backend"] = CAMERA_STREAM_BACKEND_DEFAULT
+    car_state["camera_h264_rtsp_transport"] = h264_status.get("transport", "rtsp")
+    car_state["camera_h264_rtsp_running"] = h264_running
+    car_state["camera_h264_rtsp_url"] = h264_status["url"] if h264_running else ""
+    car_state["camera_mediamtx_running"] = mediamtx_status["running"]
+    car_state["camera_mediamtx_webrtc_url"] = mediamtx_status["webrtc_url"]
+    car_state["camera_mediamtx_rtsp_ingest_url"] = mediamtx_status["rtsp_ingest_url"]
+    car_state["camera_mediamtx_error"] = mediamtx_status["error"] or h264_status.get("error", "")
+
+
+def _start_mediamtx_pipeline():
+    """Start MediaMTX with native rpiCamera source (no external publisher needed)."""
+    with _camera_lock:
+        if VISION_AVAILABLE and vision_system is not None:
+            vision_system.active = False
+            vision_system.stream_enabled = False
+        car_state["user_wants_vision"] = False
+        if car_state.get("narration_enabled"):
+            narration_engine.stop()
+            car_state["narration_enabled"] = False
+            car_state["narration_speaking"] = False
+            _narration_config['enabled'] = False
+            _save_narration_config(_narration_config)
+        # Release integrated camera so MediaMTX rpiCamera source can access it
+        _pause_integrated_camera_for_h264()
+
+    print("📷 [MediaMTX] Starting native rpiCamera pipeline...")
+
+    # Compute publish profile for MediaMTX native rpiCamera source
+    profile = _camera_publish_profile(
+        car_state.get("camera_resolution", CAMERA_DEFAULT_RESOLUTION),
+        car_state.get("camera_framerate", CAMERA_FRAMERATE),
+    )
+    w, h = profile["size"]
+    fps = profile["fps"]
+    bitrate = _h264_bitrate_for_resolution(profile["resolution"], fps)
+    print(f"📷 [MediaMTX] Profile: {w}x{h} @ {fps}fps, bitrate={bitrate}")
+
+    if not _mediamtx_service.start(width=w, height=h, fps=fps, bitrate=bitrate):
+        err = _mediamtx_service.last_error or "Failed to start MediaMTX"
+        print(f"❌ [MediaMTX] Start failed: {err}")
+        _resume_integrated_camera_from_h264(force=True)
+        _refresh_mediamtx_state()
+        return False, err
+
+    print("📷 [MediaMTX] Process started, waiting for stream...")
+
+    if not _wait_for_camera_webrtc_stream(timeout_s=10.0):
+        err_detail = _mediamtx_service.last_error
+        print(f"❌ [MediaMTX] Stream not available. last_error={err_detail}")
+        _mediamtx_service.stop()
+        _resume_integrated_camera_from_h264(force=True)
+        _refresh_mediamtx_state()
+        return False, (
+            "MediaMTX stream path never became available "
+            f"({MEDIAMTX_STREAM_PATH}); rpiCamera source may have failed"
+            + (f": {err_detail}" if err_detail else "")
+        )
+
+    print("✅ [MediaMTX] rpiCamera stream is live!")
+    car_state["camera_stream_backend"] = CAMERA_STREAM_BACKEND_DEFAULT
+    _refresh_mediamtx_state()
+    return True, "mediamtx_webrtc active"
+
+
+def _stop_mediamtx_pipeline():
+    """Stop MediaMTX process (native rpiCamera source stops automatically)."""
+    _h264_rtsp_service.stop()  # safety: stop if it was somehow running
+    _mediamtx_service.stop()
+    car_state["user_wants_vision"] = False
+    if VISION_AVAILABLE and vision_system is not None:
+        vision_system.active = False
+        vision_system.stream_enabled = False
+    if car_state.get("narration_enabled"):
+        narration_engine.stop()
+        car_state["narration_enabled"] = False
+        car_state["narration_speaking"] = False
+        _narration_config['enabled'] = False
+        _save_narration_config(_narration_config)
+    _refresh_mediamtx_state()
 
 class CameraFrameBroadcaster:
     """Shared camera frame broadcaster — one producer thread encodes frames,
@@ -1114,7 +1445,7 @@ class CameraFrameBroadcaster:
         while self._running:
             try:
                 # External isolated backend owns the stream path.
-                if car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT) != "mjpeg":
+                if car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT) == CAMERA_STREAM_BACKEND_DEFAULT:
                     car_state["camera_actual_fps"] = 0.0
                     car_state["camera_effective_stream_fps_limit"] = 0
                     car_state["camera_effective_jpeg_quality"] = 0
@@ -1339,7 +1670,7 @@ def generate_h264_fmp4():
                 _narration_config['enabled'] = False
                 _save_narration_config(_narration_config)
             _pause_integrated_camera_for_h264()
-            _refresh_h264_rtsp_state()
+            _refresh_mediamtx_state()
 
     cmd = _build_h264_fmp4_command()
     proc = None
@@ -1376,9 +1707,9 @@ def generate_h264_fmp4():
                 if VISION_AVAILABLE and vision_system is not None:
                     vision_system.stream_enabled = (
                         car_state.get("camera_enabled", False)
-                        and car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT) == "mjpeg"
+                        and car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT) != CAMERA_STREAM_BACKEND_DEFAULT
                     )
-                _refresh_h264_rtsp_state()
+                _refresh_mediamtx_state()
 
 # ==========================================
 # 🚗 HARDWARE SETUP
@@ -1527,10 +1858,14 @@ car_state = {
     "camera_effective_stream_fps_limit": CAMERA_MAX_STREAM_FPS,  # Adaptive effective stream FPS cap
     "camera_effective_jpeg_quality": CAMERA_JPEG_QUALITY,        # Adaptive effective JPEG quality
     "camera_adaptive_overloaded": False,     # True when adaptive throttling is active
-    "camera_stream_backend": CAMERA_STREAM_BACKEND_DEFAULT,  # "mjpeg" or "h264_rtsp"
-    "camera_h264_rtsp_url": "",              # External H264 RTSP URL
-    "camera_h264_rtsp_running": False,       # True when external H264 RTSP service is running
-    "camera_h264_rtsp_transport": "rtsp",    # "rtsp" or "tcp_raw" fallback mode
+    "camera_stream_backend": CAMERA_STREAM_BACKEND_DEFAULT,  # "mediamtx_webrtc" (single backend)
+    "camera_h264_rtsp_url": "",              # Local RTSP publish URL into MediaMTX
+    "camera_h264_rtsp_running": False,       # True when external H264 publisher is running
+    "camera_h264_rtsp_transport": "rtsp",    # Publisher transport
+    "camera_mediamtx_running": False,        # True when MediaMTX process is running
+    "camera_mediamtx_webrtc_url": "",        # WebRTC URL exposed by MediaMTX
+    "camera_mediamtx_rtsp_ingest_url": "",   # RTSP ingest URL in MediaMTX
+    "camera_mediamtx_error": "",             # Last MediaMTX/publisher error
     # 🧭 MPU6050 Gyro telemetry
     "gyro_z": 0.0,                     # Current Z-axis yaw rate (°/s)
     "pid_correction": 0.0,             # Current PID heading correction
@@ -1558,6 +1893,8 @@ car_state = {
     "narration_interval": _narration_config.get('interval', 8),
     "narration_speaking": False,  # True when TTS is playing on client
 }
+
+_refresh_mediamtx_state()
 
 # ==========================================
 # 🎵 AIRPLAY NOW-PLAYING METADATA
@@ -2675,48 +3012,52 @@ def serve_root_files(filename):
 # --- CAMERA VIDEO FEED ---
 @app.route('/video_feed')
 def video_feed():
-    """MJPEG streaming route for live camera feed."""
-    if car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT) != "mjpeg":
-        return jsonify({
-            "error": "Integrated MJPEG backend is disabled",
-            "stream_backend": car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT),
-            "h264_rtsp_url": car_state.get("camera_h264_rtsp_url", ""),
-        }), 409
-    if not CAMERA_AVAILABLE:
-        return "Camera not available", 503
-    return Response(generate_camera_frames(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    """Legacy endpoint retained for compatibility; MediaMTX WebRTC is required."""
+    return jsonify({
+        "status": "error",
+        "message": "MJPEG endpoint disabled. Use MediaMTX WebRTC URL.",
+        "backend": CAMERA_STREAM_BACKEND_DEFAULT,
+        "webrtc_url": car_state.get("camera_mediamtx_webrtc_url", ""),
+    }), 410
 
 
 @app.route('/video_feed_h264')
 def video_feed_h264():
-    """Hardware H264 fragmented MP4 stream (isolated subprocess)."""
-    if not car_state.get("camera_enabled", False):
-        return "Camera is disabled", 409
-    if _h264_rtsp_service.running:
-        return jsonify({
-            "error": "H264 RTSP backend is active; stop it before using HTTP H264 feed.",
-            "h264_rtsp_url": car_state.get("camera_h264_rtsp_url", ""),
-        }), 409
-    if shutil.which("rpicam-vid") is None or shutil.which("ffmpeg") is None:
-        return "H264 stream dependencies unavailable", 503
-    headers = {
-        "Cache-Control": "no-cache, no-store, must-revalidate",
-        "Pragma": "no-cache",
-        "Expires": "0",
-    }
-    return Response(generate_h264_fmp4(), mimetype='video/mp4', headers=headers)
+    """Legacy endpoint retained for compatibility; MediaMTX WebRTC is required."""
+    return jsonify({
+        "status": "error",
+        "message": "HTTP H264 endpoint disabled. Use MediaMTX WebRTC URL.",
+        "backend": CAMERA_STREAM_BACKEND_DEFAULT,
+        "webrtc_url": car_state.get("camera_mediamtx_webrtc_url", ""),
+    }), 410
+
+
+@app.route('/api/camera/webrtc/status')
+def camera_webrtc_status():
+    _refresh_mediamtx_state()
+    return jsonify({
+        "backend": car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT),
+        "camera_enabled": car_state.get("camera_enabled", False),
+        "mediamtx_running": car_state.get("camera_mediamtx_running", False),
+        "webrtc_url": car_state.get("camera_mediamtx_webrtc_url", ""),
+        "rtsp_ingest_url": car_state.get("camera_mediamtx_rtsp_ingest_url", ""),
+        "rtsp_publisher_running": car_state.get("camera_h264_rtsp_running", False),
+        "error": car_state.get("camera_mediamtx_error", ""),
+    })
 
 
 @app.route('/api/camera/rtsp/status')
 def camera_rtsp_status():
-    _refresh_h264_rtsp_state()
+    """Legacy alias for camera stream status."""
+    _refresh_mediamtx_state()
     return jsonify({
         "running": car_state["camera_h264_rtsp_running"],
         "url": car_state["camera_h264_rtsp_url"],
         "transport": car_state.get("camera_h264_rtsp_transport", "rtsp"),
         "backend": car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT),
-        "error": _h264_rtsp_service.last_error,
+        "error": car_state.get("camera_mediamtx_error", ""),
+        "mediamtx_running": car_state.get("camera_mediamtx_running", False),
+        "webrtc_url": car_state.get("camera_mediamtx_webrtc_url", ""),
     })
 
 
@@ -2724,40 +3065,42 @@ def camera_rtsp_status():
 def camera_rtsp_start():
     if not car_state.get("camera_enabled", False):
         car_state["camera_enabled"] = True
-    ok, msg = _apply_stream_backend_switch("h264_rtsp")
+    ok, msg = _start_mediamtx_pipeline()
     if not ok:
+        car_state["camera_enabled"] = False
         return jsonify({"status": "error", "message": msg}), 500
-    _refresh_h264_rtsp_state()
+    _refresh_mediamtx_state()
     return jsonify({
         "status": "ok",
         "running": car_state["camera_h264_rtsp_running"],
         "url": car_state["camera_h264_rtsp_url"],
         "transport": car_state.get("camera_h264_rtsp_transport", "rtsp"),
         "backend": car_state["camera_stream_backend"],
+        "mediamtx_running": car_state.get("camera_mediamtx_running", False),
+        "webrtc_url": car_state.get("camera_mediamtx_webrtc_url", ""),
     })
 
 
 @app.route('/api/camera/rtsp/stop', methods=['POST'])
 def camera_rtsp_stop():
-    ok, msg = _apply_stream_backend_switch("mjpeg")
-    if not ok:
-        return jsonify({"status": "error", "message": msg}), 500
-    _refresh_h264_rtsp_state()
+    car_state["camera_enabled"] = False
+    _stop_mediamtx_pipeline()
+    _refresh_mediamtx_state()
     return jsonify({
         "status": "ok",
         "running": car_state["camera_h264_rtsp_running"],
         "url": car_state["camera_h264_rtsp_url"],
         "transport": car_state.get("camera_h264_rtsp_transport", "rtsp"),
         "backend": car_state["camera_stream_backend"],
+        "mediamtx_running": car_state.get("camera_mediamtx_running", False),
+        "webrtc_url": car_state.get("camera_mediamtx_webrtc_url", ""),
     })
 
 # Print server info on startup
 print(f"🌐 Server IP Address: {get_local_ip()}")
 print(f"📱 Mobile devices can connect via: http://{get_local_ip()}:5000")
-if CAMERA_AVAILABLE:
-    print(f"📷 Camera feed available at: http://{get_local_ip()}:5000/video_feed")
-print(f"📷 H264 feed endpoint: http://{get_local_ip()}:5000/video_feed_h264")
-print(f"📡 H264 RTSP status endpoint: http://{get_local_ip()}:5000/api/camera/rtsp/status")
+print(f"📺 MediaMTX WebRTC status endpoint: http://{get_local_ip()}:5000/api/camera/webrtc/status")
+print(f"📺 MediaMTX WebRTC stream URL: { _camera_webrtc_url(get_local_ip()) }")
 
 # --- CONTROLS ---
 
@@ -3081,7 +3424,7 @@ def on_connect():
     })
     # Send camera specs for dynamic resolution dropdown
     emit('camera_specs_sync', camera_specs)
-    _refresh_h264_rtsp_state()
+    _refresh_mediamtx_state()
     emit('camera_config_response', {
         'status': 'ok',
         'updated': [],
@@ -3090,6 +3433,12 @@ def on_connect():
             'jpeg_quality': car_state["camera_jpeg_quality"],
             'framerate': car_state["camera_framerate"],
             'stream_backend': car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT),
+        },
+        'mediamtx': {
+            'running': car_state.get("camera_mediamtx_running", False),
+            'webrtc_url': car_state.get("camera_mediamtx_webrtc_url", ""),
+            'rtsp_ingest_url': car_state.get("camera_mediamtx_rtsp_ingest_url", ""),
+            'error': car_state.get("camera_mediamtx_error", ""),
         },
         'h264_rtsp': {
             'running': car_state["camera_h264_rtsp_running"],
@@ -3463,43 +3812,32 @@ def on_mpu6050_toggle(data):
 def on_camera_toggle(data):
     """Toggle camera and all vision-related functions on/off."""
     car_state["camera_enabled"] = not car_state["camera_enabled"]
-    backend = car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT)
+    backend = CAMERA_STREAM_BACKEND_DEFAULT
+    car_state["camera_stream_backend"] = backend
     state = '✅ ON' if car_state["camera_enabled"] else '❌ OFF'
     print(f"\n⚙️ [UI Control] 📷 CAMERA: {state} (backend={backend})")
 
-    if backend == "h264_rtsp":
-        if car_state["camera_enabled"]:
-            ok, msg = _apply_stream_backend_switch("h264_rtsp")
-            if not ok:
-                car_state["camera_enabled"] = False
-                print(f"❌ [H264 RTSP] Failed to start: {msg}")
-                emit('camera_response', {
-                    'status': 'error',
-                    'camera_enabled': False,
-                    'backend': backend,
-                    'message': f'H264 RTSP failed: {msg}'
-                })
-                return
-        else:
-            _h264_rtsp_service.stop()
-            _refresh_h264_rtsp_state()
+    if car_state["camera_enabled"]:
+        ok, msg = _start_mediamtx_pipeline()
+        if not ok:
+            car_state["camera_enabled"] = False
+            print(f"❌ [MediaMTX] Failed to start pipeline: {msg}")
+            emit('camera_response', {
+                'status': 'error',
+                'camera_enabled': False,
+                'backend': backend,
+                'message': f'MediaMTX pipeline failed: {msg}',
+            })
+            return
     else:
-        if car_state["camera_enabled"]:
-            with _camera_lock:
-                if not CAMERA_AVAILABLE and picam2 is not None:
-                    _start_integrated_camera(car_state["camera_resolution"], car_state["camera_framerate"])
-            _camera_broadcaster.start()
-            if VISION_AVAILABLE and vision_system is not None:
-                vision_system.stream_enabled = True
-        else:
-            if VISION_AVAILABLE and vision_system is not None:
-                vision_system.stream_enabled = False
+        _stop_mediamtx_pipeline()
 
     # When camera is disabled, turn off vision and narration state.
     if not car_state["camera_enabled"]:
         car_state["user_wants_vision"] = False
         if VISION_AVAILABLE and vision_system is not None:
             vision_system.active = False
+            vision_system.stream_enabled = False
             print(f"📷 VISION: Disabled (camera off)")
         # Auto-disable narration when camera is off
         if car_state["narration_enabled"]:
@@ -3511,7 +3849,7 @@ def on_camera_toggle(data):
             print(f"\U0001f399\ufe0f NARRATION: Disabled (camera off)")
             emit('narration_toggle_response', {'status': 'ok', 'enabled': False})
 
-    _refresh_h264_rtsp_state()
+    _refresh_mediamtx_state()
     emit('camera_response', {
         'status': 'ok',
         'camera_enabled': car_state["camera_enabled"],
@@ -3519,6 +3857,9 @@ def on_camera_toggle(data):
         'h264_rtsp_running': car_state["camera_h264_rtsp_running"],
         'h264_rtsp_url': car_state["camera_h264_rtsp_url"],
         'h264_rtsp_transport': car_state.get("camera_h264_rtsp_transport", "rtsp"),
+        'mediamtx_running': car_state.get("camera_mediamtx_running", False),
+        'mediamtx_webrtc_url': car_state.get("camera_mediamtx_webrtc_url", ""),
+        'mediamtx_error': car_state.get("camera_mediamtx_error", ""),
     })
 
 @socketio.on('vision_toggle')
@@ -3529,22 +3870,17 @@ def on_vision_toggle(data):
     if not car_state["camera_enabled"]:
         emit('vision_response', {'status': 'error', 'message': 'Camera must be enabled first. Please enable the camera before activating vision detection.'})
         return
-    if car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT) == "h264_rtsp":
-        emit('vision_response', {
-            'status': 'error',
-            'message': 'Vision is unavailable while isolated H264 RTSP backend is active.'
-        })
-        return
-    if not VISION_AVAILABLE or vision_system is None:
-        emit('vision_response', {'status': 'error', 'message': 'Vision system not available'})
-        return
-    car_state["user_wants_vision"] = not car_state["user_wants_vision"]
-    # If user is disabling CV, immediately deactivate vision system
-    if not car_state["user_wants_vision"]:
+    # MediaMTX-only mode uses an external camera process, so integrated vision
+    # capture is intentionally unavailable in this mode.
+    car_state["user_wants_vision"] = False
+    if VISION_AVAILABLE and vision_system is not None:
         vision_system.active = False
-    state = '✅ ON' if car_state["user_wants_vision"] else '❌ OFF'
-    print(f"\n⚙️ [UI Control] 📷 VISION: {state}")
-    emit('vision_response', {'status': 'ok', 'vision_active': car_state["user_wants_vision"]})
+        vision_system.stream_enabled = False
+    emit('vision_response', {
+        'status': 'error',
+        'vision_active': False,
+        'message': 'Vision is unavailable in MediaMTX-only camera mode.',
+    })
 
 @socketio.on('camera_config_update')
 def on_camera_config_update(data):
@@ -3557,7 +3893,6 @@ def on_camera_config_update(data):
     needs_restart = False
     old_resolution = car_state["camera_resolution"]
     old_framerate = car_state["camera_framerate"]
-    old_backend = car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT)
     
     # Update JPEG quality (applied immediately - no restart needed)
     if 'jpeg_quality' in data:
@@ -3574,13 +3909,17 @@ def on_camera_config_update(data):
         normalized = _normalize_resolution(resolution)
         parsed = _parse_resolution(normalized)
         if parsed is not None:
-            if normalized != old_resolution:
+            publish_profile = _camera_publish_profile(normalized, car_state.get("camera_framerate", old_framerate))
+            effective_resolution = publish_profile["resolution"]
+            if effective_resolution != normalized:
+                print(f"   ⚠️ Resolution '{normalized}' reduced to '{effective_resolution}' for MediaMTX stability")
+            if effective_resolution != old_resolution:
                 needs_restart = True
-                print(f"   📷 Resolution change: '{old_resolution}' → '{normalized}' (input: '{resolution}', parsed: {parsed[0]}x{parsed[1]})")
+                print(f"   📷 Resolution change: '{old_resolution}' → '{effective_resolution}' (input: '{resolution}', parsed: {parsed[0]}x{parsed[1]})")
             else:
-                print(f"   📷 Resolution unchanged: '{normalized}'")
-            car_state["camera_resolution"] = normalized
-            updated.append(f"resolution={normalized}")
+                print(f"   📷 Resolution unchanged: '{effective_resolution}'")
+            car_state["camera_resolution"] = effective_resolution
+            updated.append(f"resolution={effective_resolution}")
         else:
             print(f"   ❌ Invalid resolution rejected: '{resolution}' (supported modes: {camera_specs.get('supported_modes', [])})")
     
@@ -3593,6 +3932,10 @@ def on_camera_config_update(data):
             print(f"   ❌ Invalid framerate rejected: '{requested_framerate}' (must be 1-120)")
         else:
             framerate = _sanitize_camera_framerate(requested_framerate_int, old_framerate)
+            max_publish_fps = max(1, int(CAMERA_PUBLISH_MAX_FPS))
+            if framerate > max_publish_fps:
+                print(f"   ⚠️ Framerate '{framerate}' reduced to {max_publish_fps} for MediaMTX stability")
+                framerate = max_publish_fps
             if framerate != old_framerate:
                 needs_restart = True
             car_state["camera_framerate"] = framerate
@@ -3606,43 +3949,58 @@ def on_camera_config_update(data):
     backend_message = ""
     if 'stream_backend' in data:
         requested_backend = str(data.get('stream_backend', '')).strip().lower()
-        if requested_backend in {"mjpeg", "h264_rtsp"}:
-            if requested_backend != old_backend:
-                backend_switch_ok, backend_message = _apply_stream_backend_switch(requested_backend)
-                if backend_switch_ok:
-                    updated.append(f"stream_backend={requested_backend}")
-                    print(f"   ✅ Stream backend set to {requested_backend}")
-                else:
-                    print(f"   ❌ Stream backend switch failed: {backend_message}")
-            else:
-                print(f"   📷 Stream backend unchanged: '{requested_backend}'")
+        if requested_backend in {"", CAMERA_STREAM_BACKEND_DEFAULT}:
+            car_state["camera_stream_backend"] = CAMERA_STREAM_BACKEND_DEFAULT
+            print(f"   📷 Stream backend fixed to '{CAMERA_STREAM_BACKEND_DEFAULT}'")
         else:
             backend_switch_ok = False
-            backend_message = f"Invalid stream_backend '{requested_backend}'"
+            backend_message = (
+                f"Unsupported stream_backend '{requested_backend}'. "
+                f"Only '{CAMERA_STREAM_BACKEND_DEFAULT}' is available."
+            )
             print(f"   ❌ {backend_message}")
     
-    # Live reconfigure camera if resolution or framerate changed
+    # Restart external publisher if resolution or framerate changed while camera is on.
     restart_ok = True
-    active_backend = car_state.get("camera_stream_backend", old_backend)
-    if needs_restart and active_backend == "mjpeg" and CAMERA_AVAILABLE and picam2 is not None:
-        print(f"   🔄 Reconfiguring camera (resolution={car_state['camera_resolution']}, fps={car_state['camera_framerate']})...")
-        with _camera_lock:
-            restart_ok = _reconfigure_camera(
-                car_state["camera_resolution"],
-                car_state["camera_framerate"]
-            )
-            if not restart_ok:
-                # Revert to previous settings on failure
+    if needs_restart and car_state.get("camera_enabled", False):
+        print(f"   🔄 Restarting MediaMTX publisher with updated camera settings...")
+        if not _mediamtx_service.running:
+            if not _mediamtx_service.start():
+                restart_ok = False
                 car_state["camera_resolution"] = old_resolution
                 car_state["camera_framerate"] = old_framerate
+                print(f"   ❌ MediaMTX restart failed: {_mediamtx_service.last_error}")
                 updated.append("restart_failed (reverted)")
-                print(f"   ❌ Camera reconfiguration FAILED, reverted to {old_resolution}")
-            else:
-                print(f"   ✅ Camera reconfiguration SUCCESS")
-    elif needs_restart and active_backend == "mjpeg":
-        print(f"   ⚠️ Camera restart needed but camera not available (CAMERA_AVAILABLE={CAMERA_AVAILABLE})")
-    elif needs_restart and active_backend == "h264_rtsp" and car_state.get("camera_enabled", False):
-        # Restart isolated H264 service to apply new size/fps.
+                _refresh_mediamtx_state()
+                _save_camera_config({
+                    'resolution': car_state["camera_resolution"],
+                    'jpeg_quality': car_state["camera_jpeg_quality"],
+                    'framerate': car_state["camera_framerate"],
+                    'stream_backend': car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT),
+                })
+                emit('camera_config_response', {
+                    'status': 'error',
+                    'updated': updated,
+                    'message': _mediamtx_service.last_error or 'Failed to restart MediaMTX',
+                    'current_config': {
+                        'resolution': car_state["camera_resolution"],
+                        'jpeg_quality': car_state["camera_jpeg_quality"],
+                        'framerate': car_state["camera_framerate"],
+                        'stream_backend': car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT),
+                    },
+                    'mediamtx': {
+                        'running': car_state.get("camera_mediamtx_running", False),
+                        'webrtc_url': car_state.get("camera_mediamtx_webrtc_url", ""),
+                        'rtsp_ingest_url': car_state.get("camera_mediamtx_rtsp_ingest_url", ""),
+                        'error': car_state.get("camera_mediamtx_error", ""),
+                    },
+                    'h264_rtsp': {
+                        'running': car_state["camera_h264_rtsp_running"],
+                        'url': car_state["camera_h264_rtsp_url"],
+                        'transport': car_state.get("camera_h264_rtsp_transport", "rtsp"),
+                    },
+                })
+                return
         _h264_rtsp_service.stop()
         started = _h264_rtsp_service.start(
             car_state["camera_resolution"],
@@ -3650,10 +4008,15 @@ def on_camera_config_update(data):
         )
         restart_ok = bool(started)
         if restart_ok:
-            print("   ✅ H264 RTSP service restarted with new camera settings")
+            print("   ✅ H264 publisher restarted with new camera settings")
         else:
-            print(f"   ❌ H264 RTSP restart failed: {_h264_rtsp_service.last_error}")
-        _refresh_h264_rtsp_state()
+            car_state["camera_resolution"] = old_resolution
+            car_state["camera_framerate"] = old_framerate
+            print(f"   ❌ H264 publisher restart failed: {_h264_rtsp_service.last_error}")
+            updated.append("restart_failed (reverted)")
+        _refresh_mediamtx_state()
+    elif needs_restart:
+        print("   ℹ️ Camera settings saved; pipeline restart will occur when camera is enabled")
 
     # Persist camera config to disk
     _save_camera_config({
@@ -3663,7 +4026,7 @@ def on_camera_config_update(data):
         'stream_backend': car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT),
     })
 
-    _refresh_h264_rtsp_state()
+    _refresh_mediamtx_state()
     result_status = 'ok' if (restart_ok and backend_switch_ok) else 'partial'
     if not backend_switch_ok and not restart_ok:
         result_status = 'error'
@@ -3678,6 +4041,12 @@ def on_camera_config_update(data):
             'framerate': car_state["camera_framerate"],
             'stream_backend': car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT),
         },
+        'mediamtx': {
+            'running': car_state.get("camera_mediamtx_running", False),
+            'webrtc_url': car_state.get("camera_mediamtx_webrtc_url", ""),
+            'rtsp_ingest_url': car_state.get("camera_mediamtx_rtsp_ingest_url", ""),
+            'error': car_state.get("camera_mediamtx_error", ""),
+        },
         'h264_rtsp': {
             'running': car_state["camera_h264_rtsp_running"],
             'url': car_state["camera_h264_rtsp_url"],
@@ -3688,7 +4057,7 @@ def on_camera_config_update(data):
 
 @socketio.on('camera_stream_backend_update')
 def on_camera_stream_backend_update(data):
-    """Switch stream backend between integrated MJPEG and isolated H264 RTSP."""
+    """Set stream backend (MediaMTX-only)."""
     backend = str((data or {}).get('backend', '')).strip().lower()
     ok, msg = _apply_stream_backend_switch(backend)
     _save_camera_config({
@@ -3697,11 +4066,17 @@ def on_camera_stream_backend_update(data):
         'framerate': car_state["camera_framerate"],
         'stream_backend': car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT),
     })
-    _refresh_h264_rtsp_state()
+    _refresh_mediamtx_state()
     emit('camera_stream_backend_response', {
         'status': 'ok' if ok else 'error',
         'backend': car_state.get("camera_stream_backend", CAMERA_STREAM_BACKEND_DEFAULT),
         'message': msg,
+        'mediamtx': {
+            'running': car_state.get("camera_mediamtx_running", False),
+            'webrtc_url': car_state.get("camera_mediamtx_webrtc_url", ""),
+            'rtsp_ingest_url': car_state.get("camera_mediamtx_rtsp_ingest_url", ""),
+            'error': car_state.get("camera_mediamtx_error", ""),
+        },
         'h264_rtsp': {
             'running': car_state["camera_h264_rtsp_running"],
             'url': car_state["camera_h264_rtsp_url"],
@@ -3899,6 +4274,13 @@ def on_narration_toggle(data):
         if not car_state.get('camera_enabled'):
             emit('narration_toggle_response', {'status': 'error', 'message': 'Camera must be enabled first', 'enabled': False})
             return
+        if car_state.get('camera_stream_backend', CAMERA_STREAM_BACKEND_DEFAULT) == CAMERA_STREAM_BACKEND_DEFAULT:
+            emit('narration_toggle_response', {
+                'status': 'error',
+                'message': 'Image narration is unavailable in MediaMTX-only camera mode.',
+                'enabled': False
+            })
+            return
         
         # Configure and start
         narration_engine.configure(
@@ -3948,6 +4330,12 @@ def on_narration_analyze_once(data):
         return
     if not car_state.get('camera_enabled'):
         emit('narration_analyze_once_response', {'status': 'error', 'message': 'Camera must be enabled first'})
+        return
+    if car_state.get('camera_stream_backend', CAMERA_STREAM_BACKEND_DEFAULT) == CAMERA_STREAM_BACKEND_DEFAULT:
+        emit('narration_analyze_once_response', {
+            'status': 'error',
+            'message': 'Image analysis is unavailable in MediaMTX-only camera mode.'
+        })
         return
 
     def analyze_once_async():
@@ -4477,18 +4865,17 @@ encoder_thread = threading.Thread(target=encoder_and_power_thread, daemon=True)
 encoder_thread.start()
 print("🔄 [Encoder] ✅ Encoder + power telemetry thread started (200ms interval)")
 
-# Start camera frame broadcaster (single producer, multi-consumer)
-if CAMERA_AVAILABLE:
-    _camera_broadcaster.start()
-
 # Telemetry broadcast thread
 def telemetry_broadcast():
     """Broadcast telemetry data to all connected clients at 20Hz"""
     while True:
         try:
             pwm = car_state["current_pwm"]
-            if car_state.get("camera_h264_rtsp_running") and not _h264_rtsp_service.running:
-                _refresh_h264_rtsp_state()
+            if (
+                car_state.get("camera_h264_rtsp_running") != _h264_rtsp_service.running
+                or car_state.get("camera_mediamtx_running") != _mediamtx_service.running
+            ):
+                _refresh_mediamtx_state()
             
             # Use real encoder data when available, fall back to PWM estimates
             if car_state["encoder_available"]:
@@ -4572,6 +4959,10 @@ def telemetry_broadcast():
                 "camera_h264_rtsp_running": car_state["camera_h264_rtsp_running"],
                 "camera_h264_rtsp_url": car_state["camera_h264_rtsp_url"],
                 "camera_h264_rtsp_transport": car_state.get("camera_h264_rtsp_transport", "rtsp"),
+                "camera_mediamtx_running": car_state.get("camera_mediamtx_running", False),
+                "camera_mediamtx_webrtc_url": car_state.get("camera_mediamtx_webrtc_url", ""),
+                "camera_mediamtx_rtsp_ingest_url": car_state.get("camera_mediamtx_rtsp_ingest_url", ""),
+                "camera_mediamtx_error": car_state.get("camera_mediamtx_error", ""),
                 # 🎙️ Narration telemetry
                 "narration_enabled": car_state["narration_enabled"],
                 "narration_speaking": car_state["narration_speaking"],
@@ -4863,6 +5254,7 @@ if __name__ == "__main__":
         # Safety cleanup — car_system.cleanup() stops PWMs + releases GPIO
         _camera_broadcaster.stop()
         _h264_rtsp_service.stop()
+        _mediamtx_service.stop()
         car_audio.shutdown()
         narration_engine.stop()
         autopilot.stop()
