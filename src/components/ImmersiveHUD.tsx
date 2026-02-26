@@ -2,6 +2,7 @@ import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { X, Wifi, Zap, Power, VideoOff, Camera, Mic } from "lucide-react";
 import { useGameFeedback } from "@/hooks/useGameFeedback";
 import { useTouchTracking } from "@/hooks/useTouchTracking";
+import { IrisOverlay, useIrisAnimation } from "@/components/ui/iris-overlay";
 import type { SpeedUnit } from "@/components/cockpit/Speedometer";
 
 const SPEED_UNIT_LABELS: Record<SpeedUnit, string> = {
@@ -96,6 +97,9 @@ export const ImmersiveHUD = ({
   const { triggerHaptic, playSound } = useGameFeedback();
   const [steeringDirection, setSteeringDirection] = useState<'left' | 'right' | null>(null);
   const [feedViewerKey, setFeedViewerKey] = useState(0);
+
+  /* ---- Iris lens animation ---- */
+  const irisPhase = useIrisAnimation(isCameraEnabled ?? false);
   
   // Progressive steering constants
   const STEER_INCREMENT = 5;       // degrees per tick
@@ -135,7 +139,7 @@ export const ImmersiveHUD = ({
   const rpm = Math.min(100, (speed / 100) * 80 + (throttle ? 20 : 0));
   const effectiveViewerUrl = useMemo(() => {
     if (!streamUrl) return undefined;
-    return `${streamUrl}${streamUrl.includes('?') ? '&' : '?'}autoplay=1&muted=1`;
+    return `${streamUrl}${streamUrl.includes('?') ? '&' : '?'}autoplay=1&muted=1&controls=0&playsinline=1&disablepictureinpicture=1`;
   }, [streamUrl]);
   const isRedline = rpm > 85;
 
@@ -314,13 +318,16 @@ export const ImmersiveHUD = ({
           </div>
         ) : effectiveViewerUrl ? (
           <>
+            {/* Iris lens animation overlay */}
+            <IrisOverlay phase={irisPhase} />
+
             {showStream && (
               <iframe
                 key={feedViewerKey}
                 src={effectiveViewerUrl}
                 title="Live Camera Feed"
-                className="w-full h-full object-cover"
-                allow="autoplay; fullscreen; picture-in-picture"
+                className="w-full h-full border-0 pointer-events-none"
+                allow="autoplay; picture-in-picture"
                 sandbox="allow-scripts allow-same-origin allow-forms allow-pointer-lock"
               />
             )}

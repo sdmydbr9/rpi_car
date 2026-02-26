@@ -1,10 +1,12 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { Video, VideoOff, Mic, Sparkles, Loader2 } from "lucide-react";
+import { IrisOverlay, useIrisAnimation } from "@/components/ui/iris-overlay";
 
 interface CameraFeedProps {
   isConnected: boolean;
   streamUrl?: string;
   isCameraEnabled?: boolean;
+  cameraResolution?: string;
   onToggleCamera?: () => void;
   narrationEnabled?: boolean;
   narrationSpeaking?: boolean;
@@ -13,10 +15,29 @@ interface CameraFeedProps {
   analyzeNowPending?: boolean;
 }
 
-export const CameraFeed = ({ isConnected, streamUrl, isCameraEnabled = true, onToggleCamera, narrationEnabled = false, narrationSpeaking = false, narrationLastText = '', onAnalyzeNow, analyzeNowPending = false }: CameraFeedProps) => {
+const resolveCameraAspectRatio = (resolution?: string): number => {
+  const normalized = (resolution || "").toLowerCase().trim();
+  if (normalized === "low") return 4 / 3;
+  if (normalized === "medium" || normalized === "high") return 16 / 9;
+
+  const match = normalized.match(/(\d+)\s*x\s*(\d+)/);
+  if (match) {
+    const width = Number(match[1]);
+    const height = Number(match[2]);
+    if (width > 0 && height > 0) return width / height;
+  }
+  return 4 / 3;
+};
+
+export const CameraFeed = ({ isConnected, streamUrl, isCameraEnabled = true, cameraResolution, onToggleCamera, narrationEnabled = false, narrationSpeaking = false, narrationLastText = '', onAnalyzeNow, analyzeNowPending = false }: CameraFeedProps) => {
   const [isLoaded, setIsLoaded] = useState(false);
   const [viewerKey, setViewerKey] = useState(0);
+  const [containerAspectRatio, setContainerAspectRatio] = useState(16 / 9);
   const prevStreamUrlRef = useRef(streamUrl);
+  const viewportRef = useRef<HTMLDivElement>(null);
+
+  /* ---- Iris animation ---- */
+  const irisPhase = useIrisAnimation(isCameraEnabled);
 
   // Reset iframe when stream URL changes.
   useEffect(() => {
@@ -35,16 +56,63 @@ export const CameraFeed = ({ isConnected, streamUrl, isCameraEnabled = true, onT
     }
   }, [isCameraEnabled]);
 
+  useEffect(() => {
+    const container = viewportRef.current;
+    if (!container) return;
+
+    const updateAspectRatio = () => {
+      if (container.clientWidth > 0 && container.clientHeight > 0) {
+        setContainerAspectRatio(container.clientWidth / container.clientHeight);
+      }
+    };
+
+    updateAspectRatio();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateAspectRatio);
+      return () => {
+        window.removeEventListener("resize", updateAspectRatio);
+      };
+    }
+
+    const observer = new ResizeObserver(updateAspectRatio);
+    observer.observe(container);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
+
   const effectiveViewerUrl = streamUrl
-    ? `${streamUrl}${streamUrl.includes('?') ? '&' : '?'}autoplay=1&muted=1`
+    ? `${streamUrl}${streamUrl.includes('?') ? '&' : '?'}autoplay=1&muted=1&controls=0&playsinline=1&disablepictureinpicture=1`
     : undefined;
   const showStream = isCameraEnabled && isConnected && !!effectiveViewerUrl;
+  const streamAspectRatio = useMemo(() => resolveCameraAspectRatio(cameraResolution), [cameraResolution]);
+  const iframeCoverStyle = useMemo(() => {
+    const safeContainerAspectRatio = containerAspectRatio > 0 ? containerAspectRatio : streamAspectRatio;
+
+    if (safeContainerAspectRatio > streamAspectRatio) {
+      return {
+        width: "100%",
+        height: `${(safeContainerAspectRatio / streamAspectRatio) * 100}%`,
+        left: 0,
+        top: "50%",
+        transform: "translateY(-50%)",
+      };
+    }
+
+    return {
+      width: `${(streamAspectRatio / safeContainerAspectRatio) * 100}%`,
+      height: "100%",
+      left: "50%",
+      top: 0,
+      transform: "translateX(-50%)",
+    };
+  }, [containerAspectRatio, streamAspectRatio]);
 
   return (
-    <div className="w-full h-full flex flex-col overflow-hidden">
-      <div className="racing-text text-[6px] sm:text-[8px] text-muted-foreground text-center mb-px">LIVE FEED</div>
-      
-      <div className="flex-1 racing-panel overflow-hidden relative bg-card/80 min-h-0">
+    <div className="w-full h-full overflow-hidden">
+      <div ref={viewportRef} className="w-full h-full overflow-hidden relative min-h-0 bg-black">
         {/* Camera Disabled - Show Off State */}
         {!isCameraEnabled ? (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
@@ -61,14 +129,18 @@ export const CameraFeed = ({ isConnected, streamUrl, isCameraEnabled = true, onT
           </div>
         ) : (
           <>
+            {/* Iris lens animation overlay */}
+            <IrisOverlay phase={irisPhase} />
+
             {showStream && effectiveViewerUrl && (
               <iframe
                 key={viewerKey}
                 src={effectiveViewerUrl}
                 title="Live Camera Feed"
-                className="absolute inset-0 w-full h-full object-cover"
+                className="absolute border-0 pointer-events-none"
+                style={iframeCoverStyle}
                 onLoad={() => setIsLoaded(true)}
-                allow="autoplay; fullscreen; picture-in-picture"
+                allow="autoplay; picture-in-picture"
                 sandbox="allow-scripts allow-same-origin allow-forms allow-pointer-lock"
               />
             )}

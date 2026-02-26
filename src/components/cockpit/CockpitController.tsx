@@ -1323,12 +1323,13 @@ export const CockpitController = () => {
           {/* Left Zone: Camera Feed + Steering Wheel */}
           <div className="flex-[0.35] border-r border-border/30 racing-panel m-0.5 flex flex-col overflow-hidden gap-0.5">
             {/* Camera Feed */}
-            <div className="h-[30%] min-h-0 p-0.5 border-none border-b border-border/30">
+            <div className="h-[30%] min-h-0 overflow-hidden border-none border-b border-border/30">
               <div onClick={handleImmersiveViewToggle} className="cursor-pointer h-full w-full">
                 <CameraFeed
                   isConnected={isConnected}
                   streamUrl={streamUrl}
                   isCameraEnabled={isCameraEnabled}
+                  cameraResolution={liveCameraResolution}
                   onToggleCamera={handleCameraToggle}
                   narrationEnabled={imageAnalysisEnabled}
                   narrationSpeaking={narrationSpeaking}

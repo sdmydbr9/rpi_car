@@ -1,4 +1,5 @@
 import os
+import logging
 # Prefer PulseAudio by default for Shairport Sync mixing, but allow
 # systemd/service mode to override via CAR_AUDIO_DRIVER (e.g. "alsa").
 _car_audio_driver_override = os.environ.get("CAR_AUDIO_DRIVER")
@@ -2885,6 +2886,14 @@ print(f"🎵 AirPlay metadata reader initialized (pipe: {AIRPLAY_METADATA_PIPE_P
 # ==========================================
 # 🌐 WEB SERVER (Flask + SocketIO)
 # ==========================================
+class _SuppressNowPlayingAccessLog(logging.Filter):
+    """Filter out noisy access logs for the polling now-playing endpoint."""
+    def filter(self, record):
+        return "/api/now-playing" not in record.getMessage()
+
+
+logging.getLogger("werkzeug").addFilter(_SuppressNowPlayingAccessLog())
+
 app = Flask(__name__, 
             static_folder=os.path.join(DIST_DIR, 'assets'), 
             static_url_path='/assets',
@@ -3811,13 +3820,16 @@ def on_mpu6050_toggle(data):
 @socketio.on('camera_toggle')
 def on_camera_toggle(data):
     """Toggle camera and all vision-related functions on/off."""
-    car_state["camera_enabled"] = not car_state["camera_enabled"]
+    want_enabled = not car_state["camera_enabled"]
     backend = CAMERA_STREAM_BACKEND_DEFAULT
     car_state["camera_stream_backend"] = backend
-    state = '✅ ON' if car_state["camera_enabled"] else '❌ OFF'
+    state = '✅ ON' if want_enabled else '❌ OFF'
     print(f"\n⚙️ [UI Control] 📷 CAMERA: {state} (backend={backend})")
 
-    if car_state["camera_enabled"]:
+    if want_enabled:
+        # Don't set camera_enabled until the pipeline is actually ready,
+        # otherwise telemetry broadcasts the flag and the frontend tries
+        # to connect to the WHEP endpoint before MediaMTX is up (404).
         ok, msg = _start_mediamtx_pipeline()
         if not ok:
             car_state["camera_enabled"] = False
@@ -3829,7 +3841,9 @@ def on_camera_toggle(data):
                 'message': f'MediaMTX pipeline failed: {msg}',
             })
             return
+        car_state["camera_enabled"] = True
     else:
+        car_state["camera_enabled"] = False
         _stop_mediamtx_pipeline()
 
     # When camera is disabled, turn off vision and narration state.
