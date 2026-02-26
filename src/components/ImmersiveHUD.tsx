@@ -1,5 +1,5 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
-import { X, Wifi, Zap, Power, VideoOff, Camera, Mic } from "lucide-react";
+import { X, Wifi, Zap, Power, VideoOff, Camera, Mic, Gamepad2 } from "lucide-react";
 import { useGameFeedback } from "@/hooks/useGameFeedback";
 import { useTouchTracking } from "@/hooks/useTouchTracking";
 import { IrisOverlay, useIrisAnimation } from "@/components/ui/iris-overlay";
@@ -57,6 +57,11 @@ interface ImmersiveHUDProps {
   narrationEnabled?: boolean;
   narrationSpeaking?: boolean;
   narrationLastText?: string;
+  // View-only mode (console/gamepad)
+  viewOnly?: boolean;
+  gamepadConnected?: boolean;
+  isEngineRunning?: boolean;
+  inputMode?: "console" | "device" | null;
 }
 
 export const ImmersiveHUD = ({
@@ -93,6 +98,10 @@ export const ImmersiveHUD = ({
   narrationEnabled,
   narrationSpeaking,
   narrationLastText,
+  viewOnly = false,
+  gamepadConnected = false,
+  isEngineRunning = false,
+  inputMode = null,
 }: ImmersiveHUDProps) => {
   const { triggerHaptic, playSound } = useGameFeedback();
   const [steeringDirection, setSteeringDirection] = useState<'left' | 'right' | null>(null);
@@ -361,7 +370,8 @@ export const ImmersiveHUD = ({
       {/* HUD Layer */}
       <div className="absolute inset-0 z-10 pointer-events-none">
         
-         {/* Steering Zones - Left and Right tap areas */}
+         {/* Steering Zones - Left and Right tap areas (hidden in view-only mode) */}
+         {!viewOnly && (
          <div className="absolute inset-0 flex pointer-events-auto">
            {/* Left Steering Zone */}
            <button
@@ -418,11 +428,13 @@ export const ImmersiveHUD = ({
              </div>
            </button>
          </div>
+         )}
          
         {/* Top Center - Status Bar */}
          <div className="absolute top-2 left-1/2 -translate-x-1/2 pointer-events-auto z-20">
           <div className="flex items-center gap-3 px-4 py-1.5 rounded-full bg-background/40 backdrop-blur-md border border-border/50">
-            {/* Auto Pilot Toggle */}
+            {/* Auto Pilot Toggle (hidden in view-only) */}
+            {!viewOnly && (
             <button
               onClick={onAutoModeToggle}
               className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] racing-text transition-colors ${
@@ -434,6 +446,7 @@ export const ImmersiveHUD = ({
               <Zap className="w-3 h-3" />
               AUTO
             </button>
+            )}
             
             {/* Connection Status */}
             <div className="flex items-center gap-1">
@@ -446,6 +459,13 @@ export const ImmersiveHUD = ({
               <Power className="w-3 h-3 text-primary" />
               7.4v
             </div>
+
+            {/* Gamepad Status (when in console mode) */}
+            {inputMode === "console" && (
+              <div className="flex items-center gap-1 text-[10px] racing-text" title="gamepad controller mode">
+                <Gamepad2 className={`w-3 h-3 ${gamepadConnected ? 'text-green-400' : 'text-destructive'}`} />
+              </div>
+            )}
             
             {/* Close Button */}
             <button
@@ -516,6 +536,7 @@ export const ImmersiveHUD = ({
             </div>
             
             {/* E-Brake Toggle */}
+            {!viewOnly && (
             <button
               onClick={handleEBrake}
               className={`pointer-events-auto px-3 py-1.5 rounded text-xs racing-text border transition-all ${
@@ -526,10 +547,12 @@ export const ImmersiveHUD = ({
             >
               E-BRAKE {eBrakeActive ? 'ON' : 'OFF'}
             </button>
+            )}
           </div>
         </div>
         
-        {/* Gear Shifter Section - Compact, beside speedometer */}
+        {/* Gear Shifter Section - Compact, beside speedometer (hidden in view-only) */}
+        {!viewOnly && (
         <div className="absolute top-4 right-40 z-20 pointer-events-auto">
           <div className="bg-background/40 backdrop-blur-md border border-border/50 rounded-lg p-2">
             <div className="text-[8px] racing-text text-muted-foreground mb-1 text-center">GEAR</div>
@@ -597,6 +620,7 @@ export const ImmersiveHUD = ({
             </div>
           </div>
         </div>
+        )}
 
         
         {/* Top Right - Speed & Gear */}
@@ -618,7 +642,8 @@ export const ImmersiveHUD = ({
           </div>
         </div>
         
-        {/* Bottom Left - Brake Zone */}
+        {/* Bottom Left - Brake Zone (hidden in view-only) */}
+        {!viewOnly && (
          <div className="absolute bottom-4 left-4 pointer-events-auto z-20">
           {/* Brake Pedal */}
           <button
@@ -639,8 +664,10 @@ export const ImmersiveHUD = ({
             <span className="text-xs racing-text mt-1">BRAKE</span>
           </button>
         </div>
+        )}
         
-        {/* Bottom Right - Throttle Zone */}
+        {/* Bottom Right - Throttle Zone (hidden in view-only) */}
+        {!viewOnly && (
          <div className="absolute bottom-4 right-4 pointer-events-auto z-20">
           <button
             ref={hudThrottleRef}
@@ -664,6 +691,7 @@ export const ImmersiveHUD = ({
             <span className="text-xs racing-text mt-1">THROTTLE</span>
           </button>
         </div>
+        )}
         
         {/* AI Narration Overlay */}
         {narrationEnabled && (

@@ -8,6 +8,7 @@ import { AutopilotTelemetry, type AutopilotStatus } from "./AutopilotTelemetry";
 import { Pedals } from "./Pedals";
 import { ImmersiveHUD } from "../ImmersiveHUD";
 import { OnboardingScreen } from "../OnboardingScreen";
+import { DeviceSelectionScreen, type InputMode } from "../DeviceSelectionScreen";
 import * as socketClient from "../../lib/socketClient";
 import { ttsService } from "../../lib/ttsService";
 import type { AudioOutputDevice } from "../../lib/ttsService";
@@ -243,6 +244,15 @@ export const CockpitController = () => {
       return true;
     }
   });
+  // Input mode: null = show device selection, "console" = view-only (gamepad), "device" = full control
+  const [inputMode, setInputMode] = useState<InputMode | null>(() => {
+    const saved = localStorage.getItem('inputMode');
+    return (saved === 'console' || saved === 'device') ? saved : null;
+  });
+  const isConsoleMode = inputMode === 'console';
+  // Gamepad (console mode) state — driven by telemetry from backend
+  const [gamepadConnected, setGamepadConnected] = useState(false);
+  const [gamepadGear, setGamepadGear] = useState("1");
   const autoAccelIntervalRef = useRef<number | null>(null);
   const connectionTimeoutRef = useRef<number | null>(null);
   const autoConnectAttemptedRef = useRef(false);
@@ -276,6 +286,14 @@ export const CockpitController = () => {
       setIsConnected(connected);
     });
   }, []);
+
+  // Auto-enable camera when in console (gamepad) mode and connected
+  useEffect(() => {
+    if (isConsoleMode && isConnected && !isCameraEnabled) {
+      console.log('🎮 Console mode: auto-enabling camera');
+      socketClient.emitCameraToggle();
+    }
+  }, [isConsoleMode, isConnected]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const refreshNetworkMode = useCallback(async () => {
     try {
@@ -684,6 +702,9 @@ export const CockpitController = () => {
       // Update narration telemetry
       if (data.narration_enabled !== undefined) setImageAnalysisEnabled(data.narration_enabled);
       if (data.narration_speaking !== undefined) setNarrationSpeaking(data.narration_speaking!);
+      // Update gamepad telemetry
+      if (data.gamepad_connected !== undefined) setGamepadConnected(data.gamepad_connected);
+      if (data.gamepad_gear !== undefined) setGamepadGear(data.gamepad_gear);
       // Update live camera config from telemetry (for HUD badge only — does NOT touch tuning state)
       if (data.camera_resolution) setLiveCameraResolution(data.camera_resolution);
       if (data.camera_jpeg_quality !== undefined) setLiveCameraJpegQuality(data.camera_jpeg_quality);
@@ -696,6 +717,21 @@ export const CockpitController = () => {
         }
       }
     });
+
+    // Subscribe to gamepad Start button presses (engine toggle from physical controller)
+    socketClient.onGamepadStartPressed((data) => {
+      console.log('🎮 [Gamepad] Start pressed — engine_running:', data.engine_running);
+      setIsEngineRunning(data.engine_running);
+      if (!data.engine_running) {
+        setIsAutoMode(false);
+        setControlState(prev => ({ ...prev, throttle: false, brake: false, speed: 0, speedMpm: 0, temperature: 0, cpuClock: 0, gpuClock: 0, rpm: 0, batteryVoltage: 0 }));
+      }
+    });
+
+    // If console mode is active and connected, tell backend to enable gamepad input
+    if (isConsoleMode) {
+      socketClient.emitGamepadEnable();
+    }
 
     return () => {
       socketClient.onTelemetry(() => {}); // Unsubscribe
@@ -742,10 +778,33 @@ export const CockpitController = () => {
     toast.success(`Welcome, ${name}! 🏁`);
   }, []);
 
+  const handleInputModeSelect = useCallback((mode: InputMode) => {
+    setInputMode(mode);
+    localStorage.setItem('inputMode', mode);
+    if (mode === 'console') {
+      // Auto-enable camera in console (gamepad) mode
+      if (isConnected && !isCameraEnabled) {
+        socketClient.emitCameraToggle();
+      }
+      // Tell backend to start gamepad bridge
+      if (isConnected) {
+        socketClient.emitGamepadEnable();
+      }
+    } else {
+      // Switching away from console → disable gamepad bridge
+      if (isConnected) {
+        socketClient.emitGamepadDisable();
+      }
+    }
+  }, [isConnected, isCameraEnabled]);
+
   const handleResetDriver = useCallback(() => {
     setShowOnboarding(true);
     setDriverName(null);
     setDriverAge(null);
+    // Also reset input mode so device selection appears again after re-onboarding
+    setInputMode(null);
+    localStorage.removeItem('inputMode');
   }, []);
 
   const handleThrottleChange = useCallback((active: boolean) => {
@@ -1214,6 +1273,12 @@ export const CockpitController = () => {
     isBrakePressed: controlState.brake,
   });
 
+  // No-op handlers for console (view-only) mode
+  const noopBool = useCallback((_: boolean) => {}, []);
+  const noopVoid = useCallback(() => {}, []);
+  const noopAngle = useCallback((_: number) => {}, []);
+  const noopGear = useCallback((_: string) => {}, []);
+
   return (
     <>
       {/* Onboarding Screen */}
@@ -1221,8 +1286,13 @@ export const CockpitController = () => {
         <OnboardingScreen onComplete={handleOnboardingComplete} />
       )}
 
-      {/* Main App UI (hidden during onboarding) */}
-      {!showOnboarding && (
+      {/* Device Selection Screen (shown after onboarding, before main UI) */}
+      {!showOnboarding && inputMode === null && (
+        <DeviceSelectionScreen onSelect={handleInputModeSelect} />
+      )}
+
+      {/* Main App UI (hidden during onboarding and device selection) */}
+      {!showOnboarding && inputMode !== null && (
       <>
       {/* Audio Unlock Prompt - shown when narration text arrives but TTS hasn't been unlocked */}
       {showAudioUnlockPrompt && (
@@ -1264,13 +1334,13 @@ export const CockpitController = () => {
         isAutoMode={isAutoMode}
         isEmergencyStop={isEmergencyStop}
         eBrakeActive={eBrakeActive}
-        onThrottleChange={handleThrottleChange}
-        onBrakeChange={handleBrakeChange}
-        onEmergencyStop={handleEmergencyStop}
-        onEBrakeToggle={handleEBrakeToggle}
-        onAutoModeToggle={handleAutoMode}
-        onSteeringChange={handleAngleChange}
-        onGearChange={handleGearChange}
+        onThrottleChange={isConsoleMode ? noopBool : handleThrottleChange}
+        onBrakeChange={isConsoleMode ? noopBool : handleBrakeChange}
+        onEmergencyStop={isConsoleMode ? noopVoid : handleEmergencyStop}
+        onEBrakeToggle={isConsoleMode ? noopVoid : handleEBrakeToggle}
+        onAutoModeToggle={isConsoleMode ? noopVoid : handleAutoMode}
+        onSteeringChange={isConsoleMode ? noopAngle : handleAngleChange}
+        onGearChange={isConsoleMode ? noopGear : handleGearChange}
         cameraResolution={liveCameraResolution}
         cameraJpegQuality={liveCameraJpegQuality}
         cameraFramerate={liveCameraFramerate}
@@ -1279,11 +1349,15 @@ export const CockpitController = () => {
         visionFps={visionFps}
         isCameraEnabled={isCameraEnabled}
         userWantsVision={userWantsVision}
-        onToggleCamera={handleCameraToggle}
+        onToggleCamera={isConsoleMode ? noopVoid : handleCameraToggle}
         narrationEnabled={imageAnalysisEnabled}
         narrationSpeaking={narrationSpeaking}
         narrationLastText={narrationLastText}
         steeringAngle={controlState.steeringAngle}
+        viewOnly={isConsoleMode}
+        gamepadConnected={gamepadConnected}
+        isEngineRunning={isEngineRunning}
+        inputMode={inputMode}
       />
       
       <div className="h-[100dvh] w-full flex flex-col overflow-hidden">
@@ -1309,13 +1383,15 @@ export const CockpitController = () => {
           isMPU6050Enabled={isMPU6050Enabled}
           isRearSonarEnabled={isRearSonarEnabled}
           isCameraEnabled={isCameraEnabled}
-          onIRToggle={handleIRToggle}
-          onSonarToggle={handleSonarToggle}
-          onRearSonarToggle={handleRearSonarToggle}
-          onMPU6050Toggle={handleMPU6050Toggle}
-          onCameraToggle={handleCameraToggle}
+          onIRToggle={isConsoleMode ? noopVoid : handleIRToggle}
+          onSonarToggle={isConsoleMode ? noopVoid : handleSonarToggle}
+          onRearSonarToggle={isConsoleMode ? noopVoid : handleRearSonarToggle}
+          onMPU6050Toggle={isConsoleMode ? noopVoid : handleMPU6050Toggle}
+          onCameraToggle={isConsoleMode ? noopVoid : handleCameraToggle}
           isAutopilotRunning={isAutopilotRunning}
           onResetDriver={handleResetDriver}
+          gamepadConnected={gamepadConnected}
+          inputMode={inputMode}
         />
         
         {/* Main Content - Fixed Layout (No Responsive Changes) */}
@@ -1330,11 +1406,11 @@ export const CockpitController = () => {
                   streamUrl={streamUrl}
                   isCameraEnabled={isCameraEnabled}
                   cameraResolution={liveCameraResolution}
-                  onToggleCamera={handleCameraToggle}
+                  onToggleCamera={isConsoleMode ? noopVoid : handleCameraToggle}
                   narrationEnabled={imageAnalysisEnabled}
                   narrationSpeaking={narrationSpeaking}
                   narrationLastText={narrationLastText}
-                  onAnalyzeNow={handleAnalyzeNow}
+                  onAnalyzeNow={isConsoleMode ? noopVoid : handleAnalyzeNow}
                   analyzeNowPending={analyzeNowPending}
                 />
               </div>
@@ -1344,8 +1420,8 @@ export const CockpitController = () => {
             <div className="flex-1 min-h-0 overflow-hidden flex items-center justify-center">
               <SteeringWheel 
                 angle={controlState.steeringAngle} 
-                onAngleChange={handleAngleChange}
-                isEnabled={isEngineRunning}
+                onAngleChange={isConsoleMode ? noopAngle : handleAngleChange}
+                isEnabled={isConsoleMode ? false : isEngineRunning}
               />
             </div>
           </div>
@@ -1366,8 +1442,8 @@ export const CockpitController = () => {
               batteryVoltage={controlState.batteryVoltage}
               rpm={controlState.rpm}
               encoderAvailable={controlState.encoderAvailable}
-              onLaunch={handleLaunch}
-              onDonut={handleDonut}
+              onLaunch={isConsoleMode ? noopVoid : handleLaunch}
+              onDonut={isConsoleMode ? noopVoid : handleDonut}
               isEngineRunning={isEngineRunning}
               sensors={sensors}
               requiresService={requiresService}
@@ -1394,32 +1470,32 @@ export const CockpitController = () => {
                 gyroAvailable={gyroAvailable}
                 gyroCalibrated={gyroCalibrated}
                 isMPU6050Enabled={isMPU6050Enabled}
-                onEmergencyStop={handleAutopilotEBrake}
-                onAutopilotToggle={handleAutopilotToggle}
-                onStartStop={handleAutopilotStartStop}
+                onEmergencyStop={isConsoleMode ? noopVoid : handleAutopilotEBrake}
+                onAutopilotToggle={isConsoleMode ? noopVoid : handleAutopilotToggle}
+                onStartStop={isConsoleMode ? noopVoid : handleAutopilotStartStop}
               />
             ) : (
               <GearShifter 
                 currentGear={controlState.gear} 
-                onGearChange={handleGearChange}
+                onGearChange={isConsoleMode ? noopGear : handleGearChange}
                 isEmergencyStop={isEmergencyStop}
                 isAutoMode={isAutoMode}
                 isIREnabled={isIREnabled}
                 isSonarEnabled={isSonarEnabled}
                 isAutopilotEnabled={isAutopilotEnabled}
                 eBrakeActive={eBrakeActive}
-                onEmergencyStop={handleEmergencyStop}
-                onAutoMode={handleAutoMode}
-                onIRToggle={handleIRToggle}
-                onSonarToggle={handleSonarToggle}
-                onCameraToggle={handleCameraToggle}
+                onEmergencyStop={isConsoleMode ? noopVoid : handleEmergencyStop}
+                onAutoMode={isConsoleMode ? noopVoid : handleAutoMode}
+                onIRToggle={isConsoleMode ? noopVoid : handleIRToggle}
+                onSonarToggle={isConsoleMode ? noopVoid : handleSonarToggle}
+                onCameraToggle={isConsoleMode ? noopVoid : handleCameraToggle}
                 isCameraEnabled={isCameraEnabled}
-                onAutopilotToggle={handleAutopilotToggle}
-                isEnabled={isEngineRunning}
+                onAutopilotToggle={isConsoleMode ? noopVoid : handleAutopilotToggle}
+                isEnabled={isConsoleMode ? false : isEngineRunning}
                 isEngineRunning={isEngineRunning}
-                onEngineStart={handleEngineStart}
-                onEngineStop={handleEngineStop}
-                onHorn={handleHorn}
+                onEngineStart={isConsoleMode ? noopVoid : handleEngineStart}
+                onEngineStop={isConsoleMode ? noopVoid : handleEngineStop}
+                onHorn={isConsoleMode ? noopVoid : handleHorn}
                 speed={controlState.speed}
               />
             )}
@@ -1429,9 +1505,9 @@ export const CockpitController = () => {
         {/* Footer Zone: Pedals */}
         <div className="h-[12dvh] min-h-12 max-h-20 border-t border-primary/30 flex-shrink-0 px-4">
           <Pedals 
-            onThrottleChange={handleThrottleChange}
-            onBrakeChange={handleBrakeChange}
-            isEnabled={isEngineRunning}
+            onThrottleChange={isConsoleMode ? noopBool : handleThrottleChange}
+            onBrakeChange={isConsoleMode ? noopBool : handleBrakeChange}
+            isEnabled={isConsoleMode ? false : isEngineRunning}
           />
         </div>
       </div>

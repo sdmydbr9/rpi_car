@@ -83,6 +83,10 @@ export interface TelemetryData {
   encoder_available?: boolean;
   // Battery telemetry
   battery_voltage?: number;
+  // Gamepad telemetry
+  gamepad_connected?: boolean;
+  gamepad_enabled?: boolean;
+  gamepad_gear?: string;
 }
 
 export interface CameraResponse {
@@ -1091,6 +1095,49 @@ export function emitTuningUpdate(tuning: Record<string, number>): void {
   }
 }
 
+// ==========================================
+// 🎮 GAMEPAD (Console Mode)
+// ==========================================
+
+/**
+ * Tell the backend to enable gamepad/console mode input processing
+ */
+export function emitGamepadEnable(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎮 GAMEPAD: ENABLE`);
+    socket.emit('gamepad_enable', {});
+  } else {
+    console.warn(`[UI Control] ⚠️ Cannot emit gamepad enable - socket not connected`);
+  }
+}
+
+/**
+ * Tell the backend to disable gamepad/console mode input processing
+ */
+export function emitGamepadDisable(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎮 GAMEPAD: DISABLE`);
+    socket.emit('gamepad_disable', {});
+  } else {
+    console.warn(`[UI Control] ⚠️ Cannot emit gamepad disable - socket not connected`);
+  }
+}
+
+let gamepadStartPressedCallback: ((data: { engine_running: boolean }) => void) | null = null;
+
+/**
+ * Subscribe to gamepad Start button press events
+ */
+export function onGamepadStartPressed(callback: (data: { engine_running: boolean }) => void): void {
+  gamepadStartPressedCallback = callback;
+  if (socket) {
+    socket.off('gamepad_start_pressed');
+    socket.on('gamepad_start_pressed', (data: { engine_running: boolean }) => {
+      if (gamepadStartPressedCallback) gamepadStartPressedCallback(data);
+    });
+  }
+}
+
 export default {
   connectToServer,
   disconnectFromServer,
@@ -1150,4 +1197,8 @@ export default {
   emitStartupConfigUpdate,
   emitStartupCheckRun,
   requestStartupConfig,
+  // Gamepad
+  emitGamepadEnable,
+  emitGamepadDisable,
+  onGamepadStartPressed,
 };

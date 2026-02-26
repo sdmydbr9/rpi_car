@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { SettingsDialog, TuningConstants, DEFAULT_TUNING } from "./SettingsDialog";
 import type { CameraSpecs, NarrationConfig } from "../../lib/socketClient";
-import { Loader2, RadioTower, Volume2, Wifi } from "lucide-react";
+import { Loader2, RadioTower, Volume2, Wifi, Gamepad2 } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/alert-dialog";
 
 type NetworkMode = "wifi" | "hotspot";
+type InputMode = "console" | "device";
 
 interface HeaderProps {
   driverName?: string;
@@ -50,6 +51,9 @@ interface HeaderProps {
   onCameraToggle?: () => void;
   isAutopilotRunning?: boolean;
   onResetDriver?: () => void;
+  // Gamepad status
+  gamepadConnected?: boolean;
+  inputMode?: InputMode | null;
 }
 
 export const Header = ({ 
@@ -84,6 +88,8 @@ export const Header = ({
   onCameraToggle,
   isAutopilotRunning,
   onResetDriver,
+  gamepadConnected = false,
+  inputMode = null,
 }: HeaderProps) => {
   const [pendingNetworkMode, setPendingNetworkMode] = useState<NetworkMode | null>(null);
   const resolvedLinks = useMemo(() => ({
@@ -127,11 +133,11 @@ export const Header = ({
           <span className="text-primary font-bold racing-text text-[10px] sm:text-sm">PETRONAS</span>
         </div>
         
-        {/* Center: Connection Status + Network Mode Toggle */}
+        {/* Center: Connection Status + Network Mode Toggle + Gamepad Status */}
         <div className="flex items-center gap-1 sm:gap-2 text-[8px] sm:text-xs racing-text text-muted-foreground">
           <div className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-primary animate-pulse' : 'bg-destructive'}`} />
           <span className="hidden sm:inline">{isConnected ? 'CONNECTED' : 'OFFLINE'}</span>
-          <div className="flex items-center rounded-full border border-primary/25 bg-background/40 p-px">
+          <div className="flex items-center rounded-full border border-primary/25 bg-background/40 p-px gap-0.5">
             <button
               type="button"
               disabled={networkSwitching || networkMode === "wifi" || !onNetworkModeSwitch}
@@ -160,6 +166,13 @@ export const Header = ({
               <RadioTower className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
               <span className="hidden sm:inline">HOTSPOT</span>
             </button>
+            {/* Gamepad/Device Mode Indicator */}
+            {inputMode === "console" && (
+              <div className="flex items-center gap-0.5 sm:gap-1 px-1.5 sm:px-2.5 py-0.5 rounded-full border border-primary/40 text-muted-foreground hover:text-foreground" title="gamepad controller mode">
+                <Gamepad2 className={`w-2.5 h-2.5 sm:w-3 sm:h-3 ${gamepadConnected ? 'text-green-400' : 'text-destructive'}`} />
+                <span className="hidden sm:inline text-[7px] sm:text-[9px]">{gamepadConnected ? 'GAMEPAD' : 'NO GAMEPAD'}</span>
+              </div>
+            )}
           </div>
         </div>
         

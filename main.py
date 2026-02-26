@@ -1893,6 +1893,12 @@ car_state = {
     "narration_model": _narration_config.get('model', ''),
     "narration_interval": _narration_config.get('interval', 8),
     "narration_speaking": False,  # True when TTS is playing on client
+    # 🎮 GAMEPAD STATE
+    "gamepad_connected": False,  # True when a physical gamepad is detected
+    "gamepad_enabled": False,    # True when console/gamepad mode is active (client requests)
+    "gamepad_gear": "1",         # Current gear set by gamepad buttons (A/B/X/Y)
+    "gamepad_throttle": 0.0,     # Gamepad throttle percentage
+    "gamepad_steering": 0.0,     # Gamepad steering percentage
 }
 
 _refresh_mediamtx_state()
@@ -2326,6 +2332,197 @@ def restore_gear_after_ebrake():
     if car_state["gear_before_ebrake"] is not None:
         car_state["gear"] = car_state["gear_before_ebrake"]
         car_state["gear_before_ebrake"] = None
+
+# ==========================================
+# 🎮 GAMEPAD BRIDGE (Physical controller → car_state)
+# ==========================================
+# Reads USB/Bluetooth gamepad via the `inputs` library and maps
+# joystick + button events into the same car_state fields that the
+# SocketIO handlers write to, so the physics_loop drives the motors
+# identically regardless of input source.
+
+_GAMEPAD_JOY_CENTER = 128
+_GAMEPAD_JOY_DEADZONE = 15
+
+# Gear → max throttle %  (matches gamepad.py GEAR configuration)
+_GAMEPAD_GEAR_MAP = {
+    "1":  35.0,
+    "2":  60.0,
+    "3":  80.0,
+    "S": 100.0,
+}
+
+def _gamepad_reader_thread():
+    """
+    Blocking reader thread. Uses `inputs.get_gamepad()` which blocks until
+    an event arrives.  On disconnect (exception), sets gamepad_connected=False
+    and retries every second.
+    """
+    try:
+        from inputs import get_gamepad as _get_gamepad, UnpluggedError
+    except ImportError:
+        print("⚠️  [Gamepad] `inputs` library not installed — gamepad support disabled")
+        return
+
+    smoothed_steering = 0.0
+    smoothed_throttle = 0.0
+
+    print("🎮 [Gamepad] Reader thread started — waiting for controller…")
+
+    while True:
+        try:
+            events = _get_gamepad()
+            if not car_state["gamepad_connected"]:
+                car_state["gamepad_connected"] = True
+                print("🎮 [Gamepad] Controller connected!")
+
+            for event in events:
+                if not car_state["gamepad_enabled"]:
+                    # If console mode not active, still track connection but skip inputs
+                    continue
+
+                # --- Left Stick Y → Throttle ---
+                if event.code == 'ABS_Y':
+                    val = event.state
+                    if abs(val - _GAMEPAD_JOY_CENTER) < _GAMEPAD_JOY_DEADZONE:
+                        car_state["gamepad_throttle"] = 0.0
+                    else:
+                        gp_gear = car_state["gamepad_gear"]
+                        max_speed = _GAMEPAD_GEAR_MAP.get(gp_gear, 35.0)
+                        car_state["gamepad_throttle"] = ((_GAMEPAD_JOY_CENTER - val) / 128.0) * max_speed
+
+                # --- Right Stick X → Steering ---
+                elif event.code == 'ABS_Z':
+                    val = event.state
+                    if abs(val - _GAMEPAD_JOY_CENTER) < _GAMEPAD_JOY_DEADZONE:
+                        car_state["gamepad_steering"] = 0.0
+                    else:
+                        car_state["gamepad_steering"] = ((val - _GAMEPAD_JOY_CENTER) / 128.0) * 100.0
+
+                # --- Face buttons → Gear ---
+                elif event.code in ('BTN_SOUTH', 'BTN_A') and event.state == 1:
+                    car_state["gamepad_gear"] = "1"
+                    car_state["gear"] = "1"
+                    print("🎮 [Gamepad] Gear → 1")
+                elif event.code in ('BTN_EAST', 'BTN_B') and event.state == 1:
+                    car_state["gamepad_gear"] = "2"
+                    car_state["gear"] = "2"
+                    print("🎮 [Gamepad] Gear → 2")
+                elif event.code in ('BTN_WEST', 'BTN_X') and event.state == 1:
+                    car_state["gamepad_gear"] = "3"
+                    car_state["gear"] = "3"
+                    print("🎮 [Gamepad] Gear → 3")
+                elif event.code in ('BTN_NORTH', 'BTN_Y') and event.state == 1:
+                    car_state["gamepad_gear"] = "S"
+                    car_state["gear"] = "S"
+                    print("🎮 [Gamepad] Gear → SPORT")
+
+                # --- Start button → Engine Start / Stop ---
+                elif event.code == 'BTN_START' and event.state == 1:
+                    _gamepad_toggle_engine()
+
+        except Exception:
+            if car_state["gamepad_connected"]:
+                car_state["gamepad_connected"] = False
+                print("⚠️  [Gamepad] Controller disconnected")
+            time.sleep(1)
+
+
+def _gamepad_toggle_engine():
+    """Toggle engine on/off from the gamepad Start button.
+
+    Mirrors the logic of on_engine_start / on_engine_stop socket handlers
+    but also broadcasts a 'gamepad_start_pressed' event so the UI can
+    react (e.g. show engine running state).
+    """
+    was_running = bool(car_state.get("engine_running", False))
+    if was_running:
+        # --- STOP ---
+        car_state["engine_running"] = False
+        car_state["auto_accel_enabled"] = False
+        car_state["gas_pressed"] = False
+        car_state["brake_pressed"] = True
+        car_state["is_braking"] = True
+        car_state["current_pwm"] = 0
+        car_state["obstacle_state"] = "IDLE"
+        try:
+            car_system.brake()
+        except Exception:
+            pass
+        car_audio.set_engine_running(False)
+        print("🎮 [Gamepad] ENGINE: STOPPED")
+        try:
+            socketio.emit('gamepad_start_pressed', {'engine_running': False})
+        except Exception:
+            pass
+    else:
+        # --- START ---
+        car_state["engine_running"] = True
+        car_state["brake_pressed"] = False
+        car_state["is_braking"] = False
+        car_audio.set_engine_running(True)
+        print("🎮 [Gamepad] ENGINE: STARTED")
+        # Trigger startup check (same as on_engine_start)
+        try:
+            _trigger_startup_check_async(
+                client_id=None,
+                source="gamepad_start",
+                require_enabled=True,
+            )
+        except Exception:
+            pass
+        try:
+            socketio.emit('gamepad_start_pressed', {'engine_running': True})
+        except Exception:
+            pass
+
+
+def _gamepad_drive_thread():
+    """
+    Runs at ~50 Hz.  When gamepad is enabled AND engine is running,
+    smoothly maps gamepad_throttle / gamepad_steering into car_state
+    fields that the physics_loop reads each tick.
+    """
+    smoothed_throttle = 0.0
+    smoothed_steering = 0.0
+
+    while True:
+        if car_state["gamepad_enabled"] and car_state["engine_running"] and car_state["gamepad_connected"]:
+            raw_throttle = car_state["gamepad_throttle"]
+            raw_steering = car_state["gamepad_steering"]
+
+            # Exponential smoothing
+            smoothed_throttle = 0.4 * raw_throttle + 0.6 * smoothed_throttle
+            smoothed_steering = 0.3 * raw_steering + 0.7 * smoothed_steering
+
+            # Map to car_state — same field semantics as socket handlers
+            if abs(smoothed_throttle) > 3:
+                car_state["gas_pressed"] = True
+                car_state["brake_pressed"] = False
+                if smoothed_throttle >= 0:
+                    car_state["direction"] = "forward"
+                else:
+                    car_state["direction"] = "backward"
+            else:
+                car_state["gas_pressed"] = False
+
+            # Map steering (-100..100) → angle (-90..90)
+            angle = int(max(-90, min(90, smoothed_steering * 0.9)))
+            car_state["user_steer_angle"] = angle
+
+        elif car_state["gamepad_enabled"] and not car_state["engine_running"]:
+            # Gamepad enabled but engine off → idle
+            smoothed_throttle = 0.0
+            smoothed_steering = 0.0
+
+        time.sleep(0.02)  # 50 Hz
+
+
+# Start gamepad threads (daemon — auto-stop when main process exits)
+_gp_reader = threading.Thread(target=_gamepad_reader_thread, daemon=True, name="gamepad-reader")
+_gp_reader.start()
+_gp_driver = threading.Thread(target=_gamepad_drive_thread, daemon=True, name="gamepad-driver")
+_gp_driver.start()
 
 def physics_loop():
     # Note: obstacle_state is now in car_state, not a local variable
@@ -3576,6 +3773,34 @@ def on_horn(data=None):
     print(f"\n🔔 [UI Control] 📯 HORN: HONK!")
     car_audio.play_horn()
     emit('horn_response', {'status': 'ok'})
+
+
+@socketio.on('gamepad_enable')
+def on_gamepad_enable(data=None):
+    """UI requests gamepad/console mode activation."""
+    car_state["gamepad_enabled"] = True
+    print("🎮 [SocketIO] Gamepad mode ENABLED")
+    emit('gamepad_mode_response', {
+        'status': 'ok',
+        'enabled': True,
+        'connected': car_state["gamepad_connected"],
+    })
+
+
+@socketio.on('gamepad_disable')
+def on_gamepad_disable(data=None):
+    """UI requests gamepad/console mode deactivation."""
+    car_state["gamepad_enabled"] = False
+    # Reset gamepad-driven state so the physics loop stops acting on stale values
+    car_state["gamepad_throttle"] = 0.0
+    car_state["gamepad_steering"] = 0.0
+    car_state["gas_pressed"] = False
+    print("🎮 [SocketIO] Gamepad mode DISABLED")
+    emit('gamepad_mode_response', {
+        'status': 'ok',
+        'enabled': False,
+        'connected': car_state["gamepad_connected"],
+    })
 
 
 STEERING_LOG_INTERVAL_SEC = 0.25
@@ -4980,6 +5205,10 @@ def telemetry_broadcast():
                 # 🎙️ Narration telemetry
                 "narration_enabled": car_state["narration_enabled"],
                 "narration_speaking": car_state["narration_speaking"],
+                # 🎮 Gamepad telemetry
+                "gamepad_connected": car_state["gamepad_connected"],
+                "gamepad_enabled": car_state["gamepad_enabled"],
+                "gamepad_gear": car_state["gamepad_gear"],
             }
             
             socketio.emit('telemetry_update', telemetry_data)
