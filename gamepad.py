@@ -48,6 +48,17 @@ JOY_DEADZONE = 15
 current_gear = "1"
 current_max_speed = 35.0  # Default to Gear 1
 
+# NEW BUTTON STATES
+btn_select_clicks = 0
+btn_select_last_press = 0
+btn_select_timeout = 0.5  # Time window for double-click (seconds)
+
+lb_pressed = False
+rb_pressed = False
+autopilot_enabled = False
+
+emergency_brake_active = False
+
 # =================================================================
 # 📊 TELEMETRY LOGGER & SETUP
 # =================================================================
@@ -128,6 +139,8 @@ def drive_like_a_car(throttle, steering, current_gz):
 def gamepad_loop():
     global gp_throttle, gp_steering, status_msg, running
     global current_gear, current_max_speed
+    global btn_select_clicks, btn_select_last_press
+    global lb_pressed, rb_pressed, autopilot_enabled, emergency_brake_active
     
     while True:
         try:
@@ -162,12 +175,59 @@ def gamepad_loop():
                     current_max_speed = 60.0
                     
                 elif event.code in ['BTN_WEST', 'BTN_X'] and event.state == 1:
-                    current_gear = "3"
-                    current_max_speed = 80.0
+                    if autopilot_enabled:
+                        # Emergency brake when autopilot is active
+                        emergency_brake_active = True
+                    else:
+                        # Normal gear shifting
+                        current_gear = "3"
+                        current_max_speed = 80.0
                     
                 elif event.code in ['BTN_NORTH', 'BTN_Y'] and event.state == 1:
                     current_gear = "SPORT 🚀"
                     current_max_speed = 100.0
+                
+                # 🟡 BTN_WEST/BTN_X release - reset emergency brake
+                elif event.code in ['BTN_WEST', 'BTN_X'] and event.state == 0:
+                    if autopilot_enabled:
+                        emergency_brake_active = False
+                
+                # 🔘 SELECT Button - Double-click to turn off engine
+                elif event.code == 'BTN_SELECT' and event.state == 1:
+                    current_time = time.time()
+                    if current_time - btn_select_last_press < btn_select_timeout:
+                        btn_select_clicks += 1
+                    else:
+                        btn_select_clicks = 1
+                    btn_select_last_press = current_time
+                    
+                    if btn_select_clicks >= 2:
+                        running = False
+                        btn_select_clicks = 0
+                
+                # 🟥 LEFT BUMPER (LB / BTN_TL)
+                elif event.code == 'BTN_TL' and event.state == 1:
+                    lb_pressed = True
+                    # Check if both LB and RB are pressed
+                    if lb_pressed and rb_pressed:
+                        autopilot_enabled = not autopilot_enabled
+                        if not autopilot_enabled:
+                            emergency_brake_active = False
+                
+                elif event.code == 'BTN_TL' and event.state == 0:
+                    lb_pressed = False
+                
+                # 🟥 RIGHT BUMPER (RB / BTN_TR)
+                elif event.code == 'BTN_TR' and event.state == 1:
+                    rb_pressed = True
+                    # Check if both LB and RB are pressed
+                    if lb_pressed and rb_pressed:
+                        autopilot_enabled = not autopilot_enabled
+                        if not autopilot_enabled:
+                            emergency_brake_active = False
+                
+                elif event.code == 'BTN_TR' and event.state == 0:
+                    rb_pressed = False
                 
                 # ▶️ Start Button
                 elif event.code == 'BTN_START' and event.state == 1:
@@ -186,6 +246,8 @@ gp_thread.start()
 # =================================================================
 def motor_driver_loop():
     global running, smoothed_steering, smoothed_throttle
+    global autopilot_enabled, emergency_brake_active
+    
     while True:
         if not running:
             drive_like_a_car(0, 0, 0)
@@ -194,10 +256,13 @@ def motor_driver_loop():
 
         gz = get_gyro_z()
         
+        # If emergency brake is active (autopilot active + X button pressed)
+        throttle_to_use = 0 if emergency_brake_active else smoothed_throttle
+        
         smoothed_steering = (0.3 * gp_steering) + (0.7 * smoothed_steering)
         smoothed_throttle = (0.4 * gp_throttle) + (0.6 * smoothed_throttle)
         
-        drive_like_a_car(smoothed_throttle, smoothed_steering, gz)
+        drive_like_a_car(throttle_to_use, smoothed_steering, gz)
         time.sleep(0.02) 
 
 t = threading.Thread(target=motor_driver_loop, daemon=True)
@@ -207,7 +272,7 @@ t.start()
 # 🖥️ TELEMETRY UI
 # =================================================================
 def main(stdscr):
-    global running
+    global running, autopilot_enabled
     stdscr.nodelay(True)
     curses.curs_set(0)
 
@@ -226,13 +291,25 @@ def main(stdscr):
         stdscr.addstr(7, 0, f"POWER:  {v_batt:.2f}V @ {amps:.2f}A")
         stdscr.addstr(9, 0, f"STATUS: {status_msg}")
         
+        # Autopilot status
+        autopilot_status = "🤖 AUTOPILOT ACTIVE" if autopilot_enabled else "○ Autopilot Inactive"
+        autopilot_color = curses.A_REVERSE if autopilot_enabled else curses.A_DIM
+        stdscr.addstr(10, 0, autopilot_status, autopilot_color)
+        
+        # Emergency brake status (only show when autopilot is active)
+        if autopilot_enabled and emergency_brake_active:
+            stdscr.addstr(11, 0, "🛑 EMERGENCY BRAKE ACTIVE", curses.A_REVERSE)
+        
         if running:
-            stdscr.addstr(11, 0, "● ON AIR (LIVE)", curses.A_REVERSE)
+            stdscr.addstr(13, 0, "● ON AIR (LIVE)", curses.A_REVERSE)
         else:
-            stdscr.addstr(11, 0, "○ STANDBY (Press Start on Gamepad)", curses.A_DIM)
+            stdscr.addstr(13, 0, "○ STANDBY (Press Start on Gamepad)", curses.A_DIM)
 
-        stdscr.addstr(14, 0, "[A] Gear 1  [B] Gear 2  [X] Gear 3  [Y] SPORT")
-        stdscr.addstr(15, 0, "[Q] Quit    [SPACE] Emergency Stop")
+        stdscr.addstr(16, 0, "[A] Gear 1  [B] Gear 2  [X] Gear 3*  [Y] SPORT", curses.A_DIM)
+        stdscr.addstr(17, 0, "[START] Engine Toggle  [SELECT] Double-click to Turn Off", curses.A_DIM)
+        stdscr.addstr(18, 0, "[LB+RB] Toggle Autopilot  [X]* Emergency Brake (in Autopilot)", curses.A_DIM)
+        stdscr.addstr(19, 0, "* X function changes based on autopilot state", curses.A_DIM)
+        stdscr.addstr(21, 0, "[Q] Quit    [SPACE] Emergency Stop")
 
         key = stdscr.getch()
         if key == ord('q'): break
