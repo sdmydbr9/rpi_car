@@ -227,6 +227,15 @@ export function connectToServer(serverIp: string, port: number = 5000): Promise<
       console.log(`[Socket] ⬛ Startup check result:`, data);
       if (startupCheckResultCallback) startupCheckResultCallback(data);
     });
+
+    // Register gamepad event listeners at connect time so they persist across reconnects
+    socket.on('gamepad_start_pressed', (data: { engine_running: boolean }) => {
+      if (gamepadStartPressedCallback) gamepadStartPressedCallback(data);
+    });
+
+    socket.on('autonomous_update', (data: { autonomous_mode: boolean; source?: string }) => {
+      if (autonomousUpdateCallback) autonomousUpdateCallback(data);
+    });
   });
 }
 
@@ -1130,12 +1139,15 @@ let gamepadStartPressedCallback: ((data: { engine_running: boolean }) => void) |
  */
 export function onGamepadStartPressed(callback: (data: { engine_running: boolean }) => void): void {
   gamepadStartPressedCallback = callback;
-  if (socket) {
-    socket.off('gamepad_start_pressed');
-    socket.on('gamepad_start_pressed', (data: { engine_running: boolean }) => {
-      if (gamepadStartPressedCallback) gamepadStartPressedCallback(data);
-    });
-  }
+}
+
+let autonomousUpdateCallback: ((data: { autonomous_mode: boolean; source?: string }) => void) | null = null;
+
+/**
+ * Subscribe to autonomous_update events (gamepad LB+RB autopilot toggle)
+ */
+export function onAutonomousUpdate(callback: (data: { autonomous_mode: boolean; source?: string }) => void): void {
+  autonomousUpdateCallback = callback;
 }
 
 export default {
@@ -1201,4 +1213,5 @@ export default {
   emitGamepadEnable,
   emitGamepadDisable,
   onGamepadStartPressed,
+  onAutonomousUpdate,
 };

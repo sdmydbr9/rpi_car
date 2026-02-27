@@ -2352,6 +2352,14 @@ _GAMEPAD_GEAR_MAP = {
     "S": 100.0,
 }
 
+# --- BTN_SELECT double-press engine kill-switch state ---
+_gamepad_select_last_press = 0.0        # timestamp of last BTN_SELECT press
+_GAMEPAD_DOUBLE_PRESS_WINDOW = 0.6      # max seconds between presses
+
+# --- LB / RB shoulder button tracking for autopilot combo ---
+_gamepad_btn_tl_held = False             # True while LB is physically held
+_gamepad_btn_tr_held = False             # True while RB is physically held
+
 def _gamepad_reader_thread():
     """
     Blocking reader thread. Uses `inputs.get_gamepad()` which blocks until
@@ -2409,9 +2417,13 @@ def _gamepad_reader_thread():
                     car_state["gear"] = "2"
                     print("🎮 [Gamepad] Gear → 2")
                 elif event.code in ('BTN_WEST', 'BTN_X') and event.state == 1:
-                    car_state["gamepad_gear"] = "3"
-                    car_state["gear"] = "3"
-                    print("🎮 [Gamepad] Gear → 3")
+                    # Context-sensitive: emergency brake in autopilot, Gear 3 otherwise
+                    if car_state.get("autonomous_mode", False):
+                        _gamepad_toggle_emergency_brake()
+                    else:
+                        car_state["gamepad_gear"] = "3"
+                        car_state["gear"] = "3"
+                        print("🎮 [Gamepad] Gear → 3")
                 elif event.code in ('BTN_NORTH', 'BTN_Y') and event.state == 1:
                     car_state["gamepad_gear"] = "S"
                     car_state["gear"] = "S"
@@ -2420,6 +2432,16 @@ def _gamepad_reader_thread():
                 # --- Start button → Engine Start / Stop ---
                 elif event.code == 'BTN_START' and event.state == 1:
                     _gamepad_toggle_engine()
+
+                # --- Select button double-press → Engine OFF (kill-switch) ---
+                elif event.code == 'BTN_SELECT' and event.state == 1:
+                    _gamepad_handle_select_press()
+
+                # --- LB (BTN_TL) / RB (BTN_TR) → track held state ---
+                elif event.code == 'BTN_TL':
+                    _gamepad_handle_shoulder('TL', event.state)
+                elif event.code == 'BTN_TR':
+                    _gamepad_handle_shoulder('TR', event.state)
 
         except Exception:
             if car_state["gamepad_connected"]:
@@ -2475,6 +2497,175 @@ def _gamepad_toggle_engine():
             socketio.emit('gamepad_start_pressed', {'engine_running': True})
         except Exception:
             pass
+
+
+# ------------------------------------------------------------------
+# Helper: BTN_SELECT double-press → engine kill-switch (one-way OFF)
+# ------------------------------------------------------------------
+def _gamepad_handle_select_press():
+    """Detect BTN_SELECT double-press within the time window.
+
+    Two consecutive presses within _GAMEPAD_DOUBLE_PRESS_WINDOW seconds
+    will force the engine OFF.  A single press is ignored (no toggle).
+    This is a safety kill-switch — it never starts the engine.
+    """
+    global _gamepad_select_last_press
+    now = time.time()
+    if (now - _gamepad_select_last_press) < _GAMEPAD_DOUBLE_PRESS_WINDOW:
+        # Double-press detected → kill engine
+        _gamepad_engine_off()
+        _gamepad_select_last_press = 0.0   # reset so a third press doesn't re-trigger
+    else:
+        _gamepad_select_last_press = now
+
+
+def _gamepad_engine_off():
+    """Unconditionally stop the engine (one-way kill-switch).
+
+    Also disables autopilot if it was active.  Never starts the engine.
+    """
+    if not car_state.get("engine_running", False):
+        return  # already off, nothing to do
+
+    # Disable autopilot first if active
+    if car_state.get("autonomous_mode", False):
+        car_state["autonomous_mode"] = False
+        try:
+            autopilot.stop()
+            car_system.stop()
+        except Exception:
+            pass
+        print("🎮 [Gamepad] SELECT×2 → AUTOPILOT force-disabled")
+
+    # Stop engine (mirrors the STOP branch of _gamepad_toggle_engine)
+    car_state["engine_running"] = False
+    car_state["auto_accel_enabled"] = False
+    car_state["gas_pressed"] = False
+    car_state["brake_pressed"] = True
+    car_state["is_braking"] = True
+    car_state["current_pwm"] = 0
+    car_state["obstacle_state"] = "IDLE"
+    try:
+        car_system.brake()
+    except Exception:
+        pass
+    car_audio.set_engine_running(False)
+    print("🎮 [Gamepad] SELECT×2 → ENGINE OFF (kill-switch)")
+    try:
+        socketio.emit('gamepad_start_pressed', {'engine_running': False})
+    except Exception:
+        pass
+
+
+# ------------------------------------------------------------------
+# Helper: LB + RB simultaneous hold → autopilot toggle
+# ------------------------------------------------------------------
+def _gamepad_handle_shoulder(which, state):
+    """Track LB/RB held state; when both are held simultaneously, toggle autopilot."""
+    global _gamepad_btn_tl_held, _gamepad_btn_tr_held
+    if which == 'TL':
+        _gamepad_btn_tl_held = (state == 1)
+    else:
+        _gamepad_btn_tr_held = (state == 1)
+
+    # Check if BOTH are now held
+    if _gamepad_btn_tl_held and _gamepad_btn_tr_held:
+        _gamepad_toggle_autopilot()
+
+
+def _gamepad_toggle_autopilot():
+    """Toggle autonomous driving mode from LB+RB gamepad combo.
+
+    Mirrors the logic of enable_autonomous() / disable_autonomous()
+    HTTP routes but triggered from the physical controller.
+    """
+    if car_state.get("autonomous_mode", False):
+        # --- DISABLE autopilot ---
+        car_state["autonomous_mode"] = False
+        try:
+            autopilot.stop()
+            car_system.stop()
+        except Exception:
+            pass
+        car_state["current_pwm"] = 0
+        car_state["gas_pressed"] = False
+        car_state["brake_pressed"] = False
+        car_state["gear"] = "N"
+        car_state["steer_angle"] = 0
+        car_state["user_steer_angle"] = 0
+        print("🎮 [Gamepad] LB+RB → AUTOPILOT DISABLED")
+        try:
+            socketio.emit('autonomous_update', {
+                'autonomous_mode': False,
+                'source': 'gamepad'
+            })
+        except Exception:
+            pass
+    else:
+        # --- ENABLE autopilot ---
+        if not car_state.get("engine_running", False):
+            print("🎮 [Gamepad] LB+RB → Cannot enable autopilot: engine is OFF")
+            return
+        car_state["autonomous_mode"] = True
+        car_state["autonomous_state"] = "CRUISING"
+        car_state["last_obstacle_side"] = "none"
+        car_state["ir_enabled"] = True
+        car_state["sonar_enabled"] = True
+        try:
+            autopilot.start()
+        except Exception:
+            pass
+        print("🎮 [Gamepad] LB+RB → AUTOPILOT ENABLED")
+        try:
+            socketio.emit('autonomous_update', {
+                'autonomous_mode': True,
+                'source': 'gamepad'
+            })
+        except Exception:
+            pass
+
+
+# ------------------------------------------------------------------
+# Helper: X button → emergency brake toggle (autopilot mode only)
+# ------------------------------------------------------------------
+def _gamepad_toggle_emergency_brake():
+    """Toggle emergency brake from gamepad X button while autopilot is active.
+
+    Mirrors the on_emergency_stop socket handler logic.
+    """
+    car_state["emergency_brake_active"] = not car_state["emergency_brake_active"]
+    car_state["current_pwm"] = 0
+
+    if car_state["emergency_brake_active"]:
+        # Activating e-brake
+        save_gear_before_ebrake()
+        car_state["gear"] = "N"
+        car_state["obstacle_state"] = "IDLE"
+        car_state["steer_angle"] = 0
+        try:
+            car_system.stop()
+        except Exception:
+            pass
+        if autopilot.is_active:
+            try:
+                autopilot.stop()
+            except Exception:
+                pass
+        print("🎮 [Gamepad] X → EMERGENCY BRAKE: 🔴 ON")
+    else:
+        # Releasing e-brake
+        restore_gear_after_ebrake()
+        car_state["obstacle_state"] = "IDLE"
+        car_state["steer_angle"] = 0
+        print("🎮 [Gamepad] X → EMERGENCY BRAKE: 🟢 OFF")
+
+    try:
+        socketio.emit('emergency_stop_response', {
+            'status': 'ok',
+            'emergency_brake_active': car_state["emergency_brake_active"]
+        })
+    except Exception:
+        pass
 
 
 def _gamepad_drive_thread():

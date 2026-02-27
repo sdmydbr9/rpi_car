@@ -638,6 +638,12 @@ export const CockpitController = () => {
           rpm: isEngineRunning ? (data.rpm ?? prev.rpm) : 0,
           batteryVoltage: data.battery_voltage ?? prev.batteryVoltage,
           encoderAvailable: data.encoder_available ?? prev.encoderAvailable,
+          // In console (gamepad) mode, sync steering angle from telemetry so the
+          // UI steering wheel moves with the physical controller input.
+          // In device mode, steeringAngle is controlled by touch — never overwrite.
+          ...(isConsoleMode && data.steer_angle !== undefined
+            ? { steeringAngle: data.steer_angle }
+            : {}),
           // DO NOT update throttle and brake from telemetry - these are user-controlled inputs
           // that must maintain their state while held
         };
@@ -705,6 +711,11 @@ export const CockpitController = () => {
       // Update gamepad telemetry
       if (data.gamepad_connected !== undefined) setGamepadConnected(data.gamepad_connected);
       if (data.gamepad_gear !== undefined) setGamepadGear(data.gamepad_gear);
+      // In console (gamepad) mode, sync emergency brake state from server (gamepad X button)
+      if (isConsoleMode && data.emergency_brake_active !== undefined) {
+        setEBrakeActive(data.emergency_brake_active);
+        setIsEmergencyStop(data.emergency_brake_active);
+      }
       // Update live camera config from telemetry (for HUD badge only — does NOT touch tuning state)
       if (data.camera_resolution) setLiveCameraResolution(data.camera_resolution);
       if (data.camera_jpeg_quality !== undefined) setLiveCameraJpegQuality(data.camera_jpeg_quality);
@@ -725,6 +736,19 @@ export const CockpitController = () => {
       if (!data.engine_running) {
         setIsAutoMode(false);
         setControlState(prev => ({ ...prev, throttle: false, brake: false, speed: 0, speedMpm: 0, temperature: 0, cpuClock: 0, gpuClock: 0, rpm: 0, batteryVoltage: 0 }));
+      }
+    });
+
+    // Subscribe to gamepad LB+RB autopilot toggle events (instant feedback)
+    socketClient.onAutonomousUpdate((data) => {
+      console.log('🎮 [Gamepad] Autopilot update — autonomous_mode:', data.autonomous_mode, 'source:', data.source);
+      setIsAutopilotRunning(data.autonomous_mode);
+      setIsAutoMode(data.autonomous_mode);
+      setIsAutopilotEnabled(data.autonomous_mode); // Show/hide AutopilotTelemetry panel
+      if (!data.autonomous_mode) {
+        // Autopilot disabled — reset related UI state
+        setAutonomousState('');
+        setAutonomousTargetSpeed(0);
       }
     });
 

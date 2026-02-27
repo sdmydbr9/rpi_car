@@ -211,13 +211,42 @@ Access the Settings dialog (⚙️ icon) to configure camera and computer vision
 
 **Note**: The camera uses cv2.cvtColor for BGR to RGB color conversion, ensuring standard color representation in the video stream.
 
+### Gamepad Controls
+
+Connect a USB/Bluetooth gamepad (e.g. EvoFox) to the Raspberry Pi. The controller is auto-detected.
+
+#### Axes
+
+| Input | Event Code | Function |
+|-------|-----------|----------|
+| Left Stick Y | `ABS_Y` | Throttle (forward / reverse) |
+| Right Stick X | `ABS_Z` | Steering (left / right) |
+
+#### Buttons
+
+| Button | Event Code | Function |
+|--------|-----------|----------|
+| A | `BTN_SOUTH` / `BTN_A` | Gear 1 (35% power) |
+| B | `BTN_EAST` / `BTN_B` | Gear 2 (60% power) |
+| X | `BTN_WEST` / `BTN_X` | Gear 3 (80% power) — **or Emergency Brake when autopilot is active** |
+| Y | `BTN_NORTH` / `BTN_Y` | Gear S — Sport (100% power) |
+| Start | `BTN_START` | Toggle engine on / off |
+| Select ×2 | `BTN_SELECT` | **Double-press within 0.6 s → Engine OFF** (one-way kill-switch, never starts engine) |
+| LB + RB | `BTN_TL` + `BTN_TR` | **Hold both simultaneously → Toggle Autopilot** on / off (requires engine running) |
+
+#### Special Combos
+
+- **Select × 2 (kill-switch)**: Press Select twice quickly (within 0.6 seconds) to force the engine off. This is a safety kill-switch — it only turns the engine *off*, never on. If autopilot is active it will be disabled first.
+- **LB + RB (autopilot toggle)**: Hold both shoulder buttons at the same time to toggle autonomous driving mode. The engine must be running. Press LB+RB again to return to manual control.
+- **X during autopilot (emergency brake)**: When autopilot is active, the X button acts as an emergency brake toggle instead of setting Gear 3. Press X to activate the e-brake (motors stop, gear → Neutral). Press X again to release.
+
 ### Autonomous Mode
 1. Enable sensors (IR and Sonar)
-2. Toggle **Autopilot** switch
+2. Toggle **Autopilot** switch (or hold **LB + RB** on gamepad)
 3. Car will navigate autonomously, avoiding obstacles
 
 ### Emergency Stop
-Press the **E-BRAKE** button at any time to immediately stop the car.
+Press the **E-BRAKE** button at any time to immediately stop the car. On a gamepad, press **X** while autopilot is active, or double-press **Select** to kill the engine entirely.
 
 ## 🛠️ Development
 
