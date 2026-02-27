@@ -752,6 +752,30 @@ export const CockpitController = () => {
       }
     });
 
+    // Subscribe to gamepad Select+Start hot start events
+    socketClient.onGamepadHotStart((data) => {
+      console.log('🎮 [Gamepad] Hot Start — engine_running:', data.engine_running, 'gamepad_enabled:', data.gamepad_enabled);
+      setIsEngineRunning(data.engine_running);
+    });
+
+    // Subscribe to gamepad Select+A / Select+X sensor toggle events
+    socketClient.onGamepadSensorToggle((data) => {
+      console.log('🎮 [Gamepad] Sensor toggle —', data.sensor, ':', data.enabled);
+      if (data.sensor === 'sonar') {
+        setIsSonarEnabled(data.enabled);
+        localStorage.setItem('sonarEnabled', String(data.enabled));
+      } else if (data.sensor === 'ir') {
+        setIsIREnabled(data.enabled);
+        localStorage.setItem('irEnabled', String(data.enabled));
+      }
+    });
+
+    // Subscribe to gamepad LT+RT autoaccelerate toggle events
+    socketClient.onGamepadAutoAccelUpdate((data) => {
+      console.log('🎮 [Gamepad] Auto-accel update — enabled:', data.auto_accel_enabled);
+      setIsAutoMode(data.auto_accel_enabled);
+    });
+
     // If console mode is active and connected, tell backend to enable gamepad input
     if (isConsoleMode) {
       socketClient.emitGamepadEnable();

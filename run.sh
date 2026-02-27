@@ -25,4 +25,5 @@ done
 export CAR_AUDIO_DRIVER="${CAR_AUDIO_DRIVER:-pulseaudio}"
 export CAR_AUDIO_REQUIRE_PULSE="${CAR_AUDIO_REQUIRE_PULSE:-1}"
 
-exec python3 main.py
+# Pass through any CLI args (e.g. --auto-start for headless/event mode)
+exec python3 main.py "$@"

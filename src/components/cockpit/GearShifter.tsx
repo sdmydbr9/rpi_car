@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ColorThief from "colorthief";
 import { Music, OctagonX, Power, PowerOff, Radio, Volume2 } from "lucide-react";
 
@@ -274,6 +274,8 @@ export const GearShifter = ({
   const [nowPlaying, setNowPlaying] = useState<NowPlayingState>(DEFAULT_NOW_PLAYING);
   const [metadataUnavailable, setMetadataUnavailable] = useState(false);
   const [playerTheme, setPlayerTheme] = useState<PlayerTheme>(DEFAULT_PLAYER_THEME);
+  const nowPlayingPanelRef = useRef<HTMLDivElement | null>(null);
+  const [nowPlayingScale, setNowPlayingScale] = useState(1);
 
   useEffect(() => {
     let mounted = true;
@@ -361,6 +363,35 @@ export const GearShifter = ({
       albumImage.src = "";
     };
   }, [hasAlbumArt, nowPlaying.bg_color, nowPlaying.image]);
+
+  useEffect(() => {
+    const panel = nowPlayingPanelRef.current;
+    if (!panel || typeof ResizeObserver === "undefined") return;
+
+    const baseWidth = 360;
+    const baseHeight = 116;
+    const minScale = 0.62;
+    const maxScale = 1.85;
+
+    const updateScale = () => {
+      const { width, height } = panel.getBoundingClientRect();
+      if (width <= 0 || height <= 0) return;
+
+      const widthScale = width / baseWidth;
+      const heightScale = height / baseHeight;
+      const nextScale = Math.max(minScale, Math.min(maxScale, Math.min(widthScale, heightScale)));
+
+      setNowPlayingScale((prevScale) => (Math.abs(prevScale - nextScale) > 0.02 ? nextScale : prevScale));
+    };
+
+    updateScale();
+    const resizeObserver = new ResizeObserver(updateScale);
+    resizeObserver.observe(panel);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, []);
 
   return (
     <div className="flex flex-col items-center h-full pt-0.5 pb-0.5 px-1 overflow-hidden bg-gradient-to-b from-background to-background/80">
@@ -661,53 +692,67 @@ export const GearShifter = ({
       </div>
 
       {/* NOW PLAYING HUD */}
-      <div className="w-full px-0.5 mb-0.5 min-h-0 flex-[0.78]">
+      <div className="w-full px-0.5 mb-0.5 min-h-0 flex-[0.78]" ref={nowPlayingPanelRef}>
         <div
           className="h-full min-h-0 border rounded-sm backdrop-blur-sm transition-all duration-300 overflow-hidden flex flex-col justify-between"
           style={{
             minHeight: "54px",
-            padding: "clamp(5px, 0.9vw, 10px) clamp(6px, 1.1vw, 10px)",
+            padding: `calc(5px * ${nowPlayingScale}) calc(6px * ${nowPlayingScale})`,
             borderColor: playerTheme.border,
             background: playerTheme.cardBackground,
             boxShadow: `inset 0 0 0 1px ${playerTheme.border}, 0 8px 20px rgba(0, 0, 0, 0.28)`,
           }}
         >
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center" style={{ gap: `calc(6px * ${nowPlayingScale})` }}>
             <div
-              className="w-[clamp(26px,7.2vw,40px)] h-[clamp(26px,7.2vw,40px)] rounded-sm overflow-hidden flex items-center justify-center flex-shrink-0 border bg-black/20"
-              style={{ borderColor: playerTheme.border }}
+              className="rounded-sm overflow-hidden flex items-center justify-center flex-shrink-0 border bg-black/20"
+              style={{
+                width: `calc(26px * ${nowPlayingScale})`,
+                height: `calc(26px * ${nowPlayingScale})`,
+                borderColor: playerTheme.border,
+              }}
             >
               {hasAlbumArt ? (
                 <img src={nowPlaying.image} alt="Album art" className="w-full h-full object-cover" />
               ) : (
                 <Music
-                  className="w-[clamp(10px,2.8vw,16px)] h-[clamp(10px,2.8vw,16px)]"
-                  style={{ color: playerTheme.accent, filter: `drop-shadow(0 0 4px ${playerTheme.accent})` }}
+                  style={{
+                    width: `calc(10px * ${nowPlayingScale})`,
+                    height: `calc(10px * ${nowPlayingScale})`,
+                    color: playerTheme.accent,
+                    filter: `drop-shadow(0 0 4px ${playerTheme.accent})`,
+                  }}
                 />
               )}
             </div>
 
             <div className="flex flex-col min-w-0 flex-1 overflow-hidden">
               <span
-                className="text-[7px] sm:text-[11px] font-bold truncate leading-tight tracking-wide"
-                style={{ color: playerTheme.title }}
+                className="font-bold truncate leading-tight tracking-wide"
+                style={{ color: playerTheme.title, fontSize: `calc(7px * ${nowPlayingScale})` }}
               >
                 {displayTrack}
               </span>
               <span
-                className="text-[5px] sm:text-[8px] truncate leading-tight tracking-wider uppercase"
-                style={{ color: playerTheme.subtitle }}
+                className="truncate leading-tight tracking-wider uppercase"
+                style={{ color: playerTheme.subtitle, fontSize: `calc(5px * ${nowPlayingScale})` }}
               >
                 {displayArtist}
               </span>
-              <span className="text-[5px] sm:text-[7px] truncate leading-tight" style={{ color: playerTheme.subtitle }}>
+              <span
+                className="truncate leading-tight"
+                style={{ color: playerTheme.subtitle, fontSize: `calc(5px * ${nowPlayingScale})` }}
+              >
                 {displayAlbum}
               </span>
             </div>
           </div>
 
-          <div className="mt-1 flex items-end gap-1.5">
-            <div className="flex-1 h-[4px] rounded-full overflow-hidden" style={{ backgroundColor: playerTheme.progressTrack }}>
+          <div className="flex items-end" style={{ marginTop: `calc(4px * ${nowPlayingScale})`, gap: `calc(6px * ${nowPlayingScale})` }}>
+            <div
+              className="flex-1 rounded-full overflow-hidden"
+              style={{ height: `calc(4px * ${nowPlayingScale})`, backgroundColor: playerTheme.progressTrack }}
+            >
               <div
                 className="h-full bg-primary rounded-full transition-all duration-150"
                 style={{
@@ -717,19 +762,28 @@ export const GearShifter = ({
                 }}
               />
             </div>
-            <div className="flex flex-col items-end gap-0.5 min-w-[clamp(42px,10vw,56px)]">
-              <div className="flex items-center gap-0.5 text-[4.5px] sm:text-[6px]" style={{ color: playerTheme.subtitle }}>
-                <Volume2 className="w-[7px] h-[7px] sm:w-[8px] sm:h-[8px]" />
+            <div
+              className="flex flex-col items-end"
+              style={{ gap: `calc(2px * ${nowPlayingScale})`, minWidth: `calc(42px * ${nowPlayingScale})` }}
+            >
+              <div
+                className="flex items-center"
+                style={{ gap: `calc(2px * ${nowPlayingScale})`, color: playerTheme.subtitle, fontSize: `calc(4.5px * ${nowPlayingScale})` }}
+              >
+                <Volume2 style={{ width: `calc(7px * ${nowPlayingScale})`, height: `calc(7px * ${nowPlayingScale})` }} />
                 <span>{nowPlaying.volume}</span>
               </div>
-              <span className="text-[4.5px] sm:text-[6px] leading-none text-right" style={{ color: playerTheme.subtitle }}>
+              <span className="leading-none text-right" style={{ color: playerTheme.subtitle, fontSize: `calc(4.5px * ${nowPlayingScale})` }}>
                 {nowPlaying.time_str}
               </span>
             </div>
           </div>
 
           {metadataUnavailable && (
-            <div className="text-[4.5px] sm:text-[5px] mt-1 text-right" style={{ color: playerTheme.subtitle }}>
+            <div
+              className="text-right"
+              style={{ marginTop: `calc(4px * ${nowPlayingScale})`, color: playerTheme.subtitle, fontSize: `calc(4.5px * ${nowPlayingScale})` }}
+            >
               Metadata unavailable
             </div>
           )}

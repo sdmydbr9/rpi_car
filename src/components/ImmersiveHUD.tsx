@@ -1,5 +1,6 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { X, Wifi, Zap, Power, VideoOff, Camera, Mic, Gamepad2 } from "lucide-react";
+import { GamepadControlsDialog } from "./cockpit/GamepadControlsDialog";
 import { useGameFeedback } from "@/hooks/useGameFeedback";
 import { useTouchTracking } from "@/hooks/useTouchTracking";
 import { IrisOverlay, useIrisAnimation } from "@/components/ui/iris-overlay";
@@ -462,9 +463,15 @@ export const ImmersiveHUD = ({
 
             {/* Gamepad Status (when in console mode) */}
             {inputMode === "console" && (
-              <div className="flex items-center gap-1 text-[10px] racing-text" title="gamepad controller mode">
-                <Gamepad2 className={`w-3 h-3 ${gamepadConnected ? 'text-green-400' : 'text-destructive'}`} />
-              </div>
+              <GamepadControlsDialog gamepadConnected={gamepadConnected}>
+                <button
+                  type="button"
+                  className="flex items-center gap-1 text-[10px] racing-text cursor-pointer hover:opacity-80 transition-opacity"
+                  title="View gamepad controls"
+                >
+                  <Gamepad2 className={`w-3 h-3 ${gamepadConnected ? 'text-green-400' : 'text-destructive'}`} />
+                </button>
+              </GamepadControlsDialog>
             )}
             
             {/* Close Button */}

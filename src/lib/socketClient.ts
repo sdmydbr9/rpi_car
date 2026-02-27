@@ -236,6 +236,18 @@ export function connectToServer(serverIp: string, port: number = 5000): Promise<
     socket.on('autonomous_update', (data: { autonomous_mode: boolean; source?: string }) => {
       if (autonomousUpdateCallback) autonomousUpdateCallback(data);
     });
+
+    socket.on('gamepad_hot_start', (data: { engine_running: boolean; gamepad_enabled: boolean }) => {
+      if (gamepadHotStartCallback) gamepadHotStartCallback(data);
+    });
+
+    socket.on('gamepad_sensor_toggle', (data: { sensor: string; enabled: boolean }) => {
+      if (gamepadSensorToggleCallback) gamepadSensorToggleCallback(data);
+    });
+
+    socket.on('gamepad_autoaccel_update', (data: { auto_accel_enabled: boolean; source?: string }) => {
+      if (gamepadAutoAccelCallback) gamepadAutoAccelCallback(data);
+    });
   });
 }
 
@@ -1150,6 +1162,33 @@ export function onAutonomousUpdate(callback: (data: { autonomous_mode: boolean; 
   autonomousUpdateCallback = callback;
 }
 
+let gamepadHotStartCallback: ((data: { engine_running: boolean; gamepad_enabled: boolean }) => void) | null = null;
+
+/**
+ * Subscribe to gamepad Select+Start hot start events
+ */
+export function onGamepadHotStart(callback: (data: { engine_running: boolean; gamepad_enabled: boolean }) => void): void {
+  gamepadHotStartCallback = callback;
+}
+
+let gamepadSensorToggleCallback: ((data: { sensor: string; enabled: boolean }) => void) | null = null;
+
+/**
+ * Subscribe to gamepad sensor toggle events (Select+A = sonar, Select+X = IR)
+ */
+export function onGamepadSensorToggle(callback: (data: { sensor: string; enabled: boolean }) => void): void {
+  gamepadSensorToggleCallback = callback;
+}
+
+let gamepadAutoAccelCallback: ((data: { auto_accel_enabled: boolean; source?: string }) => void) | null = null;
+
+/**
+ * Subscribe to gamepad autoaccelerate toggle events (LT+RT)
+ */
+export function onGamepadAutoAccelUpdate(callback: (data: { auto_accel_enabled: boolean; source?: string }) => void): void {
+  gamepadAutoAccelCallback = callback;
+}
+
 export default {
   connectToServer,
   disconnectFromServer,
@@ -1214,4 +1253,7 @@ export default {
   emitGamepadDisable,
   onGamepadStartPressed,
   onAutonomousUpdate,
+  onGamepadHotStart,
+  onGamepadSensorToggle,
+  onGamepadAutoAccelUpdate,
 };

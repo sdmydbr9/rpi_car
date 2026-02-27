@@ -2355,10 +2355,135 @@ _GAMEPAD_GEAR_MAP = {
 # --- BTN_SELECT double-press engine kill-switch state ---
 _gamepad_select_last_press = 0.0        # timestamp of last BTN_SELECT press
 _GAMEPAD_DOUBLE_PRESS_WINDOW = 0.6      # max seconds between presses
+_gamepad_select_held = False             # True while SELECT is physically held
 
 # --- LB / RB shoulder button tracking for autopilot combo ---
 _gamepad_btn_tl_held = False             # True while LB is physically held
 _gamepad_btn_tr_held = False             # True while RB is physically held
+
+# --- LT (BTN_TL2) / RT (BTN_TR2) trigger tracking for autoaccel combo ---
+_gamepad_btn_tl2_held = False            # True while LT trigger is fully pressed
+_gamepad_btn_tr2_held = False            # True while RT trigger is fully pressed
+
+# --- Known gamepad USB vendor:product IDs (for USB reset recovery) ---
+_GAMEPAD_KNOWN_USB_IDS = [
+    ("2563", "0526"),  # ShenZhen ShanWan Android GamePad
+    ("054c", "05c4"),  # Sony DualShock 4 (Wireless Controller mode)
+    ("054c", "09cc"),  # Sony DualShock 4 v2
+]
+
+
+def _gamepad_find_usb_device_path():
+    """Find sysfs path for a known gamepad USB device (if connected)."""
+    import glob
+    for sysfs_dir in glob.glob("/sys/bus/usb/devices/*/"):
+        try:
+            vid_path = os.path.join(sysfs_dir, "idVendor")
+            pid_path = os.path.join(sysfs_dir, "idProduct")
+            if not os.path.isfile(vid_path) or not os.path.isfile(pid_path):
+                continue
+            vid = open(vid_path).read().strip()
+            pid = open(pid_path).read().strip()
+            if (vid, pid) in _GAMEPAD_KNOWN_USB_IDS:
+                return sysfs_dir.rstrip("/")
+        except Exception:
+            continue
+    return None
+
+
+def _gamepad_has_input_device():
+    """Check if any gamepad / joystick input device currently exists."""
+    import glob
+    # Check for joystick devices
+    if glob.glob("/dev/input/js*"):
+        return True
+    # Also check /proc/bus/input/devices for any gamepad
+    try:
+        devinfo = open("/proc/bus/input/devices").read().lower()
+        if "gamepad" in devinfo or "joystick" in devinfo:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _gamepad_usb_reset():
+    """Reset the gamepad's parent USB hub to recover from HID probe failure.
+
+    Some controllers (e.g. ShanWan PS4 clones) alternate between a
+    "Wireless Controller" (Sony) identity and their real "Android
+    GamePad" identity.  If the kernel's ``playstation`` or ``usbhid``
+    driver fails the initial probe (``-EPIPE`` / ``-ETIMEDOUT``), the
+    controller firmware gets stuck and simple device-level resets don't
+    help.
+
+    Power-cycling the **parent hub** forces a full power-off/on cycle
+    that resets the controller firmware, allowing ``hid-generic`` to
+    bind successfully on the next enumeration.
+
+    Returns True if a reset was performed.
+    """
+    usb_path = _gamepad_find_usb_device_path()
+    if not usb_path:
+        return False  # controller not physically connected
+    if _gamepad_has_input_device():
+        return False  # input device exists, no reset needed
+
+    product = "unknown"
+    try:
+        product = open(os.path.join(usb_path, "product")).read().strip()
+    except Exception:
+        pass
+
+    # Determine the parent hub sysfs path.
+    # Device path looks like /sys/bus/usb/devices/1-1.3
+    # Parent hub is /sys/bus/usb/devices/1-1
+    device_name = os.path.basename(usb_path)  # e.g. "1-1.3"
+    parent_name = device_name.rsplit(".", 1)[0] if "." in device_name else None
+    if parent_name:
+        parent_path = os.path.join(os.path.dirname(usb_path), parent_name)
+    else:
+        parent_path = usb_path  # fallback to device itself
+
+    # Prefer hub-level reset; fall back to device-level if hub path missing
+    auth_path = os.path.join(parent_path, "authorized")
+    reset_target = parent_name or device_name
+    if not os.path.isfile(auth_path):
+        auth_path = os.path.join(usb_path, "authorized")
+        reset_target = device_name
+        if not os.path.isfile(auth_path):
+            return False
+
+    print(f"⚠️  [Gamepad] USB device '{product}' found but no input device "
+          f"— resetting USB hub ({reset_target})...")
+    try:
+        import subprocess
+        # De-authorize (power-off) the hub, wait, then re-authorize.
+        # Use sudo tee since sysfs authorized files are root-owned.
+        subprocess.run(
+            ["sudo", "tee", auth_path],
+            input=b"0", capture_output=True, timeout=5,
+        )
+        time.sleep(3)
+        subprocess.run(
+            ["sudo", "tee", auth_path],
+            input=b"1", capture_output=True, timeout=5,
+        )
+        # The controller typically re-enumerates twice (Wireless Controller
+        # → fail → Android GamePad → success).  Give it extra time.
+        time.sleep(8)
+        if _gamepad_has_input_device():
+            print("✅ [Gamepad] USB hub reset succeeded — input device created")
+        else:
+            print("⚠️  [Gamepad] USB hub reset done — waiting for input device...")
+        return True
+    except PermissionError:
+        print("⚠️  [Gamepad] USB reset failed — no permission (need root)")
+        return False
+    except Exception as e:
+        print(f"⚠️  [Gamepad] USB reset error: {e}")
+        return False
+
 
 def _gamepad_reader_thread():
     """
@@ -2375,18 +2500,42 @@ def _gamepad_reader_thread():
     smoothed_steering = 0.0
     smoothed_throttle = 0.0
 
+    # Auto-start: when set, automatically trigger hot-start the first time
+    # a gamepad connects.  Enable via env var or --auto-start CLI flag.
+    _auto_start_env = os.environ.get("RC_GAMEPAD_AUTO_START", "").strip().lower() in ("1", "true", "yes", "on")
+    _auto_start_pending = _auto_start_env or "--auto-start" in sys.argv
+    if _auto_start_pending:
+        print("🎮 [Gamepad] Auto-start mode enabled — will hot-start on first controller connect")
+
     print("🎮 [Gamepad] Reader thread started — waiting for controller…")
+
+    _usb_reset_attempts = 0
+    _MAX_USB_RESET_ATTEMPTS = 3
+    _usb_reset_cooldown = 0.0  # timestamp of last reset attempt
 
     while True:
         try:
             events = _get_gamepad()
+            _usb_reset_attempts = 0  # reset counter on success
             if not car_state["gamepad_connected"]:
                 car_state["gamepad_connected"] = True
                 print("🎮 [Gamepad] Controller connected!")
+                # Auto hot-start on first gamepad connect (event / headless mode)
+                if _auto_start_pending:
+                    _auto_start_pending = False
+                    print("🎮 [Gamepad] Auto-start triggered on controller connect")
+                    _gamepad_hot_start()
 
             for event in events:
+                # Always allow Select / Start through so hot-start
+                # combo (Select+Start) works without the web UI.
                 if not car_state["gamepad_enabled"]:
-                    # If console mode not active, still track connection but skip inputs
+                    if event.code == 'BTN_SELECT':
+                        _gamepad_handle_select(event.state)
+                    elif event.code == 'BTN_START' and event.state == 1:
+                        if _gamepad_select_held:
+                            _gamepad_hot_start()
+                        # Ignore bare Start when gamepad mode not active
                     continue
 
                 # --- Left Stick Y → Throttle ---
@@ -2407,18 +2556,28 @@ def _gamepad_reader_thread():
                     else:
                         car_state["gamepad_steering"] = ((val - _GAMEPAD_JOY_CENTER) / 128.0) * 100.0
 
-                # --- Face buttons → Gear ---
+                # --- Face buttons → Gear (with Select combos) ---
                 elif event.code in ('BTN_SOUTH', 'BTN_A') and event.state == 1:
-                    car_state["gamepad_gear"] = "1"
-                    car_state["gear"] = "1"
-                    print("🎮 [Gamepad] Gear → 1")
+                    if _gamepad_select_held:
+                        # Select + A → Toggle Sonar
+                        _gamepad_toggle_sonar()
+                    else:
+                        car_state["gamepad_gear"] = "1"
+                        car_state["gear"] = "1"
+                        print("🎮 [Gamepad] Gear → 1")
                 elif event.code in ('BTN_EAST', 'BTN_B') and event.state == 1:
                     car_state["gamepad_gear"] = "2"
                     car_state["gear"] = "2"
                     print("🎮 [Gamepad] Gear → 2")
                 elif event.code in ('BTN_WEST', 'BTN_X') and event.state == 1:
-                    # Context-sensitive: emergency brake in autopilot, Gear 3 otherwise
-                    if car_state.get("autonomous_mode", False):
+                    if _gamepad_select_held:
+                        # Select + X → Toggle IR
+                        _gamepad_toggle_ir()
+                    elif _gamepad_btn_tl2_held and _gamepad_btn_tr2_held:
+                        # LT + RT + X → Emergency Brake
+                        _gamepad_toggle_emergency_brake()
+                    elif car_state.get("autonomous_mode", False):
+                        # X in autopilot → emergency brake
                         _gamepad_toggle_emergency_brake()
                     else:
                         car_state["gamepad_gear"] = "3"
@@ -2429,13 +2588,17 @@ def _gamepad_reader_thread():
                     car_state["gear"] = "S"
                     print("🎮 [Gamepad] Gear → SPORT")
 
-                # --- Start button → Engine Start / Stop ---
+                # --- Start button → Engine Start / Stop (with Select combo) ---
                 elif event.code == 'BTN_START' and event.state == 1:
-                    _gamepad_toggle_engine()
+                    if _gamepad_select_held:
+                        # Select + Start → Hot Start (engine ON + gamepad enabled, no UI wait)
+                        _gamepad_hot_start()
+                    else:
+                        _gamepad_toggle_engine()
 
-                # --- Select button double-press → Engine OFF (kill-switch) ---
-                elif event.code == 'BTN_SELECT' and event.state == 1:
-                    _gamepad_handle_select_press()
+                # --- Select button → track held + double-press kill-switch ---
+                elif event.code == 'BTN_SELECT':
+                    _gamepad_handle_select(event.state)
 
                 # --- LB (BTN_TL) / RB (BTN_TR) → track held state ---
                 elif event.code == 'BTN_TL':
@@ -2443,10 +2606,44 @@ def _gamepad_reader_thread():
                 elif event.code == 'BTN_TR':
                     _gamepad_handle_shoulder('TR', event.state)
 
+                # --- LT (BTN_TL2) / RT (BTN_TR2) triggers → autoaccel combo ---
+                elif event.code == 'BTN_TL2':
+                    _gamepad_handle_trigger('TL2', event.state)
+                elif event.code == 'BTN_TR2':
+                    _gamepad_handle_trigger('TR2', event.state)
+
         except Exception:
             if car_state["gamepad_connected"]:
                 car_state["gamepad_connected"] = False
                 print("⚠️  [Gamepad] Controller disconnected")
+
+            # --- USB reset recovery ---
+            # If the USB device is physically connected but the HID
+            # driver failed to create an input device, reset the USB
+            # device to force re-enumeration.  This fixes controllers
+            # (e.g. ShanWan PS4 clones) that intermittently fail HID
+            # probe with -EPIPE/-ETIMEDOUT.
+            now = time.time()
+            if (now - _usb_reset_cooldown) > 15 and _usb_reset_attempts < _MAX_USB_RESET_ATTEMPTS:
+                usb_path = _gamepad_find_usb_device_path()
+                if usb_path and not _gamepad_has_input_device():
+                    _usb_reset_attempts += 1
+                    _usb_reset_cooldown = now
+                    print(f"🔄 [Gamepad] USB hub reset attempt {_usb_reset_attempts}/{_MAX_USB_RESET_ATTEMPTS}")
+                    _gamepad_usb_reset()
+                    # The `inputs` library caches the device list at
+                    # import time.  After a USB reset creates a new
+                    # input device we must re-scan so get_gamepad()
+                    # can find it.
+                    if _gamepad_has_input_device():
+                        try:
+                            import inputs as _inputs_mod
+                            _inputs_mod.devices = _inputs_mod.DeviceManager()
+                            print("🔄 [Gamepad] Refreshed inputs device list")
+                        except Exception as _e:
+                            print(f"⚠️  [Gamepad] Failed to refresh device list: {_e}")
+                    continue  # retry immediately after reset
+
             time.sleep(1)
 
 
@@ -2500,23 +2697,28 @@ def _gamepad_toggle_engine():
 
 
 # ------------------------------------------------------------------
-# Helper: BTN_SELECT double-press → engine kill-switch (one-way OFF)
+# Helper: BTN_SELECT held state + double-press → engine kill-switch
 # ------------------------------------------------------------------
-def _gamepad_handle_select_press():
-    """Detect BTN_SELECT double-press within the time window.
+def _gamepad_handle_select(state):
+    """Track SELECT held state and detect double-press kill-switch.
 
+    state=1 → pressed, state=0 → released.
     Two consecutive presses within _GAMEPAD_DOUBLE_PRESS_WINDOW seconds
-    will force the engine OFF.  A single press is ignored (no toggle).
-    This is a safety kill-switch — it never starts the engine.
+    will force the engine OFF (safety kill-switch).
+    While SELECT is held, face buttons become combo modifiers (Select+A, Select+X, etc.).
     """
-    global _gamepad_select_last_press
-    now = time.time()
-    if (now - _gamepad_select_last_press) < _GAMEPAD_DOUBLE_PRESS_WINDOW:
-        # Double-press detected → kill engine
-        _gamepad_engine_off()
-        _gamepad_select_last_press = 0.0   # reset so a third press doesn't re-trigger
-    else:
-        _gamepad_select_last_press = now
+    global _gamepad_select_last_press, _gamepad_select_held
+    _gamepad_select_held = (state == 1)
+
+    if state == 1:
+        # Press event — check for double-press
+        now = time.time()
+        if (now - _gamepad_select_last_press) < _GAMEPAD_DOUBLE_PRESS_WINDOW:
+            # Double-press detected → kill engine
+            _gamepad_engine_off()
+            _gamepad_select_last_press = 0.0   # reset so a third press doesn't re-trigger
+        else:
+            _gamepad_select_last_press = now
 
 
 def _gamepad_engine_off():
@@ -2668,6 +2870,171 @@ def _gamepad_toggle_emergency_brake():
         pass
 
 
+# ------------------------------------------------------------------
+# Helper: Select + Start → Hot Start (engine + gamepad, no UI wait)
+# ------------------------------------------------------------------
+def _gamepad_hot_start():
+    """Start the car immediately from gamepad without waiting for the web UI.
+
+    Enables gamepad mode, starts the engine, and broadcasts events so
+    any connected UI clients can sync their state.
+    """
+    global _gamepad_select_last_press
+
+    if car_state.get("engine_running", False):
+        print("🎮 [Gamepad] HOT START → Engine already running")
+        return
+
+    # Reset the SELECT double-press timer so that releasing and
+    # re-pressing SELECT immediately after a hot-start combo doesn't
+    # accidentally trigger the kill-switch.
+    _gamepad_select_last_press = 0.0
+
+    # Enable gamepad mode (as if the UI had picked console mode)
+    car_state["gamepad_enabled"] = True
+    # Start engine
+    car_state["engine_running"] = True
+    car_state["brake_pressed"] = False
+    car_state["is_braking"] = False
+
+    # Start engine sounds (ignition + idle loop)
+    car_audio.set_engine_running(True)
+    print("🎮 [Gamepad] HOT START → ENGINE ON, sounds started, gamepad enabled")
+
+    # Run startup check in background
+    try:
+        _trigger_startup_check_async(
+            client_id=None,
+            source="gamepad_hot_start",
+            require_enabled=True,
+        )
+    except Exception:
+        pass
+
+    # Broadcast to any connected UI clients
+    try:
+        socketio.emit('gamepad_hot_start', {
+            'engine_running': True,
+            'gamepad_enabled': True,
+        })
+        socketio.emit('gamepad_start_pressed', {'engine_running': True})
+    except Exception:
+        pass
+
+
+# ------------------------------------------------------------------
+# Helper: Select + A → Toggle Sonar sensor
+# ------------------------------------------------------------------
+def _gamepad_toggle_sonar():
+    """Toggle sonar sensor from gamepad Select+A combo.
+
+    Mirrors the on_sonar_toggle socket handler logic.
+    Blocked while autopilot is active for safety.
+    """
+    if car_state.get("autonomous_mode", False):
+        print("🎮 [Gamepad] Select+A → SONAR toggle BLOCKED (autopilot active)")
+        return
+
+    car_state["sonar_enabled"] = not car_state["sonar_enabled"]
+    _sensor_config['sonar_enabled'] = car_state["sonar_enabled"]
+    _save_sensor_config(_sensor_config)
+    state = '✅ ON' if car_state["sonar_enabled"] else '❌ OFF'
+    print(f"🎮 [Gamepad] Select+A → SONAR: {state}")
+
+    try:
+        socketio.emit('gamepad_sensor_toggle', {
+            'sensor': 'sonar',
+            'enabled': car_state["sonar_enabled"],
+        })
+    except Exception:
+        pass
+
+
+# ------------------------------------------------------------------
+# Helper: Select + X → Toggle IR sensor
+# ------------------------------------------------------------------
+def _gamepad_toggle_ir():
+    """Toggle IR sensor from gamepad Select+X combo.
+
+    Mirrors the on_ir_toggle socket handler logic.
+    Blocked while autopilot is active for safety.
+    """
+    if car_state.get("autonomous_mode", False):
+        print("🎮 [Gamepad] Select+X → IR toggle BLOCKED (autopilot active)")
+        return
+
+    car_state["ir_enabled"] = not car_state["ir_enabled"]
+    _sensor_config['ir_enabled'] = car_state["ir_enabled"]
+    _save_sensor_config(_sensor_config)
+    state = '✅ ON' if car_state["ir_enabled"] else '❌ OFF'
+    print(f"🎮 [Gamepad] Select+X → IR: {state}")
+
+    try:
+        socketio.emit('gamepad_sensor_toggle', {
+            'sensor': 'ir',
+            'enabled': car_state["ir_enabled"],
+        })
+    except Exception:
+        pass
+
+
+# ------------------------------------------------------------------
+# Helper: LT + RT triggers → Toggle autoaccelerate
+# ------------------------------------------------------------------
+def _gamepad_handle_trigger(which, state):
+    """Track LT/RT trigger button held state; when both pressed, toggle autoaccel.
+
+    BTN_TL2 (state=1 pressed, 0 released) and BTN_TR2 same.
+    """
+    global _gamepad_btn_tl2_held, _gamepad_btn_tr2_held
+    if which == 'TL2':
+        _gamepad_btn_tl2_held = (state == 1)
+    else:
+        _gamepad_btn_tr2_held = (state == 1)
+
+    # Check if BOTH triggers are now pressed — toggle autoaccelerate
+    if _gamepad_btn_tl2_held and _gamepad_btn_tr2_held:
+        _gamepad_toggle_autoaccel()
+
+
+def _gamepad_toggle_autoaccel():
+    """Toggle auto-acceleration mode from LT+RT gamepad combo.
+
+    Mirrors the on_auto_accel_enable / on_auto_accel_disable socket handlers.
+    When autoaccel is ON, the car drives forward at the current gear speed
+    and gear shifting works like manual mode.
+    """
+    if not car_state.get("engine_running", False):
+        print("🎮 [Gamepad] LT+RT → Cannot toggle auto-accel: engine is OFF")
+        return
+
+    if car_state.get("autonomous_mode", False):
+        print("🎮 [Gamepad] LT+RT → Cannot toggle auto-accel: autopilot is active")
+        return
+
+    was_enabled = car_state.get("auto_accel_enabled", False)
+
+    if was_enabled:
+        # Disable autoaccel
+        car_state["auto_accel_enabled"] = False
+        car_state["gas_pressed"] = False
+        print("🎮 [Gamepad] LT+RT → AUTO-ACCEL: 🚫 DISABLED")
+    else:
+        # Enable autoaccel
+        car_state["auto_accel_enabled"] = True
+        car_state["gas_pressed"] = True
+        car_state["direction"] = "forward"
+        print("🎮 [Gamepad] LT+RT → AUTO-ACCEL: 🚀 ENABLED")
+
+    try:
+        socketio.emit('gamepad_autoaccel_update', {
+            'auto_accel_enabled': car_state["auto_accel_enabled"],
+            'source': 'gamepad',
+        })
+    except Exception:
+        pass
+
+
 def _gamepad_drive_thread():
     """
     Runs at ~50 Hz.  When gamepad is enabled AND engine is running,
@@ -2687,15 +3054,34 @@ def _gamepad_drive_thread():
             smoothed_steering = 0.3 * raw_steering + 0.7 * smoothed_steering
 
             # Map to car_state — same field semantics as socket handlers
-            if abs(smoothed_throttle) > 3:
+            # When auto-accel is active, don't override gas_pressed from stick
+            # (auto-accel keeps gas_pressed=True; gear shifting still works via buttons)
+            if car_state.get("auto_accel_enabled", False):
+                # Auto-accel: steering still works, but throttle is auto-managed
+                pass
+            elif abs(smoothed_throttle) > 3:
                 car_state["gas_pressed"] = True
                 car_state["brake_pressed"] = False
                 if smoothed_throttle >= 0:
                     car_state["direction"] = "forward"
+                    # Restore forward gear from gamepad_gear (don't leave in R)
+                    if car_state["gear"] == "R":
+                        # Zero speed before switching to forward gear to prevent
+                        # residual reverse momentum driving motors forward
+                        car_state["current_pwm"] = 0
+                        car_state["gear"] = car_state.get("gamepad_gear", "1")
                 else:
                     car_state["direction"] = "backward"
+                    # Set gear to Reverse so physics_loop drives motors backward
+                    car_state["gear"] = "R"
             else:
                 car_state["gas_pressed"] = False
+                # When stick is centred, restore forward gear if still in R
+                if car_state["gear"] == "R":
+                    # Zero speed before switching to forward gear to prevent
+                    # residual reverse momentum driving motors forward
+                    car_state["current_pwm"] = 0
+                    car_state["gear"] = car_state.get("gamepad_gear", "1")
 
             # Map steering (-100..100) → angle (-90..90)
             angle = int(max(-90, min(90, smoothed_steering * 0.9)))

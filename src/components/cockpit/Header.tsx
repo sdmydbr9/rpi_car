@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { SettingsDialog, TuningConstants, DEFAULT_TUNING } from "./SettingsDialog";
+import { GamepadControlsDialog } from "./GamepadControlsDialog";
 import type { CameraSpecs, NarrationConfig } from "../../lib/socketClient";
 import { Loader2, RadioTower, Volume2, Wifi, Gamepad2 } from "lucide-react";
 import {
@@ -168,10 +169,16 @@ export const Header = ({
             </button>
             {/* Gamepad/Device Mode Indicator */}
             {inputMode === "console" && (
-              <div className="flex items-center gap-0.5 sm:gap-1 px-1.5 sm:px-2.5 py-0.5 rounded-full border border-primary/40 text-muted-foreground hover:text-foreground" title="gamepad controller mode">
-                <Gamepad2 className={`w-2.5 h-2.5 sm:w-3 sm:h-3 ${gamepadConnected ? 'text-green-400' : 'text-destructive'}`} />
-                <span className="hidden sm:inline text-[7px] sm:text-[9px]">{gamepadConnected ? 'GAMEPAD' : 'NO GAMEPAD'}</span>
-              </div>
+              <GamepadControlsDialog gamepadConnected={gamepadConnected}>
+                <button
+                  type="button"
+                  className="flex items-center gap-0.5 sm:gap-1 px-1.5 sm:px-2.5 py-0.5 rounded-full border border-primary/40 text-muted-foreground hover:text-foreground cursor-pointer transition-colors"
+                  title="View gamepad controls"
+                >
+                  <Gamepad2 className={`w-2.5 h-2.5 sm:w-3 sm:h-3 ${gamepadConnected ? 'text-green-400' : 'text-destructive'}`} />
+                  <span className="hidden sm:inline text-[7px] sm:text-[9px]">{gamepadConnected ? 'GAMEPAD' : 'NO GAMEPAD'}</span>
+                </button>
+              </GamepadControlsDialog>
             )}
           </div>
         </div>
