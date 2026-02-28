@@ -133,15 +133,18 @@ def describe_image_local_llm(jpeg_bytes: bytes, prompt: str = DEFAULT_PROMPT,
         return ""
 
 
-def _play_mimic3_tts(text: str, mimic3_url: str = None, audio_device: str = None) -> bool:
+def _play_mimic3_tts(text: str, mimic3_url: str = None, audio_device: str = None,
+                     on_playback_start=None, on_playback_end=None) -> bool:
     """Play audio via Mimic3 TTS exactly like auto_voice.py.
     
-    Uses streaming HTTP GET to retrieve MP3, then plays via aplay.
+    Fetches WAV audio from Mimic3, then plays via aplay.
     
     Args:
         text: Text to synthesize
         mimic3_url: Mimic3 API endpoint
         audio_device: ALSA device for playback (e.g., 'plughw:0,0')
+        on_playback_start: Optional callback fired immediately before audio playback.
+        on_playback_end: Optional callback fired immediately after audio playback.
     
     Returns:
         True if playback succeeded, False otherwise
@@ -156,36 +159,65 @@ def _play_mimic3_tts(text: str, mimic3_url: str = None, audio_device: str = None
     
     try:
         print(f"🎙️ [Narration] Mimic3: synthesizing...")
-        # GET request with streaming (exactly like auto_voice.py)
-        r = requests.get(mimic3_url, params={"text": text}, stream=True, timeout=15)
+        # GET request to Mimic3 (no streaming needed — we consume r.content)
+        r = requests.get(mimic3_url, params={"text": text}, timeout=(5, 90))
         
         if r.status_code != 200:
             print(f"❌ [Narration] Mimic3 HTTP {r.status_code}")
             return False
         
-        # Play streaming content directly to aplay (exactly like auto_voice.py)
-        print(f"🎙️ [Narration] Mimic3: playing to {audio_device}...")
-        aplay = subprocess.Popen(
-            ['aplay', '-D', audio_device, '-q'],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE
-        )
+        audio_bytes = r.content
+        if not audio_bytes:
+            print("❌ [Narration] Mimic3 returned empty audio")
+            return False
         
-        # Stream content to aplay
+        # Play content via aplay (exactly like startup_systems_check.py)
+        print(f"🎙️ [Narration] Mimic3: playing to {audio_device}...")
+        playback_started = False
         try:
-            aplay.communicate(input=r.content, timeout=30)
-            if aplay.returncode == 0:
+            if callable(on_playback_start):
+                try:
+                    on_playback_start()
+                    playback_started = True
+                except Exception as cb_err:
+                    print(f"⚠️ [Narration] Playback start callback failed: {cb_err}")
+            
+            primary = subprocess.run(
+                ['aplay', '-D', audio_device, '-q'],
+                input=audio_bytes,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=180,
+            )
+            if primary.returncode == 0:
                 print(f"✅ [Narration] Mimic3 playback: OK")
                 return True
-            else:
-                err = aplay.stderr.read().decode(errors='ignore') if aplay.stderr else ""
-                print(f"❌ [Narration] Mimic3 playback failed: {err}")
-                return False
-        except subprocess.TimeoutExpired:
-            aplay.kill()
-            print(f"❌ [Narration] Mimic3 playback timeout")
+            
+            primary_err = primary.stderr.decode(errors='ignore').strip()
+            print(f"❌ [Narration] Mimic3 playback failed on {audio_device}: {primary_err}")
+            
+            # Fallback to default audio device (like startup_systems_check.py)
+            if audio_device != "default":
+                fallback = subprocess.run(
+                    ['aplay', '-D', 'default', '-q'],
+                    input=audio_bytes,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    timeout=180,
+                )
+                if fallback.returncode == 0:
+                    print("✅ [Narration] Mimic3 fallback played on system default audio device")
+                    return True
+                fallback_err = fallback.stderr.decode(errors='ignore').strip()
+                print(f"❌ [Narration] Mimic3 fallback default playback failed: {fallback_err}")
+            
             return False
+        finally:
+            if playback_started and callable(on_playback_end):
+                try:
+                    on_playback_end()
+                except Exception as cb_err:
+                    print(f"⚠️ [Narration] Playback end callback failed: {cb_err}")
         
     except requests.Timeout:
         print(f"❌ [Narration] Mimic3 request timeout")
@@ -202,8 +234,14 @@ def _play_mimic3_tts(text: str, mimic3_url: str = None, audio_device: str = None
 # 🔊 SHARED MP3 PLAYBACK HELPER
 # ==========================================
 
-def _play_mp3_with_loudness(mp3_path: str, volume: float = 8.0, audio_device: str = "default") -> bool:
-    """Decode MP3 and play with compression/normalization via sox -> aplay."""
+def _play_mp3_with_loudness(mp3_path: str, volume: float = 8.0, audio_device: str = "default",
+                           on_playback_start=None, on_playback_end=None) -> bool:
+    """Decode MP3 and play with compression/normalization via sox -> aplay.
+    
+    Args:
+        on_playback_start: Optional callback fired immediately before audio playback.
+        on_playback_end: Optional callback fired immediately after audio playback.
+    """
     sox_bin = shutil.which("sox")
     aplay_bin = shutil.which("aplay")
     mpg123_bin = shutil.which("mpg123")
@@ -214,6 +252,7 @@ def _play_mp3_with_loudness(mp3_path: str, volume: float = 8.0, audio_device: st
     wav_path = f"{mp3_path}.wav"
     sox_proc = None
     aplay_proc = None
+    playback_started = False
     try:
         decode = subprocess.run(
             [mpg123_bin, "-q", "-w", wav_path, mp3_path],
@@ -225,6 +264,14 @@ def _play_mp3_with_loudness(mp3_path: str, volume: float = 8.0, audio_device: st
             err = decode.stderr.decode(errors="ignore").strip()
             print(f"❌ [Narration] mpg123 decode failed: {err}")
             return False
+
+        # Fire playback start callback AFTER decode but BEFORE audio pipeline
+        if callable(on_playback_start):
+            try:
+                on_playback_start()
+                playback_started = True
+            except Exception as cb_err:
+                print(f"⚠️ [Narration] Playback start callback failed: {cb_err}")
 
         sox_cmd = [
             sox_bin,
@@ -276,6 +323,11 @@ def _play_mp3_with_loudness(mp3_path: str, volume: float = 8.0, audio_device: st
             sox_proc.kill()
         return False
     finally:
+        if playback_started and callable(on_playback_end):
+            try:
+                on_playback_end()
+            except Exception as cb_err:
+                print(f"⚠️ [Narration] Playback end callback failed: {cb_err}")
         if os.path.exists(wav_path):
             try:
                 os.remove(wav_path)
@@ -294,6 +346,8 @@ def _play_elevenlabs_tts(
     model_id: str = ELEVENLABS_DEFAULT_MODEL_ID,
     audio_device: str = "default",
     volume: float = 8.0,
+    on_playback_start=None,
+    on_playback_end=None,
 ) -> bool:
     """Synthesize speech with ElevenLabs and play it locally."""
     if not api_key or not text or not text.strip():
@@ -332,6 +386,8 @@ def _play_elevenlabs_tts(
             mp3_path=mp3_path,
             volume=volume,
             audio_device=audio_device,
+            on_playback_start=on_playback_start,
+            on_playback_end=on_playback_end,
         )
     except requests.RequestException as e:
         print(f"❌ [Narration] ElevenLabs request failed: {e}")
@@ -357,6 +413,8 @@ def _play_kokoro_with_volume(
     speed: float = 1.0,
     volume: float = 8.0,
     audio_device: str = 'default',
+    on_playback_start=None,
+    on_playback_end=None,
 ) -> bool:
     """
     Request MP3 from Kokoro API, then decode and play with an aggressive
@@ -395,6 +453,8 @@ def _play_kokoro_with_volume(
             mp3_path=mp3_path,
             volume=volume,
             audio_device=audio_device,
+            on_playback_start=on_playback_start,
+            on_playback_end=on_playback_end,
         ):
             return True
 
@@ -971,81 +1031,100 @@ class NarrationEngine:
         if self._on_narration_text:
             self._on_narration_text(text)
 
-        # Audio playback priority:
+        # Audio playback priority (matches startup_systems_check.py pattern):
         # 1. ElevenLabs
         # 2. Kokoro
         # 3. Mimic3
         # 4. Local TTS (espeak-ng)
+        #
+        # Engine volume ducking is handled via on_playback_start / on_playback_end
+        # callbacks passed into each TTS helper, so the engine only ducks while
+        # actual audio is playing (not during synthesis/download).
         playback_success = False
 
-        # Duck engine volume during narration playback
-        if audio_manager:
-            audio_manager.duck_engine_volume(True)
+        def _on_playback_start():
+            if audio_manager:
+                audio_manager.duck_engine_volume(True)
 
-        try:
-            # PRIMARY: ElevenLabs
-            if elevenlabs_api_key and elevenlabs_voice_id:
-                print(f"🎤 [Narration] ElevenLabs: voice={elevenlabs_voice_id}, model={elevenlabs_model_id}...")
-                playback_success = _play_elevenlabs_tts(
-                    text=text,
-                    api_key=elevenlabs_api_key,
-                    voice_id=elevenlabs_voice_id,
-                    model_id=elevenlabs_model_id,
-                    audio_device=audio_device,
-                    volume=elevenlabs_volume,
-                )
-                if playback_success:
-                    print("✅ [Narration] ElevenLabs playback: SUCCESS")
-                else:
-                    print("⚠️  [Narration] ElevenLabs playback failed - trying Kokoro...")
-            else:
-                print("⚠️  [Narration] ElevenLabs not configured")
-
-            # SECONDARY: Kokoro TTS
-            if not playback_success and kokoro_enabled and kokoro_ip and kokoro_voice:
-                print(f"🎤 [Narration] Kokoro: IP={kokoro_ip}, Voice={kokoro_voice}...")
-                playback_success = _play_kokoro_with_volume(
-                    ip_address=kokoro_ip,
-                    text=text,
-                    voice=kokoro_voice,
-                    speed=kokoro_speed,
-                    volume=kokoro_volume,
-                    audio_device=audio_device,
-                )
-                if playback_success:
-                    print("✅ [Narration] Kokoro playback: SUCCESS")
-                else:
-                    print("⚠️  [Narration] Kokoro playback failed - trying Mimic3...")
-            elif not playback_success and not kokoro_enabled:
-                print("⚠️  [Narration] Kokoro not configured")
-
-            # TERTIARY: Mimic3 TTS
-            if not playback_success and mimic3_enabled and mimic3_url:
-                print("🎙️ [Narration] Trying Mimic3 TTS fallback...")
-                playback_success = _play_mimic3_tts(
-                    text=text,
-                    mimic3_url=mimic3_url,
-                    audio_device=mimic3_audio_device,
-                )
-                if playback_success:
-                    print("✅ [Narration] Mimic3 playback: SUCCESS")
-                else:
-                    print("⚠️  [Narration] Mimic3 playback failed - trying local TTS...")
-            elif not playback_success:
-                print("⚠️  [Narration] Mimic3 not configured")
-
-            # QUATERNARY: Local TTS fallback (espeak-ng)
-            if not playback_success and play_local_tts:
-                print("🔊 [Narration] Using local TTS fallback...")
-                tts = get_tts_synthesizer()
-                tts.speak(text)
-                playback_success = True
-            elif not playback_success:
-                print("❌ [Narration] All TTS backends failed")
-        finally:
-            # Restore engine volume after playback completes
+        def _on_playback_end():
             if audio_manager:
                 audio_manager.duck_engine_volume(False)
+
+        # PRIMARY: ElevenLabs
+        if elevenlabs_api_key and elevenlabs_voice_id:
+            print(f"🎤 [Narration] ElevenLabs: voice={elevenlabs_voice_id}, model={elevenlabs_model_id}...")
+            playback_success = _play_elevenlabs_tts(
+                text=text,
+                api_key=elevenlabs_api_key,
+                voice_id=elevenlabs_voice_id,
+                model_id=elevenlabs_model_id,
+                audio_device=audio_device,
+                volume=elevenlabs_volume,
+                on_playback_start=_on_playback_start,
+                on_playback_end=_on_playback_end,
+            )
+            if playback_success:
+                print("✅ [Narration] ElevenLabs playback: SUCCESS")
+            else:
+                print("⚠️  [Narration] ElevenLabs playback failed - trying Kokoro...")
+        else:
+            print("⚠️  [Narration] ElevenLabs not configured")
+
+        # SECONDARY: Kokoro TTS
+        if not playback_success and kokoro_enabled and kokoro_ip and kokoro_voice:
+            print(f"🎤 [Narration] Kokoro: IP={kokoro_ip}, Voice={kokoro_voice}...")
+            playback_success = _play_kokoro_with_volume(
+                ip_address=kokoro_ip,
+                text=text,
+                voice=kokoro_voice,
+                speed=kokoro_speed,
+                volume=kokoro_volume,
+                audio_device=audio_device,
+                on_playback_start=_on_playback_start,
+                on_playback_end=_on_playback_end,
+            )
+            if playback_success:
+                print("✅ [Narration] Kokoro playback: SUCCESS")
+            else:
+                print("⚠️  [Narration] Kokoro playback failed - trying Mimic3...")
+        elif not playback_success and not kokoro_enabled:
+            print("⚠️  [Narration] Kokoro not configured")
+
+        # TERTIARY: Mimic3 TTS
+        if not playback_success and mimic3_enabled and mimic3_url:
+            print("🎙️ [Narration] Trying Mimic3 TTS fallback...")
+            playback_success = _play_mimic3_tts(
+                text=text,
+                mimic3_url=mimic3_url,
+                audio_device=mimic3_audio_device,
+                on_playback_start=_on_playback_start,
+                on_playback_end=_on_playback_end,
+            )
+            if playback_success:
+                print("✅ [Narration] Mimic3 playback: SUCCESS")
+            else:
+                print("⚠️  [Narration] Mimic3 playback failed - trying local TTS...")
+        elif not playback_success:
+            print("⚠️  [Narration] Mimic3 not configured")
+
+        # QUATERNARY: Local TTS fallback (espeak-ng)
+        # Uses synchronous playback to ensure ducking remains active
+        # until speech finishes (espeak blocks on subprocess).
+        if not playback_success and play_local_tts:
+            print("🔊 [Narration] Using local TTS fallback (espeak-ng)...")
+            _on_playback_start()
+            try:
+                tts = get_tts_synthesizer()
+                tts.speak(text)
+                # Wait for the async speak thread to finish so we don't
+                # release the duck before audio completes.
+                if tts._play_thread is not None:
+                    tts._play_thread.join(timeout=60)
+                playback_success = True
+            finally:
+                _on_playback_end()
+        elif not playback_success:
+            print("❌ [Narration] All TTS backends failed")
 
         # Signal that audio playback is done
         if self._on_narration_done:
