@@ -52,6 +52,7 @@ import follow_target
 from vision import VisionSystem
 from narration import NarrationEngine, validate_key as narration_validate_key, list_multimodal_models
 from kokoro_client import get_kokoro_client
+from tts_local import get_tts_synthesizer
 from audio_manager import CarAudioManager
 from network_core import PiCarNetworkManager
 from pico_sensor_reader import (
@@ -1270,8 +1271,9 @@ except Exception as e:
 # ==========================================
 # 🎙️ NARRATION ENGINE SETUP
 # ==========================================
+_NARRATION_RTSP_URL = f"rtsp://127.0.0.1:{MEDIAMTX_RTSP_PORT}/{MEDIAMTX_STREAM_PATH}"
 narration_engine = NarrationEngine()
-narration_engine.set_camera(picam2, vision_system)
+narration_engine.set_camera(picam2, vision_system, rtsp_url=_NARRATION_RTSP_URL)
 narration_engine.set_audio_manager(car_audio)
 
 # Configure from persisted settings if API key exists
@@ -2767,24 +2769,13 @@ def _gamepad_toggle_engine():
     """
     was_running = bool(car_state.get("engine_running", False))
     if was_running:
-        # --- STOP ---
-        car_state["engine_running"] = False
-        car_state["auto_accel_enabled"] = False
-        car_state["gas_pressed"] = False
-        car_state["brake_pressed"] = True
-        car_state["is_braking"] = True
-        car_state["current_pwm"] = 0
-        car_state["obstacle_state"] = "IDLE"
+        # --- Engine already ON → trigger AI image analysis ---
+        print("🎮 [Gamepad] Engine already running → triggering AI analyse")
         try:
-            car_system.brake()
-        except Exception:
-            pass
-        car_audio.set_engine_running(False)
-        print("🎮 [Gamepad] ENGINE: STOPPED")
-        try:
-            socketio.emit('gamepad_start_pressed', {'engine_running': False})
-        except Exception:
-            pass
+            _trigger_narration_analyze_once(client_id=None, source="gamepad_start")
+        except Exception as e:
+            print(f"⚠️  [Gamepad] AI analyse trigger failed: {e}")
+        return
     else:
         # --- START ---
         car_state["engine_running"] = True
@@ -4416,6 +4407,18 @@ def on_heartbeat_pong(data):
 def on_engine_start(data=None):
     """Handle UI engine start button."""
     was_running = bool(car_state.get("engine_running", False))
+
+    if was_running:
+        # --- Engine already ON → trigger AI image analysis ---
+        print(f"\n⚙️ [UI Control] Engine already running → triggering AI analyse")
+        try:
+            _trigger_narration_analyze_once(
+                client_id=request.sid, source="ui_start_button")
+        except Exception as e:
+            print(f"⚠️  [UI Control] AI analyse trigger failed: {e}")
+        emit('engine_response', {'status': 'ok', 'running': True})
+        return
+
     car_state["engine_running"] = True
     car_state["brake_pressed"] = False
     car_state["is_braking"] = False
@@ -4423,18 +4426,17 @@ def on_engine_start(data=None):
     print(f"\n⚙️ [UI Control] 🔊 ENGINE: STARTED")
 
     # Auto-run startup AI check when engine transitions OFF -> ON.
-    if not was_running:
-        started, reason = _trigger_startup_check_async(
-            client_id=request.sid,
-            source="engine_start_auto",
-            require_enabled=True,
-        )
-        if started:
-            print("⬛ [Startup] Auto diagnostic check triggered by engine start")
-        elif reason == "disabled":
-            print("⬛ [Startup] Auto diagnostic check skipped (disabled in config)")
-        elif reason == "already_running":
-            print("⬛ [Startup] Auto diagnostic check skipped (already running)")
+    started, reason = _trigger_startup_check_async(
+        client_id=request.sid,
+        source="engine_start_auto",
+        require_enabled=True,
+    )
+    if started:
+        print("⬛ [Startup] Auto diagnostic check triggered by engine start")
+    elif reason == "disabled":
+        print("⬛ [Startup] Auto diagnostic check skipped (disabled in config)")
+    elif reason == "already_running":
+        print("⬛ [Startup] Auto diagnostic check skipped (already running)")
 
     emit('engine_response', {'status': 'ok', 'running': True})
 
@@ -5207,13 +5209,6 @@ def on_narration_toggle(data):
         if not car_state.get('camera_enabled'):
             emit('narration_toggle_response', {'status': 'error', 'message': 'Camera must be enabled first', 'enabled': False})
             return
-        if car_state.get('camera_stream_backend', CAMERA_STREAM_BACKEND_DEFAULT) == CAMERA_STREAM_BACKEND_DEFAULT:
-            emit('narration_toggle_response', {
-                'status': 'error',
-                'message': 'Image narration is unavailable in MediaMTX-only camera mode.',
-                'enabled': False
-            })
-            return
         
         # Configure and start
         narration_engine.configure(
@@ -5221,7 +5216,7 @@ def on_narration_toggle(data):
             model_name=_narration_config['model'],
             interval=_narration_config.get('interval', 30),
         )
-        narration_engine.set_camera(picam2, vision_system)
+        narration_engine.set_camera(picam2, vision_system, rtsp_url=_NARRATION_RTSP_URL)
         narration_engine.set_elevenlabs_config(
             api_key=_effective_elevenlabs_api_key(),
             voice_id=_effective_elevenlabs_voice_id(),
@@ -5248,28 +5243,74 @@ def on_narration_toggle(data):
         _save_narration_config(_narration_config)
         emit('narration_toggle_response', {'status': 'ok', 'enabled': False})
 
-@socketio.on('narration_analyze_once')
-def on_narration_analyze_once(data):
-    """Trigger one immediate AI analysis + narration pass."""
-    client_id = request.sid
-    print(f"\n🎙️ [Narration] Analyze-once requested by client {client_id[:8]}...")
+def _trigger_narration_analyze_once(client_id=None, source="unknown"):
+    """Reusable helper to trigger one AI analysis + narration pass.
+
+    Can be called from the socket handler, gamepad start-button, or
+    UI engine-start when the engine is already running.
+    Returns (ok: bool, error_message: str | None).
+    """
+    print(f"\n🎙️ [Narration] Analyze-once triggered (source={source})")
 
     # Check prerequisites
     if not _narration_config.get('api_key'):
-        emit('narration_analyze_once_response', {'status': 'error', 'message': 'No API key configured'})
-        return
+        print("⚠️  [Narration] Analyze-once skipped – no API key")
+        if client_id:
+            socketio.emit('narration_analyze_once_response',
+                          {'status': 'error', 'message': 'No API key configured'},
+                          to=client_id)
+        return False, 'No API key configured'
     if not _narration_config.get('model'):
-        emit('narration_analyze_once_response', {'status': 'error', 'message': 'No model selected'})
-        return
+        print("⚠️  [Narration] Analyze-once skipped – no model")
+        if client_id:
+            socketio.emit('narration_analyze_once_response',
+                          {'status': 'error', 'message': 'No model selected'},
+                          to=client_id)
+        return False, 'No model selected'
     if not car_state.get('camera_enabled'):
-        emit('narration_analyze_once_response', {'status': 'error', 'message': 'Camera must be enabled first'})
-        return
-    if car_state.get('camera_stream_backend', CAMERA_STREAM_BACKEND_DEFAULT) == CAMERA_STREAM_BACKEND_DEFAULT:
-        emit('narration_analyze_once_response', {
-            'status': 'error',
-            'message': 'Image analysis is unavailable in MediaMTX-only camera mode.'
-        })
-        return
+        # Auto-enable camera (start MediaMTX pipeline) so the AI can grab a frame
+        print("📷 [Narration] Camera off — auto-enabling for AI analysis...")
+        ok, cam_msg = _start_mediamtx_pipeline()
+        if ok:
+            car_state["camera_enabled"] = True
+            _refresh_mediamtx_state()
+            # Broadcast camera state so all UIs update
+            socketio.emit('camera_response', {
+                'status': 'ok',
+                'camera_enabled': True,
+                'backend': CAMERA_STREAM_BACKEND_DEFAULT,
+                'h264_rtsp_running': car_state["camera_h264_rtsp_running"],
+                'h264_rtsp_url': car_state["camera_h264_rtsp_url"],
+                'h264_rtsp_transport': car_state.get("camera_h264_rtsp_transport", "rtsp"),
+                'mediamtx_running': car_state.get("camera_mediamtx_running", False),
+                'mediamtx_webrtc_url': car_state.get("camera_mediamtx_webrtc_url", ""),
+                'mediamtx_error': car_state.get("camera_mediamtx_error", ""),
+            })
+            print("✅ [Narration] Camera auto-enabled successfully")
+            # Brief pause to let the RTSP stream stabilise before we grab a frame
+            time.sleep(1.5)
+        else:
+            msg = f'Failed to auto-enable camera: {cam_msg}'
+            print(f"❌ [Narration] {msg}")
+            if client_id:
+                socketio.emit('narration_analyze_once_response',
+                              {'status': 'error', 'message': msg},
+                              to=client_id)
+            return False, msg
+    # Notify ALL connected UI clients that analysis has started
+    socketio.emit('narration_analyze_once_started', {'source': source})
+
+    # Play a short TTS announcement so the driver hears it on the car speaker
+    def _announce_analysing():
+        try:
+            tts = get_tts_synthesizer()
+            if tts.is_available:
+                tts.speak("Analysing image")
+            else:
+                print("⚠️  [Narration] No local TTS available for announcement")
+        except Exception as e:
+            print(f"⚠️  [Narration] Analyse announcement failed: {e}")
+    threading.Thread(target=_announce_analysing, daemon=True).start()
 
     def analyze_once_async():
         try:
@@ -5279,7 +5320,7 @@ def on_narration_analyze_once(data):
                 model_name=_narration_config['model'],
                 interval=_narration_config.get('interval', 30),
             )
-            narration_engine.set_camera(picam2, vision_system)
+            narration_engine.set_camera(picam2, vision_system, rtsp_url=_NARRATION_RTSP_URL)
             narration_engine.set_elevenlabs_config(
                 api_key=_effective_elevenlabs_api_key(),
                 voice_id=_effective_elevenlabs_voice_id(),
@@ -5299,23 +5340,31 @@ def on_narration_analyze_once(data):
                 socketio.emit(
                     'narration_analyze_once_response',
                     {'status': 'ok', 'message': 'Analysis complete'},
-                    to=client_id,
+                    **(dict(to=client_id) if client_id else {}),
                 )
             else:
                 socketio.emit(
                     'narration_analyze_once_response',
                     {'status': 'error', 'message': message or 'Analysis failed'},
-                    to=client_id,
+                    **(dict(to=client_id) if client_id else {}),
                 )
         except Exception as e:
             print(f"❌ [Narration] Analyze-once failed: {e}")
             socketio.emit(
                 'narration_analyze_once_response',
                 {'status': 'error', 'message': str(e)},
-                to=client_id,
+                **(dict(to=client_id) if client_id else {}),
             )
 
     threading.Thread(target=analyze_once_async, daemon=True).start()
+    return True, None
+
+
+@socketio.on('narration_analyze_once')
+def on_narration_analyze_once(data):
+    """Trigger one immediate AI analysis + narration pass."""
+    client_id = request.sid
+    _trigger_narration_analyze_once(client_id=client_id, source="ui_button")
 
 @socketio.on('narration_speaking_done')
 def on_narration_speaking_done(data):

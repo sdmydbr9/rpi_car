@@ -615,6 +615,22 @@ export const CockpitController = () => {
       }
     });
 
+    // Subscribe to analyze-once STARTED events (e.g. triggered by gamepad start button)
+    // so the UI shows the analysing spinner even when triggered externally
+    socketClient.onNarrationAnalyzeOnceStarted(() => {
+      if (!analyzeNowTimeoutRef.current) {
+        setAnalyzeNowPending(true);
+        analyzeNowTimeoutRef.current = window.setTimeout(() => {
+          setAnalyzeNowPending(false);
+          analyzeNowTimeoutRef.current = null;
+          toast.error('AI analysis timed out', {
+            description: 'No response received from the server.',
+            duration: 3500,
+          });
+        }, 45000);
+      }
+    });
+
     // Subscribe to telemetry updates
     // Note: throttle, brake, and steeringAngle are NOT updated from telemetry - they're controlled only by user input
     // This ensures continuous hold behavior works correctly (the server won't overwrite the UI state)

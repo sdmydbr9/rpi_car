@@ -502,6 +502,7 @@ def describe_image(api_key: str, model_name: str, jpeg_bytes: bytes,
         The AI's text response, or an error message string.
     """
     try:
+        print(f"🔬 [Gemini] Configuring API key and model '{model_name}' ({len(jpeg_bytes)} bytes image)...")
         genai.configure(api_key=api_key)
         # Normalize model name — strip 'models/' prefix if present
         clean_name = model_name
@@ -517,10 +518,14 @@ def describe_image(api_key: str, model_name: str, jpeg_bytes: bytes,
             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
         ]
         
+        print(f"🔬 [Gemini] Sending generate_content() request...")
+        t0 = time.time()
         response = model.generate_content(
             [prompt, {'mime_type': 'image/jpeg', 'data': jpeg_bytes}],
             safety_settings=safety_settings,
         )
+        t1 = time.time()
+        print(f"🔬 [Gemini] generate_content() returned in {t1-t0:.1f}s")
         
         # Handle blocked / empty responses
         if not response.candidates:
@@ -533,11 +538,12 @@ def describe_image(api_key: str, model_name: str, jpeg_bytes: bytes,
             print(f"⚠️ [Narration] Response blocked by safety filter: {e}")
             return ""
         
-        print(f"👁️ [Narration] AI says: {text}")
+        print(f"👁️ [Narration] AI says ({len(text)} chars): {text[:500]}")
         return text
     except Exception as e:
         error_msg = f"Narration error: {e}"
         print(f"❌ [Narration] {error_msg}")
+        import traceback; traceback.print_exc()
         return ""
 
 
@@ -545,39 +551,128 @@ def describe_image(api_key: str, model_name: str, jpeg_bytes: bytes,
 # 📸 FRAME CAPTURE HELPER
 # ==========================================
 
+def _capture_frame_from_rtsp(rtsp_url: str, jpeg_quality: int = 70,
+                             timeout_s: float = 8.0) -> bytes | None:
+    """Grab a single JPEG frame from an RTSP stream (e.g. MediaMTX).
+
+    Opens the stream, reads one frame, then releases.  Uses a worker
+    thread with a timeout so a stuck RTSP connection cannot block forever.
+    """
+    result: list[bytes | None] = [None]
+
+    def _grab():
+        cap = None
+        try:
+            # Set FFMPEG timeouts (in microseconds) to avoid indefinite hangs
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+                "timeout;5000000|stimeout;5000000|rtsp_transport;tcp"
+            )
+            print(f"📸 [RTSP] Opening stream: {rtsp_url}")
+            t0 = time.time()
+            cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+            t1 = time.time()
+            print(f"📸 [RTSP] VideoCapture created in {t1-t0:.1f}s, isOpened={cap.isOpened()}")
+            if not cap.isOpened():
+                print(f"⚠️  [Narration] Could not open RTSP stream: {rtsp_url}")
+                return
+            print(f"📸 [RTSP] Reading frame...")
+            ret, frame = cap.read()
+            t2 = time.time()
+            print(f"📸 [RTSP] cap.read() returned in {t2-t1:.1f}s, ret={ret}, frame={'None' if frame is None else frame.shape}")
+            if not ret or frame is None:
+                print("⚠️  [Narration] Failed to read frame from RTSP stream")
+                return
+            ok, buffer = cv2.imencode('.jpg', frame,
+                                      [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+            if ok:
+                result[0] = buffer.tobytes()
+                print(f"📸 [Narration] Captured frame from RTSP ({frame.shape[1]}x{frame.shape[0]}, {len(result[0])} bytes)")
+        except Exception as e:
+            print(f"❌ [Narration] RTSP frame capture failed: {e}")
+            import traceback; traceback.print_exc()
+        finally:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+
+    t = threading.Thread(target=_grab, daemon=True)
+    t.start()
+    t.join(timeout=timeout_s)
+    if t.is_alive():
+        print(f"⚠️  [Narration] RTSP capture timed out after {timeout_s}s")
+        # Thread is daemon — it will die when the main process exits
+    return result[0]
+
+
 def capture_frame_as_jpeg(picam2=None, vision_system=None,
-                          jpeg_quality: int = 70) -> bytes | None:
+                          jpeg_quality: int = 70,
+                          rtsp_url: str | None = None) -> bytes | None:
     """Capture a single frame from the camera pipeline and encode as JPEG.
     
     Tries vision system first (to get annotated frame), falls back to
-    raw picam2 capture. Returns JPEG bytes or None on failure.
+    raw picam2 capture, then falls back to grabbing a frame from an
+    RTSP stream (MediaMTX) if provided. Returns JPEG bytes or None.
     """
+    print(f"📸 [Frame Capture] Starting: picam2={'SET' if picam2 else 'None'}, "
+          f"vision={'SET' if vision_system else 'None'}, "
+          f"rtsp_url={rtsp_url or 'None'}")
     try:
         frame = None
         
         # Try vision system annotated frame first
         if vision_system is not None:
+            print("📸 [Frame Capture] Trying vision_system.get_frame()...")
             frame = vision_system.get_frame()
+            if frame is not None:
+                print(f"📸 [Frame Capture] ✅ Got frame from vision_system: {frame.shape}")
+            else:
+                print("📸 [Frame Capture] ⚠️ vision_system.get_frame() returned None")
         
-        # Fall back to raw picam2
-        if frame is None and picam2 is not None:
+        # Fall back to raw picam2 — BUT only when there is no RTSP URL.
+        # When an RTSP URL is set we are in MediaMTX-only mode and picam2
+        # has been closed/released; calling capture_array() would block
+        # forever waiting on a dead device.
+        if frame is None and picam2 is not None and not rtsp_url:
+            print("📸 [Frame Capture] Trying picam2.capture_array()...")
             frame = picam2.capture_array()
+            if frame is not None:
+                print(f"📸 [Frame Capture] ✅ Got frame from picam2: {frame.shape}")
+            else:
+                print("📸 [Frame Capture] ⚠️ picam2.capture_array() returned None")
+        elif frame is None and picam2 is not None and rtsp_url:
+            print("📸 [Frame Capture] Skipping picam2 (MediaMTX mode — device released)")
         
-        if frame is None:
-            return None
-        
-        # Convert BGR to RGB (picam2 captures BGR888)
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        # Encode to JPEG
-        ret, buffer = cv2.imencode('.jpg', frame_rgb,
-                                   [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
-        if not ret:
-            return None
-        
-        return buffer.tobytes()
+        if frame is not None:
+            # Convert BGR to RGB (picam2 captures BGR888)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Encode to JPEG
+            ret, buffer = cv2.imencode('.jpg', frame_rgb,
+                                       [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+            if not ret:
+                print("📸 [Frame Capture] ❌ cv2.imencode failed")
+                return None
+            jpeg_bytes = buffer.tobytes()
+            print(f"📸 [Frame Capture] ✅ JPEG encoded: {len(jpeg_bytes)} bytes")
+            return jpeg_bytes
+
+        # Fall back to RTSP snapshot (MediaMTX stream)
+        if rtsp_url:
+            print(f"📸 [Frame Capture] Trying RTSP fallback: {rtsp_url}")
+            result = _capture_frame_from_rtsp(rtsp_url, jpeg_quality)
+            if result:
+                print(f"📸 [Frame Capture] ✅ RTSP captured: {len(result)} bytes")
+            else:
+                print("📸 [Frame Capture] ❌ RTSP capture returned None")
+            return result
+
+        print("📸 [Frame Capture] ❌ No frame source available (all None)")
+        return None
     except Exception as e:
         print(f"❌ [Narration] Frame capture failed: {e}")
+        import traceback; traceback.print_exc()
         return None
 
 
@@ -601,6 +696,7 @@ class NarrationEngine:
         self._prompt: str = DEFAULT_PROMPT
         self._picam2 = None
         self._vision_system = None
+        self._rtsp_url: str = ""  # RTSP fallback for MediaMTX-only mode
         self._on_narration_text = None  # callback(text: str)
         self._on_narration_error = None  # callback(error: str)
         self._on_narration_done = None   # callback() — fired after audio playback finishes
@@ -732,11 +828,19 @@ class NarrationEngine:
         print(f"🧠 [Narration] Local LLM configured - URL: {self._local_llm_url}, Mode: {mode}")
         print("🎙️ [Narration] Mimic3 TTS fallback enabled")
     
-    def set_camera(self, picam2, vision_system):
-        """Set camera references for frame capture."""
+    def set_camera(self, picam2, vision_system, rtsp_url: str | None = None):
+        """Set camera references for frame capture.
+
+        Args:
+            picam2: Picamera2 instance (may be None in MediaMTX-only mode)
+            vision_system: VisionSystem instance (may be None)
+            rtsp_url: RTSP URL for MediaMTX snapshot fallback
+        """
         with self._lock:
             self._picam2 = picam2
             self._vision_system = vision_system
+            if rtsp_url is not None:
+                self._rtsp_url = rtsp_url
     
     def set_audio_manager(self, audio_manager):
         """Set the audio manager reference for volume ducking during narration.
@@ -802,6 +906,7 @@ class NarrationEngine:
             prompt = self._prompt
             picam2 = self._picam2
             vision_system = self._vision_system
+            rtsp_url = self._rtsp_url
             elevenlabs_api_key = self._elevenlabs_api_key
             elevenlabs_voice_id = self._elevenlabs_voice_id
             elevenlabs_model_id = self._elevenlabs_model_id
@@ -825,12 +930,18 @@ class NarrationEngine:
             print(f"⚠️  [Narration] {msg}")
             return False, msg, False
 
-        # Capture frame
-        jpeg_bytes = capture_frame_as_jpeg(picam2, vision_system)
+        # Capture frame (with RTSP fallback for MediaMTX-only mode)
+        print(f"\n🔬 [Narration] === SINGLE PASS START ===")
+        print(f"🔬 [Narration] model={model_name}, rtsp_url={rtsp_url}")
+        print(f"🔬 [Narration] picam2={'SET' if picam2 else 'None'}, vision={'SET' if vision_system else 'None'}")
+        capture_start = time.time()
+        jpeg_bytes = capture_frame_as_jpeg(picam2, vision_system, rtsp_url=rtsp_url)
+        capture_elapsed = time.time() - capture_start
         if jpeg_bytes is None:
-            msg = "No camera frame available — is the camera enabled?"
+            msg = f"No camera frame available after {capture_elapsed:.1f}s — is the camera enabled?"
             print(f"⚠️  [Narration] {msg}")
             return False, msg, False
+        print(f"🔬 [Narration] Frame captured: {len(jpeg_bytes)} bytes in {capture_elapsed:.1f}s")
 
         # Determine which AI to use: check hotspot mode and internet connectivity
         in_hotspot = is_hotspot_mode()
@@ -839,19 +950,22 @@ class NarrationEngine:
             text = describe_image_local_llm(jpeg_bytes, prompt, local_llm_url)
         else:
             # Try Gemini first if we have API key and internet
+            print(f"🔬 [Narration] Sending {len(jpeg_bytes)} bytes to Gemini ({model_name})...")
             start_time = time.time()
             text = describe_image(api_key, model_name, jpeg_bytes, prompt)
             elapsed = time.time() - start_time
 
             # If Gemini fails, fall back to local LLM
             if not text:
-                print("⚠️  [Narration] Gemini failed or returned empty - falling back to local LLM")
+                print(f"⚠️  [Narration] Gemini failed or returned empty after {elapsed:.1f}s - falling back to local LLM")
                 text = describe_image_local_llm(jpeg_bytes, prompt, local_llm_url)
             else:
                 print(f"⏱️ [Narration] Gemini response in {elapsed:.1f}s")
+                print(f"🔬 [Narration] AI RESPONSE ({len(text)} chars): {text[:300]}")
 
         if not text:
             msg = "AI returned empty responses from both Gemini and local LLM"
+            print(f"🔬 [Narration] === SINGLE PASS FAILED (empty AI response) ===")
             return False, msg, True
 
         if self._on_narration_text:
@@ -941,23 +1055,28 @@ class NarrationEngine:
 
     def analyze_once(self) -> tuple[bool, str]:
         """Run one immediate narration pass (for manual UI-triggered analysis)."""
-        if not self._analysis_lock.acquire(blocking=False):
+        print(f"🔬 [Narration] analyze_once() called, acquiring lock (timeout=10s)...")
+        if not self._analysis_lock.acquire(timeout=10):
             msg = "Analysis already in progress"
             print(f"⚠️  [Narration] {msg}")
             return False, msg
 
+        print(f"🔬 [Narration] analyze_once() lock acquired, running single pass...")
         try:
             success, message, _empty_response = self._run_single_pass()
+            print(f"🔬 [Narration] analyze_once() result: success={success}, msg={message[:200] if message else 'None'}")
             if not success and self._on_narration_error:
                 self._on_narration_error(message)
             return success, message
         except Exception as e:
             msg = str(e)
             print(f"❌ [Narration] One-shot analysis error: {msg}")
+            import traceback; traceback.print_exc()
             if self._on_narration_error:
                 self._on_narration_error(msg)
             return False, msg
         finally:
+            print(f"🔬 [Narration] analyze_once() releasing lock")
             self._analysis_lock.release()
     
     def _loop(self):

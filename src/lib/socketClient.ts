@@ -199,6 +199,11 @@ export function connectToServer(serverIp: string, port: number = 5000): Promise<
       if (narrationAnalyzeOnceResponseCallback) narrationAnalyzeOnceResponseCallback(data);
     });
 
+    socket.on('narration_analyze_once_started', (data: { source?: string }) => {
+      console.log(`[Socket] 🎙️ Narration analyze-once STARTED (source: ${data.source ?? 'unknown'})`);
+      if (narrationAnalyzeOnceStartedCallback) narrationAnalyzeOnceStartedCallback(data);
+    });
+
     // Register Kokoro TTS event listeners at connect time so they persist
     socket.on('kokoro_validation_result', (data: KokoroValidationResult) => {
       console.log(`[Socket] 🎤 Kokoro validation result:`, data);
@@ -418,6 +423,7 @@ let narrationKeyResultCallback: ((data: NarrationKeyResult) => void) | null = nu
 let narrationTextCallback: ((data: { text: string; timestamp: number }) => void) | null = null;
 let narrationToggleResponseCallback: ((data: { status: string; enabled: boolean; message?: string }) => void) | null = null;
 let narrationAnalyzeOnceResponseCallback: ((data: NarrationAnalyzeOnceResponse) => void) | null = null;
+let narrationAnalyzeOnceStartedCallback: ((data: { source?: string }) => void) | null = null;
 let narrationSpeakingDoneCallback: (() => void) | null = null;
 
 /**
@@ -470,6 +476,14 @@ export function onNarrationToggleResponse(callback: (data: { status: string; ena
 export function onNarrationAnalyzeOnceResponse(callback: (data: NarrationAnalyzeOnceResponse) => void): void {
   narrationAnalyzeOnceResponseCallback = callback;
   // Don't re-register the socket listener here — it's registered once at connect time
+}
+
+/**
+ * Subscribe to narration analyze-once STARTED events (broadcast when analysis begins,
+ * e.g. from gamepad start button). UI should show analysing spinner.
+ */
+export function onNarrationAnalyzeOnceStarted(callback: (data: { source?: string }) => void): void {
+  narrationAnalyzeOnceStartedCallback = callback;
 }
 
 /**
@@ -1261,6 +1275,7 @@ export default {
   onNarrationText,
   onNarrationToggleResponse,
   onNarrationAnalyzeOnceResponse,
+  onNarrationAnalyzeOnceStarted,
   onNarrationSpeakingDone,
   emitNarrationValidateKey,
   emitNarrationConfigUpdate,
