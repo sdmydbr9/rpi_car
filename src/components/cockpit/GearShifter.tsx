@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import ColorThief from "colorthief";
-import { Music, OctagonX, Power, PowerOff, Radio, Volume2 } from "lucide-react";
+import { Music, OctagonX, Pause, Play, Power, PowerOff, Radio, SkipBack, SkipForward, Volume2 } from "lucide-react";
 
 interface GearShifterProps {
   currentGear: string;
@@ -17,6 +17,7 @@ interface GearShifterProps {
   onIRToggle: () => void;
   onSonarToggle: () => void;
   onCameraToggle: () => void;
+  onTargetOpen: () => void;
   onAutopilotToggle: () => void;
   isEnabled?: boolean;
   isEngineRunning?: boolean;
@@ -236,6 +237,7 @@ export const GearShifter = ({
   onIRToggle,
   onSonarToggle,
   onCameraToggle,
+  onTargetOpen,
   onAutopilotToggle,
   isEnabled = true,
   isEngineRunning = false,
@@ -534,6 +536,29 @@ export const GearShifter = ({
             <path d="M4,4H7L9,2H15L17,4H20A2,2 0 0,1 22,6V18A2,2 0 0,1 20,20H4A2,2 0 0,1 2,18V6A2,2 0 0,1 4,4M12,7A5,5 0 0,0 7,12A5,5 0 0,0 12,17A5,5 0 0,0 17,12A5,5 0 0,0 12,7M12,9A3,3 0 0,1 15,12A3,3 0 0,1 12,15A3,3 0 0,1 9,12A3,3 0 0,1 12,9Z" fill="currentColor"/>
           </svg>
         </button>
+
+        {/* TARGET Button */}
+        <button
+          onClick={onTargetOpen}
+          disabled={!isEngineRunning}
+          className="w-[clamp(34px,6vw,44px)] h-[clamp(34px,6vw,44px)] rounded-full bg-transparent flex items-center justify-center transition-all duration-100 touch-feedback disabled:opacity-50 disabled:cursor-not-allowed"
+          style={{
+            outline: 'none',
+            border: '1px solid rgb(20, 184, 166)'
+          }}
+          title="TARGET PURSUIT"
+        >
+          <svg className="w-[clamp(22px,4.2vw,32px)] h-[clamp(22px,4.2vw,32px)]" style={{ color: !isEngineRunning ? 'rgb(107, 114, 128)' : 'rgb(20, 184, 166)' }} viewBox="0 0 24 24">
+            <path d="M12 2C6.49 2 2 6.49 2 12s4.49 10 10 10 10-4.49 10-10S17.51 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm3-8c0 1.66-1.34 3-3 3s-3-1.34-3-3 1.34-3 3-3 3 1.34 3 3zm-3-5c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zm0 8c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zM12 8v2M12 14v2M8 12h2M14 12h2" fill="none" stroke="currentColor" strokeWidth="1.5"/>
+            <circle cx="12" cy="12" r="2" fill="currentColor"/>
+            <circle cx="12" cy="12" r="5" fill="none" stroke="currentColor" strokeWidth="1.2"/>
+            <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="0.8"/>
+            <line x1="12" y1="2" x2="12" y2="6" stroke="currentColor" strokeWidth="1.2"/>
+            <line x1="12" y1="18" x2="12" y2="22" stroke="currentColor" strokeWidth="1.2"/>
+            <line x1="2" y1="12" x2="6" y2="12" stroke="currentColor" strokeWidth="1.2"/>
+            <line x1="18" y1="12" x2="22" y2="12" stroke="currentColor" strokeWidth="1.2"/>
+          </svg>
+        </button>
       </div>
 
       {/* Transmission Icon Gearbox */}
@@ -694,21 +719,22 @@ export const GearShifter = ({
       {/* NOW PLAYING HUD */}
       <div className="w-full px-0.5 mb-0.5 min-h-0 flex-[1.2]" ref={nowPlayingPanelRef}>
         <div
-          className="h-full min-h-0 border rounded-sm backdrop-blur-sm transition-all duration-300 overflow-hidden flex flex-col justify-between"
+          className="border rounded-sm backdrop-blur-sm transition-all duration-300 overflow-hidden"
           style={{
-            minHeight: "80px",
             padding: `calc(8px * ${nowPlayingScale}) calc(10px * ${nowPlayingScale})`,
             borderColor: playerTheme.border,
             background: playerTheme.cardBackground,
-            boxShadow: `inset 0 0 0 1px ${playerTheme.border}, 0 8px 20px rgba(0, 0, 0, 0.28)`,
+            boxShadow: `inset 0 0 0 1px ${playerTheme.border}, 0 4px 12px rgba(0, 0, 0, 0.28)`,
           }}
         >
-          <div className="flex items-center" style={{ gap: `calc(10px * ${nowPlayingScale})` }}>
+          {/* Top row: art + info + controls */}
+          <div className="flex items-center" style={{ gap: `calc(12px * ${nowPlayingScale})` }}>
+            {/* Album art */}
             <div
-              className="rounded-md overflow-hidden flex items-center justify-center flex-shrink-0 border bg-black/20"
+              className="rounded overflow-hidden flex items-center justify-center flex-shrink-0 border bg-black/20"
               style={{
-                width: `calc(48px * ${nowPlayingScale})`,
-                height: `calc(48px * ${nowPlayingScale})`,
+                width: `calc(60px * ${nowPlayingScale})`,
+                height: `calc(60px * ${nowPlayingScale})`,
                 borderColor: playerTheme.border,
               }}
             >
@@ -717,8 +743,8 @@ export const GearShifter = ({
               ) : (
                 <Music
                   style={{
-                    width: `calc(22px * ${nowPlayingScale})`,
-                    height: `calc(22px * ${nowPlayingScale})`,
+                    width: `calc(24px * ${nowPlayingScale})`,
+                    height: `calc(24px * ${nowPlayingScale})`,
                     color: playerTheme.accent,
                     filter: `drop-shadow(0 0 4px ${playerTheme.accent})`,
                   }}
@@ -726,35 +752,65 @@ export const GearShifter = ({
               )}
             </div>
 
+            {/* Track info */}
             <div className="flex flex-col min-w-0 flex-1 overflow-hidden">
               <span
                 className="font-bold truncate leading-tight tracking-wide"
-                style={{ color: playerTheme.title, fontSize: `calc(12px * ${nowPlayingScale})` }}
+                style={{ color: playerTheme.title, fontSize: `calc(13px * ${nowPlayingScale})` }}
               >
                 {displayTrack}
               </span>
               <span
                 className="truncate leading-tight tracking-wider uppercase"
-                style={{ color: playerTheme.subtitle, fontSize: `calc(9px * ${nowPlayingScale})` }}
+                style={{ color: playerTheme.subtitle, fontSize: `calc(10px * ${nowPlayingScale})` }}
               >
                 {displayArtist}
               </span>
-              <span
-                className="truncate leading-tight"
-                style={{ color: playerTheme.subtitle, fontSize: `calc(8px * ${nowPlayingScale})` }}
+            </div>
+
+            {/* Playback controls */}
+            <div className="flex items-center flex-shrink-0" style={{ gap: `calc(6px * ${nowPlayingScale})` }}>
+              <SkipBack
+                style={{
+                  width: `calc(18px * ${nowPlayingScale})`,
+                  height: `calc(18px * ${nowPlayingScale})`,
+                  color: playerTheme.subtitle,
+                }}
+              />
+              <div
+                className="rounded-full border flex items-center justify-center"
+                style={{
+                  width: `calc(32px * ${nowPlayingScale})`,
+                  height: `calc(32px * ${nowPlayingScale})`,
+                  borderColor: playerTheme.accent,
+                }}
               >
-                {displayAlbum}
-              </span>
+                <Pause
+                  style={{
+                    width: `calc(16px * ${nowPlayingScale})`,
+                    height: `calc(16px * ${nowPlayingScale})`,
+                    color: playerTheme.accent,
+                  }}
+                />
+              </div>
+              <SkipForward
+                style={{
+                  width: `calc(18px * ${nowPlayingScale})`,
+                  height: `calc(18px * ${nowPlayingScale})`,
+                  color: playerTheme.subtitle,
+                }}
+              />
             </div>
           </div>
 
-          <div className="flex items-end" style={{ marginTop: `calc(6px * ${nowPlayingScale})`, gap: `calc(8px * ${nowPlayingScale})` }}>
+          {/* Progress bar */}
+          <div className="flex items-center" style={{ marginTop: `calc(6px * ${nowPlayingScale})`, gap: `calc(8px * ${nowPlayingScale})` }}>
             <div
               className="flex-1 rounded-full overflow-hidden"
-              style={{ height: `calc(5px * ${nowPlayingScale})`, backgroundColor: playerTheme.progressTrack }}
+              style={{ height: `calc(4px * ${nowPlayingScale})`, backgroundColor: playerTheme.progressTrack }}
             >
               <div
-                className="h-full bg-primary rounded-full transition-all duration-150"
+                className="h-full rounded-full transition-all duration-150"
                 style={{
                   width: `${clampProgress(nowPlaying.progress_pct)}%`,
                   backgroundColor: playerTheme.progressFill,
@@ -762,31 +818,7 @@ export const GearShifter = ({
                 }}
               />
             </div>
-            <div
-              className="flex flex-col items-end"
-              style={{ gap: `calc(3px * ${nowPlayingScale})`, minWidth: `calc(50px * ${nowPlayingScale})` }}
-            >
-              <div
-                className="flex items-center"
-                style={{ gap: `calc(3px * ${nowPlayingScale})`, color: playerTheme.subtitle, fontSize: `calc(6px * ${nowPlayingScale})` }}
-              >
-                <Volume2 style={{ width: `calc(9px * ${nowPlayingScale})`, height: `calc(9px * ${nowPlayingScale})` }} />
-                <span>{nowPlaying.volume}</span>
-              </div>
-              <span className="leading-none text-right" style={{ color: playerTheme.subtitle, fontSize: `calc(6px * ${nowPlayingScale})` }}>
-                {nowPlaying.time_str}
-              </span>
-            </div>
           </div>
-
-          {metadataUnavailable && (
-            <div
-              className="text-right"
-              style={{ marginTop: `calc(6px * ${nowPlayingScale})`, color: playerTheme.subtitle, fontSize: `calc(6px * ${nowPlayingScale})` }}
-            >
-              Metadata unavailable
-            </div>
-          )}
         </div>
       </div>
 

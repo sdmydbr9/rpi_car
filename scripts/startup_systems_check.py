@@ -23,6 +23,7 @@ import requests
 
 # Add parent directory to path for imports
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(BASE_DIR)
 sys.path.insert(0, BASE_DIR)
 
 # ==========================================
@@ -52,7 +53,7 @@ def is_hotspot_mode() -> bool:
 # 🔐 LOAD CREDENTIALS (from parameters or file)
 # ==========================================
 
-CONFIG_FILE = os.path.join(BASE_DIR, ".narration_config.json")
+CONFIG_FILE = os.path.join(PROJECT_ROOT, ".narration_config.json")
 
 def load_credentials(gemini_key=None, eleven_key=None):
     """

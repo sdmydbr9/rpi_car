@@ -4,6 +4,7 @@ import { SteeringWheel } from "./SteeringWheel";
 import { CameraFeed } from "./CameraFeed";
 import { CarTelemetry } from "./CarTelemetry";
 import { GearShifter } from "./GearShifter";
+import { HunterPopup } from "./HunterPopup";
 import { AutopilotTelemetry, type AutopilotStatus } from "./AutopilotTelemetry";
 import { Pedals } from "./Pedals";
 import { ImmersiveHUD } from "../ImmersiveHUD";
@@ -120,6 +121,8 @@ export const CockpitController = () => {
   const [isAutopilotEnabled, setIsAutopilotEnabled] = useState(false);
   const [isAutopilotRunning, setIsAutopilotRunning] = useState(false);
   const [isImmersiveView, setIsImmersiveView] = useState(false);
+  const [isHunterOpen, setIsHunterOpen] = useState(false);
+  const [isHunterActive, setIsHunterActive] = useState(false);
   const [eBrakeActive, setEBrakeActive] = useState(false);
   const [streamUrl, setStreamUrl] = useState<string>("");
   const [isEngineRunning, setIsEngineRunning] = useState(false);
@@ -1098,6 +1101,22 @@ export const CockpitController = () => {
     socketClient.emitMPU6050Toggle();
   }, [isAutopilotRunning]);
 
+  const handleTargetOpen = useCallback(() => {
+    setIsHunterOpen(true);
+    setIsHunterActive(false);
+    socketClient.emitHunterActivate();
+    // Listen for hunter_status to know when subprocess is ready
+    socketClient.onHunterStatus((data: { active: boolean }) => {
+      setIsHunterActive(data.active);
+    });
+  }, []);
+
+  const handleHunterClose = useCallback(() => {
+    setIsHunterOpen(false);
+    setIsHunterActive(false);
+    socketClient.emitHunterDeactivate();
+  }, []);
+
   const handleCameraToggle = useCallback(() => {
     console.log('🎮 CAMERA toggle');
     if (!isConnected) {
@@ -1413,6 +1432,15 @@ export const CockpitController = () => {
         isEngineRunning={isEngineRunning}
         inputMode={inputMode}
       />
+
+      {/* Hunter Target Pursuit Popup */}
+      <HunterPopup
+        isOpen={isHunterOpen}
+        onClose={handleHunterClose}
+        serverBaseUrl={serverIp ? `http://${serverIp}:5000` : `http://${window.location.hostname}:5000`}
+        whepUrl={serverIp ? `http://${serverIp}:8889/rover/whep` : `http://${window.location.hostname}:8889/rover/whep`}
+        hunterActive={isHunterActive}
+      />
       
       <div className="h-[100dvh] w-full flex flex-col overflow-hidden">
         {/* Header */}
@@ -1543,6 +1571,7 @@ export const CockpitController = () => {
                 onIRToggle={isConsoleMode ? noopVoid : handleIRToggle}
                 onSonarToggle={isConsoleMode ? noopVoid : handleSonarToggle}
                 onCameraToggle={isConsoleMode ? noopVoid : handleCameraToggle}
+                onTargetOpen={isConsoleMode ? noopVoid : handleTargetOpen}
                 isCameraEnabled={isCameraEnabled}
                 onAutopilotToggle={isConsoleMode ? noopVoid : handleAutopilotToggle}
                 isEnabled={isConsoleMode ? false : isEngineRunning}

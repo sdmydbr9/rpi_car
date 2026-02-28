@@ -1040,6 +1040,40 @@ export function emitCameraToggle(): void {
 }
 
 /**
+ * Activate Hunter mode (starts follow_target module)
+ */
+export function emitHunterActivate(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎯 HUNTER: ACTIVATE`);
+    socket.emit('hunter_activate', {});
+  } else {
+    console.warn(`[UI Control] ⚠️ Cannot activate hunter - socket not connected`);
+  }
+}
+
+/**
+ * Deactivate Hunter mode (stops follow_target module)
+ */
+export function emitHunterDeactivate(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🎯 HUNTER: DEACTIVATE`);
+    socket.emit('hunter_deactivate', {});
+  } else {
+    console.warn(`[UI Control] ⚠️ Cannot deactivate hunter - socket not connected`);
+  }
+}
+
+/**
+ * Listen for hunter status updates
+ */
+export function onHunterStatus(callback: (data: { active: boolean }) => void): void {
+  if (socket) {
+    socket.off('hunter_status');
+    socket.on('hunter_status', callback);
+  }
+}
+
+/**
  * Toggle Vision/Object Detection
  */
 export function emitVisionToggle(): void {
@@ -1256,4 +1290,8 @@ export default {
   onGamepadHotStart,
   onGamepadSensorToggle,
   onGamepadAutoAccelUpdate,
+  // Hunter
+  emitHunterActivate,
+  emitHunterDeactivate,
+  onHunterStatus,
 };

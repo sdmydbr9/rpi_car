@@ -58,6 +58,13 @@ export const GamepadControlsDialog = ({
             <Row label="Y" desc="SPORT — 100% max power" badge="S" badgeColor="text-red-400 border-red-500/40" />
           </Section>
 
+          {/* Braking */}
+          <Section title="BRAKING">
+            <Row label="L3 / R3" desc="Hold to brake (thumb-stick press)" />
+            <Row label="X (during autopilot)" desc="Emergency Brake — stops all motors" />
+            <Row label="LT + RT + X" desc="Emergency Brake (manual mode)" />
+          </Section>
+
           {/* Engine */}
           <Section title="ENGINE">
             <Row label="Start" desc="Toggle engine ON / OFF" />
@@ -69,7 +76,6 @@ export const GamepadControlsDialog = ({
           <Section title="AUTOPILOT & CRUISE">
             <Row label="LB + RB" desc="Toggle Autopilot (engine must be ON)" />
             <Row label="LT + RT" desc="Toggle Auto-Acceleration (cruise)" />
-            <Row label="X (during autopilot)" desc="Emergency Brake — stops all motors" />
           </Section>
 
           {/* Sensor Combos */}

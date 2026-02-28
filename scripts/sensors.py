@@ -6,7 +6,7 @@ Hardware
   Servo (SG90)     GPIO 20  — 50 Hz PWM, duty 2–12 for 0–180° (stays on Pi)
   VL53L0X          Pico I2C — time-of-flight laser via UART bridge
   IR Left/Right    Pico GPIO — via UART bridge
-  Rear HC-SR04     GPIO 25/24 — stays on Pi
+  Front HC-SR04    GPIO 25/24 — stays on Pi (ultrasonic forward)
 
 The servo is mounted on the front of the rover with the VL53L0X on top
 (VL53L0X is now read through the Pico sensor bridge).
@@ -49,9 +49,9 @@ SERVO_PIN = 20   # Servo PWM output (stays on Pi)
 # IR_LEFT = 5     # was GPIO 5 on Pi
 # IR_RIGHT = 6    # was GPIO 6 on Pi
 
-# Rear HC-SR04 Ultrasonic Sonar (stays on Pi)
-REAR_TRIG = 25
-REAR_ECHO = 24
+# Front HC-SR04 Ultrasonic Sonar (stays on Pi, faces forward)
+FRONT_TRIG = 25
+FRONT_ECHO = 24
 
 # --- SERVO CONSTANTS ---
 _SERVO_FREQ   = 50       # Standard servo PWM frequency (Hz)
@@ -83,17 +83,17 @@ class SensorSystem:
 
         # 3. IR Sensors — now on Pico, no Pi GPIO setup needed
 
-        # 4. Rear HC-SR04 Ultrasonic Sonar (stays on Pi)
-        self._rear_sonar_available = False
+        # 4. Front HC-SR04 Ultrasonic Sonar (stays on Pi, forward-facing)
+        self._front_sonar_available = False
         try:
-            GPIO.setup(REAR_TRIG, GPIO.OUT)
-            GPIO.setup(REAR_ECHO, GPIO.IN)
-            GPIO.output(REAR_TRIG, False)
+            GPIO.setup(FRONT_TRIG, GPIO.OUT)
+            GPIO.setup(FRONT_ECHO, GPIO.IN)
+            GPIO.output(FRONT_TRIG, False)
             time.sleep(0.05)
-            self._rear_sonar_available = True
-            print("📡 Rear sonar: Connected (HC-SR04, TRIG=GPIO25, ECHO=GPIO24)")
+            self._front_sonar_available = True
+            print("📡 Front sonar: Connected (HC-SR04, TRIG=GPIO25, ECHO=GPIO24)")
         except Exception as e:
-            print(f"⚠️  Rear sonar: Init failed — {e}")
+            print(f"⚠️  Front sonar: Init failed — {e}")
 
         # 5. Centre the servo on start-up
         self._set_servo_raw(_SERVO_CENTER)
@@ -167,25 +167,23 @@ class SensorSystem:
         """Alias → get_forward_distance() for code that still says 'sonar'."""
         return self.get_forward_distance()
 
-    def get_rear_sonar_distance(self):
-        """Read rear HC-SR04 ultrasonic distance in cm.
+    def get_front_sonar_distance(self):
+        """Read front HC-SR04 ultrasonic distance in cm.
 
         Returns distance in cm, or -1 on timeout/error.
-        Filters out floor-bounce readings (14-18 cm range when
-        the sensor is angled slightly downward).
         """
-        if not self._rear_sonar_available:
+        if not self._front_sonar_available:
             return -1
         try:
             # Trigger pulse
-            GPIO.output(REAR_TRIG, True)
+            GPIO.output(FRONT_TRIG, True)
             time.sleep(0.00001)
-            GPIO.output(REAR_TRIG, False)
+            GPIO.output(FRONT_TRIG, False)
 
             # Wait for echo HIGH (with timeout)
             pulse_start = time.time()
             timeout = pulse_start + 0.06   # 60 ms ≈ ~10 m max
-            while GPIO.input(REAR_ECHO) == 0:
+            while GPIO.input(FRONT_ECHO) == 0:
                 pulse_start = time.time()
                 if pulse_start > timeout:
                     return -1
@@ -193,7 +191,7 @@ class SensorSystem:
             # Wait for echo LOW
             pulse_end = time.time()
             timeout = pulse_end + 0.06
-            while GPIO.input(REAR_ECHO) == 1:
+            while GPIO.input(FRONT_ECHO) == 1:
                 pulse_end = time.time()
                 if pulse_end > timeout:
                     return -1
@@ -208,6 +206,11 @@ class SensorSystem:
             return distance
         except Exception:
             return -1
+
+    # Backward-compat alias (old code called it rear)
+    def get_rear_sonar_distance(self):
+        """Alias → get_front_sonar_distance() for backward compatibility."""
+        return self.get_front_sonar_distance()
 
     # ──────────────────────────────────────────────────
     #  Full sweep scan (-60° to +60° in STEP increments)

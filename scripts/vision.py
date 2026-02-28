@@ -18,10 +18,14 @@ Detection classes (PASCAL VOC 21):
 """
 
 import time
+import os
 import threading
 import cv2
 import numpy as np
 from collections import deque
+
+# PROJECT_ROOT is the top-level rpi_car directory (parent of scripts/)
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # ── PASCAL VOC class labels for MobileNetSSD ──────────
@@ -60,8 +64,8 @@ class VisionSystem:
         self,
         picam2,
         confidence_threshold=0.45,
-        model_prototxt="models/MobileNetSSD_deploy.prototxt",
-        model_weights="models/MobileNetSSD_deploy.caffemodel",
+        model_prototxt=os.path.join(_PROJECT_ROOT, "models", "MobileNetSSD_deploy.prototxt"),
+        model_weights=os.path.join(_PROJECT_ROOT, "models", "MobileNetSSD_deploy.caffemodel"),
     ):
         self._picam2 = picam2
         self._confidence = confidence_threshold

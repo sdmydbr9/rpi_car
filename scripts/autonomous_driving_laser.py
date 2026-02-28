@@ -277,7 +277,8 @@ class AvoidanceZone(Enum):
 #  LOGGING SETUP  →  slalom.logs
 # ─────────────────────────────────────────────────────────────────────────────
 
-LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "autonomous_driving_laser.logs")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOG_FILE = os.path.join(PROJECT_ROOT, "autonomous_driving_laser.logs")
 
 _file_formatter = logging.Formatter(
     fmt="%(asctime)s.%(msecs)03d | %(levelname)-5s | %(message)s",
