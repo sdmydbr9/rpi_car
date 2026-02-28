@@ -346,58 +346,64 @@ export const CockpitController = () => {
     };
   }, [unlockTTS]);
 
-  // Smart auto-connect: try localhost first, then fallback to server IP, then hotspot IP
+  // Fast auto-connect: discover the right server via lightweight HTTP probes,
+  // then open the socket connection only once to the confirmed endpoint.
   useEffect(() => {
     if (!autoConnectAttemptedRef.current) {
       autoConnectAttemptedRef.current = true;
       const smartAutoConnect = async () => {
-        const tryConnection = async (ip: string, reason: string = '') => {
-          console.log(`🔌 [Startup] Attempting connection to ${ip}:5000... ${reason}`);
-          try {
-            await socketClient.connectToServer(ip, 5000);
-            setServerIp(ip);
-            setIsConnected(true);
-            const url = buildMediaMtxWebRtcUrl(ip);
-            lastMediaMtxUrlRef.current = url;
-            setStreamUrl(`${url}?t=${Date.now()}`);
-            console.log(`✅ [Startup] Successfully connected to ${ip}`);
-            return true;
-          } catch (error) {
-            console.warn(`⚠️ [Startup] Failed to connect to ${ip}:`, error);
-            return false;
-          }
+        // --- Phase 1: discover reachable server via fast HTTP probes ---
+        const pageHost = window.location.hostname;
+        const isLocalDev = !pageHost || pageHost === 'localhost' || pageHost === '127.0.0.1' || pageHost === '::1';
+
+        interface ProbeCandidate { baseUrl: string; label: string }
+        const candidates: ProbeCandidate[] = [];
+
+        if (!isLocalDev) {
+          // Production: the page was served by Flask on the Pi — probe the same host
+          candidates.push({ baseUrl: `http://${pageHost}:5000`, label: 'page-host' });
+        } else {
+          // Dev mode: Vite on :8080, backend expected on localhost:5000
+          candidates.push({ baseUrl: 'http://localhost:5000', label: 'localhost' });
+        }
+        // Standard hotspot IP as fallback
+        candidates.push({ baseUrl: 'http://192.168.4.1:5000', label: 'hotspot' });
+
+        const probeEndpoint = async (c: ProbeCandidate): Promise<{ ip: string; source: string }> => {
+          const resp = await fetch(`${c.baseUrl}/api/server-ip`, { signal: AbortSignal.timeout(3000) });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const data = await resp.json();
+          return {
+            ip: (data.ip as string) ?? new URL(c.baseUrl).hostname,
+            source: `${c.label} (${data.transport ?? 'unknown'})`,
+          };
         };
 
-        // Try localhost first (for local development)
-        const localhostConnected = await tryConnection('localhost', '(localhost development)');
-        
-        if (!localhostConnected) {
-          // If localhost fails, fetch the server's network IP
-          console.log('🔍 [Startup] Localhost failed, fetching server IP from /api/server-ip...');
-          try {
-            // Try to get server IP from current origin
-            const protocol = window.location.protocol;
-            const hostname = window.location.hostname;
-            const port = window.location.port;
-            const apiUrl = `${protocol}//${hostname}${port ? ':' + port : ''}/api/server-ip`;
-            const response = await fetch(apiUrl, { signal: AbortSignal.timeout(5000) });
-            const data = await response.json();
-            console.log(`📡 [Startup] Server IP from API: ${data.ip} (hotspot: ${data.hotspot_active})`);
-            const apiConnected = await tryConnection(data.ip, `(from API - ${data.transport})`);
-            
-            if (!apiConnected && data.hotspot_active) {
-              // If API IP failed but we're in hotspot mode, we're already on the right network
-              console.log('🔥 [Startup] In hotspot mode but API IP failed - this should not happen');
-              return;
-            }
-            if (apiConnected) return;
-          } catch (error) {
-            console.warn('⚠️ [Startup] Could not fetch server IP from API:', error);
-          }
+        console.log(`🔍 [Discovery] Probing ${candidates.length} endpoint(s) in parallel...`);
+        const probes = candidates.map(c => probeEndpoint(c));
 
-          // Last resort: try standard hotspot IP (192.168.4.1)
-          console.log('🔍 [Startup] Trying standard hotspot IP...');
-          await tryConnection('192.168.4.1', '(standard hotspot IP)');
+        let serverEndpoint: { ip: string; source: string } | null = null;
+        try {
+          serverEndpoint = await Promise.any(probes);
+          console.log(`✅ [Discovery] Server found at ${serverEndpoint.ip} (via ${serverEndpoint.source})`);
+        } catch {
+          console.error('❌ [Discovery] All endpoint probes failed — no server reachable');
+          return;
+        }
+
+        // --- Phase 2: connect socket once to the discovered endpoint ---
+        const ip = serverEndpoint.ip;
+        console.log(`🔌 [Startup] Connecting socket to ${ip}:5000...`);
+        try {
+          await socketClient.connectToServer(ip, 5000);
+          setServerIp(ip);
+          setIsConnected(true);
+          const url = buildMediaMtxWebRtcUrl(ip);
+          lastMediaMtxUrlRef.current = url;
+          setStreamUrl(`${url}?t=${Date.now()}`);
+          console.log(`✅ [Startup] Connected to ${ip} (discovered via ${serverEndpoint.source})`);
+        } catch (error) {
+          console.error(`❌ [Startup] Socket connection to ${ip} failed:`, error);
         }
       };
       smartAutoConnect();

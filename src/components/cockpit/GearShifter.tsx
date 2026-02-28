@@ -369,9 +369,9 @@ export const GearShifter = ({
     if (!panel || typeof ResizeObserver === "undefined") return;
 
     const baseWidth = 360;
-    const baseHeight = 116;
+    const baseHeight = 160;
     const minScale = 0.62;
-    const maxScale = 1.85;
+    const maxScale = 2.2;
 
     const updateScale = () => {
       const { width, height } = panel.getBoundingClientRect();
@@ -692,23 +692,23 @@ export const GearShifter = ({
       </div>
 
       {/* NOW PLAYING HUD */}
-      <div className="w-full px-0.5 mb-0.5 min-h-0 flex-[0.78]" ref={nowPlayingPanelRef}>
+      <div className="w-full px-0.5 mb-0.5 min-h-0 flex-[1.2]" ref={nowPlayingPanelRef}>
         <div
           className="h-full min-h-0 border rounded-sm backdrop-blur-sm transition-all duration-300 overflow-hidden flex flex-col justify-between"
           style={{
-            minHeight: "54px",
-            padding: `calc(5px * ${nowPlayingScale}) calc(6px * ${nowPlayingScale})`,
+            minHeight: "80px",
+            padding: `calc(8px * ${nowPlayingScale}) calc(10px * ${nowPlayingScale})`,
             borderColor: playerTheme.border,
             background: playerTheme.cardBackground,
             boxShadow: `inset 0 0 0 1px ${playerTheme.border}, 0 8px 20px rgba(0, 0, 0, 0.28)`,
           }}
         >
-          <div className="flex items-center" style={{ gap: `calc(6px * ${nowPlayingScale})` }}>
+          <div className="flex items-center" style={{ gap: `calc(10px * ${nowPlayingScale})` }}>
             <div
-              className="rounded-sm overflow-hidden flex items-center justify-center flex-shrink-0 border bg-black/20"
+              className="rounded-md overflow-hidden flex items-center justify-center flex-shrink-0 border bg-black/20"
               style={{
-                width: `calc(26px * ${nowPlayingScale})`,
-                height: `calc(26px * ${nowPlayingScale})`,
+                width: `calc(48px * ${nowPlayingScale})`,
+                height: `calc(48px * ${nowPlayingScale})`,
                 borderColor: playerTheme.border,
               }}
             >
@@ -717,8 +717,8 @@ export const GearShifter = ({
               ) : (
                 <Music
                   style={{
-                    width: `calc(10px * ${nowPlayingScale})`,
-                    height: `calc(10px * ${nowPlayingScale})`,
+                    width: `calc(22px * ${nowPlayingScale})`,
+                    height: `calc(22px * ${nowPlayingScale})`,
                     color: playerTheme.accent,
                     filter: `drop-shadow(0 0 4px ${playerTheme.accent})`,
                   }}
@@ -729,29 +729,29 @@ export const GearShifter = ({
             <div className="flex flex-col min-w-0 flex-1 overflow-hidden">
               <span
                 className="font-bold truncate leading-tight tracking-wide"
-                style={{ color: playerTheme.title, fontSize: `calc(7px * ${nowPlayingScale})` }}
+                style={{ color: playerTheme.title, fontSize: `calc(12px * ${nowPlayingScale})` }}
               >
                 {displayTrack}
               </span>
               <span
                 className="truncate leading-tight tracking-wider uppercase"
-                style={{ color: playerTheme.subtitle, fontSize: `calc(5px * ${nowPlayingScale})` }}
+                style={{ color: playerTheme.subtitle, fontSize: `calc(9px * ${nowPlayingScale})` }}
               >
                 {displayArtist}
               </span>
               <span
                 className="truncate leading-tight"
-                style={{ color: playerTheme.subtitle, fontSize: `calc(5px * ${nowPlayingScale})` }}
+                style={{ color: playerTheme.subtitle, fontSize: `calc(8px * ${nowPlayingScale})` }}
               >
                 {displayAlbum}
               </span>
             </div>
           </div>
 
-          <div className="flex items-end" style={{ marginTop: `calc(4px * ${nowPlayingScale})`, gap: `calc(6px * ${nowPlayingScale})` }}>
+          <div className="flex items-end" style={{ marginTop: `calc(6px * ${nowPlayingScale})`, gap: `calc(8px * ${nowPlayingScale})` }}>
             <div
               className="flex-1 rounded-full overflow-hidden"
-              style={{ height: `calc(4px * ${nowPlayingScale})`, backgroundColor: playerTheme.progressTrack }}
+              style={{ height: `calc(5px * ${nowPlayingScale})`, backgroundColor: playerTheme.progressTrack }}
             >
               <div
                 className="h-full bg-primary rounded-full transition-all duration-150"
@@ -764,16 +764,16 @@ export const GearShifter = ({
             </div>
             <div
               className="flex flex-col items-end"
-              style={{ gap: `calc(2px * ${nowPlayingScale})`, minWidth: `calc(42px * ${nowPlayingScale})` }}
+              style={{ gap: `calc(3px * ${nowPlayingScale})`, minWidth: `calc(50px * ${nowPlayingScale})` }}
             >
               <div
                 className="flex items-center"
-                style={{ gap: `calc(2px * ${nowPlayingScale})`, color: playerTheme.subtitle, fontSize: `calc(4.5px * ${nowPlayingScale})` }}
+                style={{ gap: `calc(3px * ${nowPlayingScale})`, color: playerTheme.subtitle, fontSize: `calc(6px * ${nowPlayingScale})` }}
               >
-                <Volume2 style={{ width: `calc(7px * ${nowPlayingScale})`, height: `calc(7px * ${nowPlayingScale})` }} />
+                <Volume2 style={{ width: `calc(9px * ${nowPlayingScale})`, height: `calc(9px * ${nowPlayingScale})` }} />
                 <span>{nowPlaying.volume}</span>
               </div>
-              <span className="leading-none text-right" style={{ color: playerTheme.subtitle, fontSize: `calc(4.5px * ${nowPlayingScale})` }}>
+              <span className="leading-none text-right" style={{ color: playerTheme.subtitle, fontSize: `calc(6px * ${nowPlayingScale})` }}>
                 {nowPlaying.time_str}
               </span>
             </div>
@@ -782,7 +782,7 @@ export const GearShifter = ({
           {metadataUnavailable && (
             <div
               className="text-right"
-              style={{ marginTop: `calc(4px * ${nowPlayingScale})`, color: playerTheme.subtitle, fontSize: `calc(4.5px * ${nowPlayingScale})` }}
+              style={{ marginTop: `calc(6px * ${nowPlayingScale})`, color: playerTheme.subtitle, fontSize: `calc(6px * ${nowPlayingScale})` }}
             >
               Metadata unavailable
             </div>
