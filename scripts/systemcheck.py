@@ -33,8 +33,8 @@ def main():
     except Exception as e:
         print(f"{'MPU6050':<15} | {'Pico error':<15} | [FAILED] ❌  {e}")
 
-    # 2. TEST FRONT SONAR
-    dist_front = car.get_sonar_distance()
+    # 2. TEST SONAR
+    dist_front = car.get_sonar_distance_raw()
     status_front = "UNKNOWN"
     if dist_front == -1:
         status_front = "[FAILED] ❌ (Timeout)"
@@ -43,23 +43,10 @@ def main():
     else:
         status_front = "[OK] ✅"
     
-    print(f"{'Front Sonar':<15} | {str(dist_front) + ' cm':<15} | {status_front}")
+    print(f"{'Sonar':<15} | {str(dist_front) + ' cm':<15} | {status_front}")
     time.sleep(0.1)
 
-    # 3. TEST REAR SONAR
-    dist_rear = car.get_rear_sonar_distance()
-    status_rear = "UNKNOWN"
-    if dist_rear == -1:
-        status_rear = "[FAILED] ❌ (Timeout)"
-    elif dist_rear < 5:
-        status_rear = "[WARNING] ⚠️ (Too Close/Noise)"
-    else:
-        status_rear = "[OK] ✅"
-
-    print(f"{'Rear Sonar':<15} | {str(dist_rear) + ' cm':<15} | {status_rear}")
-    time.sleep(0.1)
-
-    # 4. TEST IR SENSORS
+    # 3. TEST IR SENSORS
     # get_ir_status returns (Left_Is_Blocked, Right_Is_Blocked)
     left_blocked, right_blocked = car.get_ir_status()
     

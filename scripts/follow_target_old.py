@@ -49,7 +49,7 @@ try:
 except Exception as e:
     logging.error(f"Pico bridge import failed: {e}", exc_info=True)
 
-# Import SensorSystem (laser scanner servo + VL53L0X + rear sonar)
+# Import SensorSystem (laser scanner servo + VL53L0X + sonar)
 try:
     from sensors import SensorSystem
 except Exception as e:
@@ -430,7 +430,7 @@ def sensor_polling_loop():
             # --- Front sonar every 3rd cycle (HC-SR04 on GPIO 25/24) --
             if sensors and cycle % 3 == 0:
                 try:
-                    s_front = sensors.get_front_sonar_distance()
+                    s_front = sensors.get_sonar_distance_raw()
                     # Ignored readings < 15cm as they might be chassis/bumper noise
                     if s_front > 0 and s_front < 15:
                         s_front = 999
@@ -1181,7 +1181,7 @@ def get_status() -> dict:
         'bbox_area': vision_bbox_area,
         'sensors': {
             'front_laser': round(sensor_front_cm, 1),
-            'front_sonar': round(sonar_front_cm, 1),
+            'sonar': round(sonar_front_cm, 1),
             'ir_left': ir_left_blocked,
             'ir_right': ir_right_blocked,
             'accel': round(accel_magnitude, 2),

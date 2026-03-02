@@ -29,6 +29,8 @@ interface ImmersiveHUDProps {
   speed: number;
   speedMpm?: number;
   speedUnit?: SpeedUnit;
+  rpm?: number;
+  batteryVoltage?: number;
   gear: string;
   throttle: boolean;
   brake: boolean;
@@ -72,6 +74,8 @@ export const ImmersiveHUD = ({
   speed,
   speedMpm = 0,
   speedUnit = "m/min",
+  rpm = 0,
+  batteryVoltage = 0,
   gear,
   throttle,
   brake,
@@ -145,13 +149,15 @@ export const ImmersiveHUD = ({
     return map[cameraResolution || 'low'] || cameraResolution || '640×480';
   }, [cameraResolution]);
   
-  // RPM simulation based on speed and throttle
-  const rpm = Math.min(100, (speed / 100) * 80 + (throttle ? 20 : 0));
+  const rpmValue = Math.max(0, Number.isFinite(rpm) ? rpm : 0);
+  const RPM_GAUGE_MAX = 300;
+  const rpmPercent = Math.min(100, (rpmValue / RPM_GAUGE_MAX) * 100);
+  const batteryVoltageLabel = Number.isFinite(batteryVoltage) ? `${batteryVoltage.toFixed(2)}v` : "--.--v";
   const effectiveViewerUrl = useMemo(() => {
     if (!streamUrl) return undefined;
     return `${streamUrl}${streamUrl.includes('?') ? '&' : '?'}autoplay=1&muted=1&controls=0&playsinline=1&disablepictureinpicture=1`;
   }, [streamUrl]);
-  const isRedline = rpm > 85;
+  const isRedline = rpmPercent > 85;
 
   // Converted speed for HUD display
   const hudDisplaySpeed = useMemo(() => convertMpm(speedMpm, speedUnit), [speedMpm, speedUnit]);
@@ -458,7 +464,7 @@ export const ImmersiveHUD = ({
             {/* Battery */}
             <div className="flex items-center gap-1 text-[10px] racing-text text-foreground">
               <Power className="w-3 h-3 text-primary" />
-              7.4v
+              {batteryVoltageLabel}
             </div>
 
             {/* Gamepad Status (when in console mode) */}
@@ -529,14 +535,14 @@ export const ImmersiveHUD = ({
                   strokeWidth="6"
                   strokeLinecap="round"
                   strokeDasharray="220"
-                  strokeDashoffset={220 - (220 * rpm) / 100}
+                  strokeDashoffset={220 - (220 * rpmPercent) / 100}
                   style={{
-                    filter: rpm > 50 ? `drop-shadow(0 0 6px ${isRedline ? 'hsl(var(--destructive))' : 'hsl(var(--primary))'})` : 'none',
+                    filter: rpmPercent > 50 ? `drop-shadow(0 0 6px ${isRedline ? 'hsl(var(--destructive))' : 'hsl(var(--primary))'})` : 'none',
                     transition: 'stroke-dashoffset 0.1s ease-out'
                   }}
                 />
                 <text x="50" y="55" textAnchor="middle" fill="hsl(var(--foreground))" fontSize="16" fontWeight="bold">
-                  {Math.round(rpm)}%
+                  {Math.round(rpmValue)}
                 </text>
               </svg>
               <div className="text-[10px] racing-text text-primary -mt-2">RPM</div>

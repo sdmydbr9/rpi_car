@@ -94,7 +94,7 @@ SOUNDS_DIR = os.path.join(PROJECT_ROOT, "sounds")
 # Driver 2 (Rear):  RL_IN1=9,  RL_IN2=11, RL_ENA=26, RR_IN3=10, RR_IN4=7,  RR_ENB=16
 
 # --- SONAR SENSOR PINS (BCM Numbering) ---
-# Front Sonar: TRIG → Pin 22 (GPIO 25), ECHO → Pin 18 (GPIO 24)
+# Sonar: TRIG → Pin 22 (GPIO 25), ECHO → Pin 18 (GPIO 24)
 SONAR_TRIG = 25  # GPIO 25 - Sonar Trigger
 SONAR_ECHO = 24  # GPIO 24 - Sonar Echo
 
@@ -359,7 +359,6 @@ _SENSOR_CONFIG_DEFAULTS = {
     'ir_enabled': True,
     'sonar_enabled': True,
     'mpu6050_enabled': True,
-    'rear_sonar_enabled': True,
 }
 
 def _load_sensor_config():
@@ -1821,16 +1820,16 @@ except Exception as e:
     pico_reader = None
     print(f"⚠️  Pico sensor bridge initialization error: {e}")
 
-# Initialize Sensor System (servo + rear sonar stay on Pi)
+# Initialize Sensor System (servo + sonar stay on Pi)
 try:
     sensor_system = SensorSystem()
-    print("✅ Sensor system initialized (Servo + Rear Sonar)")
+    print("✅ Sensor system initialized (Servo + Sonar)")
 except Exception as e:
     print(f"⚠️  Sensor system initialization error: {e}")
     # Create dummy sensor system for testing
     class DummySensorSystem:
         def get_sonar_distance(self): return 100
-        def get_rear_sonar_distance(self): return 100
+        def get_sonar_distance_raw(self): return 100
         def get_ir_status(self): return False, False
         def set_servo_angle(self, a): pass
         def center_servo(self): pass
@@ -1848,10 +1847,6 @@ def _get_laser_for_autopilot():
     """Read forward laser distance (smoothed) for the autopilot."""
     return get_smoothed_laser()
 
-def _get_rear_for_autopilot():
-    """Read rear HC-SR04 sonar distance for the autopilot."""
-    return sensor_system.get_rear_sonar_distance()
-
 def _get_ir_for_autopilot():
     """Read IR sensors from Pico bridge: True = obstacle detected."""
     try:
@@ -1866,7 +1861,6 @@ autopilot = AutoPilot(
     _get_laser_for_autopilot,
     _get_ir_for_autopilot,
     sensor_system=sensor_system,
-    get_rear_distance=_get_rear_for_autopilot,
 )
 
 # Store a copy of the original class-level defaults (immutable reference for reset)
@@ -1878,9 +1872,9 @@ _AUTOPILOT_DEFAULT_TUNING = AutoPilot.get_default_tuning()
 # Wire up follow_target with shared hardware (like autopilot uses car_system).
 # This replaces the old standalone GPIO/Pico/SensorSystem init.
 def _get_sonar_for_hunter():
-    """Read front sonar distance for hunter mode."""
+    """Read sonar distance for hunter mode."""
     try:
-        return sensor_system.get_rear_sonar_distance()
+        return sensor_system.get_sonar_distance_raw()
     except Exception:
         return 999
 
@@ -1917,7 +1911,6 @@ car_state = {
     "right_obstacle": False, # IR sensor: obstacle detected on right
     "ir_enabled": _sensor_config.get('ir_enabled', True),    # IR sensor toggle
     "mpu6050_enabled": _sensor_config.get('mpu6050_enabled', True),  # MPU6050 gyroscope toggle
-    "rear_sonar_enabled": _sensor_config.get('rear_sonar_enabled', True),  # Rear sonar sensor toggle
     "user_steer_angle": 0, # Store user's manual steering (preserved when avoiding)
     "obstacle_avoidance_active": False,  # Track if currently avoiding
     "speed_limit": 100,    # Manual speed limit (5-100), overrides gear speeds
@@ -1929,7 +1922,7 @@ car_state = {
     "obstacle_state": "IDLE",  # Obstacle avoidance state: IDLE, STOPPED, STEERING
     "is_braking": False,  # Flag to indicate normal brake is applied for motor control
     "heartbeat_active": True,  # Heartbeat status: True = client responding, False = lost connection
-    "sonar_distance": 100,  # Distance from front sonar sensor in cm
+    "sonar_distance": 100,  # Distance from sonar sensor in cm
     "sonar_enabled": _sensor_config.get('sonar_enabled', True),   # Sonar sensor toggle
     # 🤖 AUTONOMOUS DRIVING MODE
     "autonomous_mode": False,  # Smart Driver autonomous mode toggle
@@ -1943,7 +1936,7 @@ car_state = {
     "slalom_sign": 0,               # Dodge direction: -1=left, 0=none, 1=right
     # 🚨 SENSOR HEALTH STATUS
     "sensor_status": {
-        "front_sonar": "OK",    # HC-SR04 ultrasonic on Pi GPIO 25/24
+        "sonar": "OK",    # HC-SR04 ultrasonic on Pi GPIO 25/24
         "laser": "OK",          # VL53L0X laser rangefinder via Pico
         "left_ir": "OK",
         "right_ir": "OK",
@@ -2237,7 +2230,7 @@ def check_sensor_health():
     Returns a dict with health status for each sensor.
     """
     sensor_status = {
-        "front_sonar": "OK",
+        "sonar": "OK",
         "laser": "OK",
         "left_ir": "OK",
         "right_ir": "OK",
@@ -2291,22 +2284,22 @@ def check_sensor_health():
         sensor_status["laser"] = "FAILED"
         has_error = True
 
-    # ── 3b. Check Front Sonar (HC-SR04 on Pi GPIO 25/24) ──
+    # ── 3b. Check Sonar (HC-SR04 on Pi GPIO 25/24) ──
     try:
-        if hasattr(sensor_system, '_rear_sonar_available') and sensor_system._rear_sonar_available:
+        if hasattr(sensor_system, '_sonar_available') and sensor_system._sonar_available:
             # HC-SR04 GPIO init succeeded — try a quick ping
-            dist = sensor_system.get_rear_sonar_distance()
+            dist = sensor_system.get_sonar_distance_raw()
             if dist > 0:
-                sensor_status["front_sonar"] = "OK"
+                sensor_status["sonar"] = "OK"
             else:
                 # Hardware present but reading failed (no echo)
-                sensor_status["front_sonar"] = "WARNING"
+                sensor_status["sonar"] = "WARNING"
                 has_error = True
         else:
-            sensor_status["front_sonar"] = "FAILED"
+            sensor_status["sonar"] = "FAILED"
             has_error = True
     except Exception:
-        sensor_status["front_sonar"] = "FAILED"
+        sensor_status["sonar"] = "FAILED"
         has_error = True
 
     # ── 4. Check IR Sensors (via Pico) ──
@@ -4347,7 +4340,6 @@ def on_connect():
         'ir_enabled': car_state['ir_enabled'],
         'sonar_enabled': car_state['sonar_enabled'],
         'mpu6050_enabled': car_state['mpu6050_enabled'],
-        'rear_sonar_enabled': car_state['rear_sonar_enabled'],
     })
     # Send startup check config
     _masked_startup = _build_startup_config_sync_payload()
@@ -4708,19 +4700,6 @@ def on_sonar_toggle(data):
     _sensor_config['sonar_enabled'] = car_state["sonar_enabled"]
     _save_sensor_config(_sensor_config)
     emit('sonar_response', {'status': 'ok', 'sonar_enabled': car_state["sonar_enabled"]})
-
-@socketio.on('rear_sonar_toggle')
-def on_rear_sonar_toggle(data):
-    """Handle rear sonar sensor toggle"""
-    if car_state["autonomous_mode"]:
-        emit('rear_sonar_response', {'status': 'blocked', 'rear_sonar_enabled': car_state["rear_sonar_enabled"], 'message': 'Cannot toggle Rear Sonar in autonomous mode'})
-        return
-    car_state["rear_sonar_enabled"] = not car_state["rear_sonar_enabled"]
-    _sensor_config['rear_sonar_enabled'] = car_state["rear_sonar_enabled"]
-    _save_sensor_config(_sensor_config)
-    state = '✅ ON' if car_state["rear_sonar_enabled"] else '❌ OFF'
-    print(f"\n⚙️ [UI Control] 📡 REAR SONAR: {state}")
-    emit('rear_sonar_response', {'status': 'ok', 'rear_sonar_enabled': car_state["rear_sonar_enabled"]})
 
 @socketio.on('mpu6050_toggle')
 def on_mpu6050_toggle(data):
@@ -5522,9 +5501,8 @@ def _trigger_startup_check_async(client_id=None, source="manual", require_enable
                 'critical_ok': status.critical_systems_ready,
                 'all_ok': status.all_systems_ready,
                 'pico_bridge': status.pico_bridge_ok,
-                'front_sonar': status.front_sonar_ok,
+                'sonar': status.sonar_ok,
                 'laser': status.laser_ok,
-                'rear_sonar': status.rear_sonar_ok,
                 'mpu6050': status.mpu6050_ok,
                 'ir_sensors': status.ir_sensors_ok,
                 'encoder': status.encoder_ok,
@@ -5899,7 +5877,6 @@ def telemetry_broadcast():
                 "sonar_distance": car_state["sonar_distance"],
                 "sonar_enabled": car_state["sonar_enabled"],
                 "mpu6050_enabled": car_state["mpu6050_enabled"],
-                "rear_sonar_enabled": car_state["rear_sonar_enabled"],
                 # 🧭 MPU6050 Accelerometer telemetry
                 "accel_x": accel_x,
                 "accel_y": accel_y,

@@ -3,8 +3,8 @@
 ⬛ TARS TACTICAL BOOT SEQUENCE
 ──────────────────────────────────────────
 Performs critical system diagnostics at boot and speaks status via AI.
-- Critical systems: Pico bridge, front sonar, laser
-- Optional systems: rear sonar, camera, battery monitoring, etc.
+- Critical systems: Pico bridge, sonar, laser
+- Optional systems: camera, battery monitoring, etc.
 - Uses Gemini for TARS persona generation + ElevenLabs for TTS
 
 "Humor setting: 75%. Honesty setting: 95%."
@@ -218,11 +218,10 @@ class SystemStatus:
     def __init__(self):
         # Critical systems
         self.pico_bridge_ok = False
-        self.front_sonar_ok = False
+        self.sonar_ok = False
         self.laser_ok = False
 
         # Optional systems
-        self.rear_sonar_ok = False
         self.camera_ok = False
         self.mpu6050_ok = False
         self.battery_voltage = -1.0
@@ -261,7 +260,7 @@ def check_front_sonar():
     if not SENSOR_SYSTEM_AVAILABLE:
         return False
     try:
-        print("  [>] Pinging front sonar...", end=" ", flush=True)
+        print("  [>] Pinging sonar...", end=" ", flush=True)
         sensor_sys = SensorSystem()
         dist = sensor_sys.get_distance()
         if dist is None or dist < 0:
@@ -285,24 +284,6 @@ def check_laser():
             return False
         print(f"NOMINAL ({dist_mm} mm)")
         return True
-    except Exception as e:
-        print(f"ERROR: {e}")
-        return False
-
-
-def check_rear_sonar():
-    if not SENSOR_SYSTEM_AVAILABLE:
-        return False
-    try:
-        print("  [>] Pinging rear sonar...", end=" ", flush=True)
-        sensor_sys = SensorSystem()
-        if hasattr(sensor_sys, 'get_rear_distance'):
-            dist = sensor_sys.get_rear_distance()
-            if dist and dist > 0:
-                print(f"NOMINAL ({dist:.1f} cm)")
-                return True
-        print("OFFLINE")
-        return False
     except Exception as e:
         print(f"ERROR: {e}")
         return False
@@ -969,12 +950,12 @@ def run_system_check() -> SystemStatus:
     print("[CRITICAL SYSTEMS]")
     print("-" * 30)
     status.pico_bridge_ok = check_pico_bridge()
-    status.front_sonar_ok = check_front_sonar()
+    status.sonar_ok = check_front_sonar()
     status.laser_ok = check_laser()
 
     status.critical_systems_ready = (
         status.pico_bridge_ok and
-        status.front_sonar_ok and
+        status.sonar_ok and
         status.laser_ok
     )
 
@@ -987,7 +968,6 @@ def run_system_check() -> SystemStatus:
 
     print("[SECONDARY SYSTEMS]")
     print("-" * 30)
-    status.rear_sonar_ok = check_rear_sonar()
     status.mpu6050_ok = check_mpu6050()
     status.ir_sensors_ok = check_ir_sensors()
     status.encoder_ok = check_encoder()
@@ -998,12 +978,11 @@ def run_system_check() -> SystemStatus:
 
     print()
     optional_count = sum([
-        status.rear_sonar_ok,
         status.mpu6050_ok,
         status.ir_sensors_ok,
         status.encoder_ok,
     ])
-    print(f">> SECONDARY SYSTEMS: {optional_count}/4 ONLINE")
+    print(f">> SECONDARY SYSTEMS: {optional_count}/3 ONLINE")
     print()
 
     try:
@@ -1016,7 +995,7 @@ def run_system_check() -> SystemStatus:
 
     status.all_systems_ready = (
         status.critical_systems_ready and
-        optional_count == 4
+        optional_count == 3
     )
 
     return status
@@ -1026,11 +1005,10 @@ def generate_status_summary(status: SystemStatus) -> str:
     lines = []
     lines.append("CRITICAL DECK:")
     lines.append(f"  Pico Bridge: {'NOMINAL' if status.pico_bridge_ok else 'OFFLINE'}")
-    lines.append(f"  Front Sonar: {'NOMINAL' if status.front_sonar_ok else 'OFFLINE'}")
+    lines.append(f"  Sonar: {'NOMINAL' if status.sonar_ok else 'OFFLINE'}")
     lines.append(f"  Laser Array: {'NOMINAL' if status.laser_ok else 'OFFLINE'}")
     lines.append("")
     lines.append("SECONDARY DECK:")
-    lines.append(f"  Rear Sonar: {'NOMINAL' if status.rear_sonar_ok else 'OFFLINE'}")
     lines.append(f"  IMU: {'NOMINAL' if status.mpu6050_ok else 'OFFLINE'}")
     lines.append(f"  IR Array: {'NOMINAL' if status.ir_sensors_ok else 'OFFLINE'}")
     lines.append(f"  Encoders: {'NOMINAL' if status.encoder_ok else 'OFFLINE'}")

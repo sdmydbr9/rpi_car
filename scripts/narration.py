@@ -26,9 +26,9 @@ from kokoro_client import get_kokoro_client
 
 # Default narration prompt
 DEFAULT_PROMPT = (
-    "you are a robot who just got vision for the first time, "
-    "describe what do you see in less than 20 words, "
-    "be narrative and interesting and use human like expressions"
+    "You are a friendly robot experiencing sight for the first time. "
+    "Describe what you notice in a natural, conversational tone, vivid but concise, "
+    "highlighting mood, movement, and standout details in 40 words or fewer."
 )
 
 # Configuration for hotspot mode (matches auto_voice.py exactly)

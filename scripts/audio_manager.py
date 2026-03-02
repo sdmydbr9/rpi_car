@@ -24,6 +24,8 @@ THROTTLE_RAMP_DOWN = 0.02
 NARRATION_DUCK_FACTOR = 0.10   # 10% volume while narration/startup speech plays
 NARRATION_DUCK_ATTACK_PER_SEC = 2.5   # 1.0 -> 0.1 in ~360ms
 NARRATION_DUCK_RELEASE_PER_SEC = 1.8  # 0.1 -> 1.0 in ~500ms
+ENGINE_VOLUME_MASTER = 0.6     # Lower engine by 40% (60% of original volume)
+ENGINE_MAX_VOLUME = 0.6        # Max volume cap at 60%
 # ==========================================
 
 ENGINE_SAMPLE_RATE = 44100 
@@ -476,9 +478,9 @@ class CarAudioManager:
             self._beeper_channel.set_volume(0.0)
 
         # --- Audio Ducking Mix ---
-        accel_vol = self._throttle * 0.70
-        idle_vol = 1.0 - (self._throttle * 0.70)
-        self._ign_channel.set_volume(self._duck_factor)
+        accel_vol = (self._throttle * ENGINE_MAX_VOLUME) * ENGINE_VOLUME_MASTER
+        idle_vol = (ENGINE_MAX_VOLUME - (self._throttle * ENGINE_MAX_VOLUME)) * ENGINE_VOLUME_MASTER
+        self._ign_channel.set_volume(ENGINE_VOLUME_MASTER * self._duck_factor)
         self._accel_channel.set_volume(accel_vol * self._duck_factor)
         self._idle_channel_a.set_volume(idle_vol * self._duck_factor)
         self._idle_channel_b.set_volume(idle_vol * self._duck_factor)

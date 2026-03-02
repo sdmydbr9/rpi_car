@@ -20,7 +20,7 @@ The Pico W acts as a **noise-isolated sensor bridge**, reading all I2C and GPIO 
 | **ADS1115 ADC** | I2C 0x48 | ✅ Moved to Pico |
 | **IR sensors** (L/R) | GPIO 8,9 | ✅ Moved to Pico |
 | **LM393 encoder** | GPIO 10 | ✅ Moved to Pico |
-| **HC-SR04 rear sonar** | GPIO 16,17 | ✅ Moved to Pico |
+| **HC-SR04 sonar** | GPIO 25,24 | Stays on Pi |
 
 ### What Stays on Pi
 

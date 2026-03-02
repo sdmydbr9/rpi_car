@@ -43,11 +43,9 @@ interface HeaderProps {
   isIREnabled?: boolean;
   isSonarEnabled?: boolean;
   isMPU6050Enabled?: boolean;
-  isRearSonarEnabled?: boolean;
   isCameraEnabled?: boolean;
   onIRToggle?: () => void;
   onSonarToggle?: () => void;
-  onRearSonarToggle?: () => void;
   onMPU6050Toggle?: () => void;
   onCameraToggle?: () => void;
   isAutopilotRunning?: boolean;
@@ -80,11 +78,9 @@ export const Header = ({
   isIREnabled,
   isSonarEnabled,
   isMPU6050Enabled,
-  isRearSonarEnabled,
   isCameraEnabled,
   onIRToggle,
   onSonarToggle,
-  onRearSonarToggle,
   onMPU6050Toggle,
   onCameraToggle,
   isAutopilotRunning,
@@ -201,7 +197,7 @@ export const Header = ({
               </span>
             </button>
           )}
-          <SettingsDialog tuning={tuning} onTuningChange={onTuningChange} backendDefaults={backendDefaults} cameraSpecs={cameraSpecs} narrationConfig={narrationConfig} imageAnalysisEnabled={imageAnalysisEnabled} onImageAnalysisToggle={onImageAnalysisToggle} isIREnabled={isIREnabled} isSonarEnabled={isSonarEnabled} isMPU6050Enabled={isMPU6050Enabled} isRearSonarEnabled={isRearSonarEnabled} isCameraEnabled={isCameraEnabled} onIRToggle={onIRToggle} onSonarToggle={onSonarToggle} onRearSonarToggle={onRearSonarToggle} onMPU6050Toggle={onMPU6050Toggle} onCameraToggle={onCameraToggle} isAutopilotRunning={isAutopilotRunning} onResetDriver={onResetDriver} />
+          <SettingsDialog tuning={tuning} onTuningChange={onTuningChange} backendDefaults={backendDefaults} cameraSpecs={cameraSpecs} narrationConfig={narrationConfig} imageAnalysisEnabled={imageAnalysisEnabled} onImageAnalysisToggle={onImageAnalysisToggle} isIREnabled={isIREnabled} isSonarEnabled={isSonarEnabled} isMPU6050Enabled={isMPU6050Enabled} isCameraEnabled={isCameraEnabled} onIRToggle={onIRToggle} onSonarToggle={onSonarToggle} onMPU6050Toggle={onMPU6050Toggle} onCameraToggle={onCameraToggle} isAutopilotRunning={isAutopilotRunning} onResetDriver={onResetDriver} />
         </div>
       </header>
       <AlertDialog open={pendingNetworkMode !== null} onOpenChange={(open) => !open && setPendingNetworkMode(null)}>

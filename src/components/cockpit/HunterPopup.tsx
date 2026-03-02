@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { X, Crosshair, Play, Square, Target, Clock, Gauge, MapPin, Radar, RotateCcw } from "lucide-react";
 
 interface HunterStatus {
   running: boolean;
@@ -12,7 +13,7 @@ interface HunterStatus {
   bbox_area: number;
   sensors: {
     front_laser: number;
-    front_sonar: number;
+    sonar: number;
     ir_left: boolean;
     ir_right: boolean;
     accel: number;
@@ -197,186 +198,311 @@ export const HunterPopup = ({ isOpen, onClose, serverBaseUrl, whepUrl, hunterAct
   const m = status?.motors;
   const conf = status?.confidence ?? 0;
   const confPct = Math.round(conf * 100);
-  const confColor = confPct > 60 ? "#00ff88" : confPct > 35 ? "#ffcc00" : "#ff3344";
-  const statusColor = status?.found ? "#ffcc00" : status?.mode === "TOUCH_TRACKING" && !status?.found ? "#ff3344" : "#00ff88";
+  const confTextColor = confPct > 60 ? "text-green-500" : confPct > 35 ? "text-yellow-400" : "text-destructive";
+  const isActivelyTracking = status?.mode === "TOUCH_TRACKING" || status?.mode === "TRACKING";
+  const hasTarget = status?.found ?? false;
+  const reticlePosition = (() => {
+    if (!status?.bbox || status.bbox.length !== 4) return null;
+    const [b0, b1, b2, b3] = status.bbox;
+
+    // Backend uses [x1, y1, x2, y2]; keep a fallback for legacy [x, y, w, h].
+    const isXyxy = b2 > b0 && b3 > b1;
+    const x1 = b0;
+    const y1 = b1;
+    const x2 = isXyxy ? b2 : b0 + b2;
+    const y2 = isXyxy ? b3 : b1 + b3;
+    const cx = (x1 + x2) / 2;
+    const cy = (y1 + y2) / 2;
+
+    const vid = videoRef.current;
+    const vw = vid?.videoWidth || 1280;
+    const vh = vid?.videoHeight || 720;
+    if (!vid) {
+      return {
+        left: `${(cx / vw) * 100}%`,
+        top: `${(cy / vh) * 100}%`,
+      };
+    }
+
+    const rect = vid.getBoundingClientRect();
+    const scale = Math.min(rect.width / vw, rect.height / vh);
+    const renderedW = vw * scale;
+    const renderedH = vh * scale;
+    const padX = (rect.width - renderedW) / 2;
+    const padY = (rect.height - renderedH) / 2;
+
+    return {
+      left: `${padX + (cx / vw) * renderedW}px`,
+      top: `${padY + (cy / vh) * renderedH}px`,
+    };
+  })();
 
   return (
-    <div
-      className="fixed inset-0 z-[200] flex items-center justify-center"
-      style={{ background: "rgba(0,0,0,0.85)" }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-    >
-      <div
-        className="relative w-[92vw] max-w-[900px] h-[80vh] max-h-[600px] rounded-lg overflow-hidden flex flex-col"
-        style={{
-          background: "#0a0a0a",
-          border: "1px solid rgba(20, 184, 166, 0.4)",
-          fontFamily: "'Courier New', monospace",
-        }}
-      >
-        {/* ── Header ── */}
-        <div
-          className="flex items-center justify-between px-3 py-1.5 flex-shrink-0"
-          style={{ background: "rgba(0,0,0,0.7)", borderBottom: "1px solid rgba(20,184,166,0.2)" }}
-        >
-          <div className="flex items-center gap-3">
-            <span className="font-bold text-xs tracking-wider" style={{ color: "#00ff88" }}>
-              HUNTER MODE
-            </span>
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/85 backdrop-blur-sm">
+      <div className="w-[92vw] max-w-2xl h-[85vh] max-h-[600px] rounded-xl border border-primary/30 bg-card/95 flex flex-col overflow-hidden shadow-2xl shadow-primary/10">
+
+        {/* Header Bar */}
+        <div className="flex items-center justify-between px-3 py-2 border-b border-border/40 bg-card">
+          <div className="flex items-center gap-2">
+            <Target className="w-4 h-4 text-destructive" />
+            <span className="racing-text text-xs sm:text-sm text-foreground tracking-wider">PURSUIT MODE</span>
             {!hunterActive ? (
-              <span className="text-[10px] animate-pulse" style={{ color: "#ffcc00" }}>
-                INITIALIZING...
+              <span className="flex items-center gap-1 ml-2">
+                <div className="w-1.5 h-1.5 rounded-full bg-yellow-400 animate-pulse" />
+                <span className="racing-text text-[9px] text-yellow-400">INITIALIZING</span>
+              </span>
+            ) : isActivelyTracking ? (
+              <span className="flex items-center gap-1 ml-2">
+                <div className="w-1.5 h-1.5 rounded-full bg-destructive animate-pulse" />
+                <span className="racing-text text-[9px] text-destructive">TRACKING</span>
               </span>
             ) : (
-              <span className="text-[10px]" style={{ color: statusColor }}>
+              <span className="racing-text text-[9px] text-muted-foreground ml-2">
                 {status?.status || "IDLE"}
               </span>
             )}
           </div>
+
+          {/* Telemetry Stats */}
           <div className="flex items-center gap-3">
-            <span className="text-[10px]" style={{ color: "#888" }}>
-              CAM {status?.camera || "--"}
-            </span>
-            <span className="text-[10px]" style={{ color: (status?.battery ?? 0) > 10 ? "#aaa" : "#ff3344" }}>
-              {(status?.battery ?? 0).toFixed(1)}V
-            </span>
-            <button
-              onClick={onClose}
-              className="w-6 h-6 rounded-full flex items-center justify-center"
-              style={{ background: "rgba(255,51,68,0.15)", border: "1px solid #ff3344", color: "#ff3344", fontSize: 12, cursor: "pointer" }}
-            >
-              ✕
-            </button>
-          </div>
-        </div>
-
-        {/* ── Video + touch overlay ── */}
-        <div className="relative flex-1 min-h-0 flex items-center justify-center overflow-hidden" style={{ background: "#000" }}>
-          {hunterActive ? (
-            <>
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                muted
-                className="w-full h-full"
-                style={{ objectFit: "contain", background: "#000" }}
-              />
-              <div
-                ref={touchRef}
-                className="absolute inset-0"
-                style={{ cursor: "crosshair", zIndex: 5 }}
-                onClick={handleTouch}
-                onTouchStart={handleTouch}
-              />
-              {!streamConnected && (
-                <div className="absolute inset-0 flex items-center justify-center" style={{ color: "#555", fontSize: 13, zIndex: 2 }}>
-                  Connecting to rover stream...
-                </div>
-              )}
-            </>
-          ) : (
-            <div className="flex flex-col items-center justify-center gap-3" style={{ color: "#555" }}>
-              <div className="w-10 h-10 border-2 border-t-teal-400 border-r-transparent border-b-transparent border-l-transparent rounded-full animate-spin" />
-              <span className="text-sm">Starting hunter subsystem...</span>
-              <span className="text-[10px]" style={{ color: "#444" }}>Releasing camera &amp; initializing vision</span>
-            </div>
-          )}
-          {/* Template preview thumbnail */}
-          {templateUrl && (
-            <div
-              className="absolute top-2 right-2 w-16 h-16 rounded overflow-hidden"
-              style={{ border: "2px solid #00ff88", zIndex: 12, background: "#000" }}
-            >
-              <img src={templateUrl} alt="target" className="w-full h-full object-cover" />
-            </div>
-          )}
-        </div>
-
-        {/* ── Bottom HUD ── */}
-        <div className="flex-shrink-0 px-3 py-1.5" style={{ background: "rgba(0,0,0,0.7)", borderTop: "1px solid rgba(20,184,166,0.2)" }}>
-          {/* Sensor readout */}
-          <div className="text-[10px] mb-1" style={{ color: "#888" }}>
-            <span>
-              F:{s?.front_laser ?? "--"} R:{s?.front_sonar ?? "--"}{" "}
-              IR:{s?.ir_left ? "L" : "."}{s?.ir_right ? "R" : "."}{" "}
-              G:{(s?.accel ?? 0).toFixed(1)}
-            </span>
-            {(status?.mode === "TOUCH_TRACKING" || status?.mode === "TRACKING") && (
-              <span className="ml-2">
-                LOCK
-                <span
-                  className="inline-block ml-1 rounded-sm overflow-hidden align-middle"
-                  style={{ width: 50, height: 5, background: "#333" }}
-                >
-                  <span
-                    className="block h-full transition-all"
-                    style={{ width: `${confPct}%`, background: confColor }}
-                  />
-                </span>
+            <div className="flex items-center gap-1">
+              <Clock className="w-3 h-3 text-muted-foreground" />
+              <span className="racing-text text-[9px] sm:text-[10px] text-muted-foreground">
+                CAM {status?.camera || "--"}
               </span>
+            </div>
+            <div className="flex items-center gap-1">
+              <Gauge className="w-3 h-3 text-muted-foreground" />
+              <span className="racing-text text-[9px] sm:text-[10px] text-muted-foreground">
+                {m ? `L:${m.L.toFixed(0)} R:${m.R.toFixed(0)}` : "-- / --"}
+              </span>
+            </div>
+            <div className="flex items-center gap-1">
+              <MapPin className="w-3 h-3 text-muted-foreground" />
+              <span className={`racing-text text-[9px] sm:text-[10px] ${(status?.battery ?? 0) > 10 ? 'text-muted-foreground' : 'text-destructive'}`}>
+                {(status?.battery ?? 0).toFixed(1)}V
+              </span>
+            </div>
+          </div>
+
+          <button
+            onClick={onClose}
+            className="w-7 h-7 rounded-md border border-border/50 flex items-center justify-center text-muted-foreground hover:text-foreground hover:border-foreground/40 transition-all"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Viewfinder */}
+        <div className="flex-1 relative overflow-hidden m-2 rounded-lg border border-border/30">
+          <div className="absolute inset-0 bg-black">
+            {hunterActive ? (
+              <>
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="w-full h-full"
+                  style={{ objectFit: "contain", background: "#000" }}
+                />
+                <div
+                  ref={touchRef}
+                  className="absolute inset-0 cursor-crosshair"
+                  style={{ zIndex: 5 }}
+                  onClick={handleTouch}
+                  onTouchStart={handleTouch}
+                />
+                {!streamConnected && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none" style={{ zIndex: 2 }}>
+                    <Crosshair className="w-8 h-8 text-primary/40 mb-2 animate-pulse" />
+                    <span className="racing-text text-[10px] sm:text-xs text-primary/50">CONNECTING TO ROVER STREAM</span>
+                    <span className="racing-text text-[8px] text-muted-foreground mt-1">ESTABLISHING WHEP LINK...</span>
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                {/* Simulated camera feed placeholder */}
+                <div
+                  className="absolute inset-0"
+                  style={{
+                    background: "radial-gradient(ellipse at center, hsl(var(--card)) 0%, hsl(0 0% 5%) 100%)",
+                  }}
+                />
+                <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                  <div className="w-10 h-10 border-2 border-t-primary border-r-transparent border-b-transparent border-l-transparent rounded-full animate-spin mb-3" />
+                  <span className="racing-text text-[10px] sm:text-xs text-primary/50">STARTING HUNTER SUBSYSTEM</span>
+                  <span className="racing-text text-[8px] text-muted-foreground mt-1">RELEASING CAMERA &amp; INITIALIZING VISION</span>
+                </div>
+              </>
+            )}
+
+            {/* Grid overlay */}
+            <svg className="absolute inset-0 w-full h-full opacity-15 pointer-events-none" style={{ zIndex: 6 }}>
+              <defs>
+                <pattern id="pursuit-grid" width="50" height="50" patternUnits="userSpaceOnUse">
+                  <path d="M 50 0 L 0 0 0 50" fill="none" stroke="hsl(var(--primary))" strokeWidth="0.5" />
+                </pattern>
+              </defs>
+              <rect width="100%" height="100%" fill="url(#pursuit-grid)" />
+            </svg>
+
+            {/* Center crosshair (faint, always present) */}
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-20" style={{ zIndex: 6 }}>
+              <Crosshair className="w-12 h-12 text-primary" />
+            </div>
+
+            {/* Scanlines */}
+            <div
+              className="absolute inset-0 pointer-events-none opacity-10"
+              style={{
+                zIndex: 6,
+                backgroundImage: "repeating-linear-gradient(0deg, transparent, transparent 2px, hsl(var(--primary) / 0.15) 2px, hsl(var(--primary) / 0.15) 4px)",
+              }}
+            />
+
+            {/* Corner brackets */}
+            <div className="absolute top-2 left-2 w-4 h-4 border-t-2 border-l-2 border-primary/50 pointer-events-none" style={{ zIndex: 6 }} />
+            <div className="absolute top-2 right-2 w-4 h-4 border-t-2 border-r-2 border-primary/50 pointer-events-none" style={{ zIndex: 6 }} />
+            <div className="absolute bottom-2 left-2 w-4 h-4 border-b-2 border-l-2 border-primary/50 pointer-events-none" style={{ zIndex: 6 }} />
+            <div className="absolute bottom-2 right-2 w-4 h-4 border-b-2 border-r-2 border-primary/50 pointer-events-none" style={{ zIndex: 6 }} />
+
+            {/* "Tap to lock" hint when no target is active */}
+            {hunterActive && streamConnected && !isActivelyTracking && !hasTarget && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none" style={{ zIndex: 7 }}>
+                <Crosshair className="w-8 h-8 text-primary/40 mb-2" />
+                <span className="racing-text text-[10px] sm:text-xs text-primary/50">TAP TO LOCK TARGET</span>
+                <span className="racing-text text-[8px] text-muted-foreground mt-1">CLICK ANYWHERE ON THE FEED</span>
+              </div>
+            )}
+
+            {/* Target bullseye reticle when tracking */}
+            {hasTarget && reticlePosition && (
+              <div
+                className="absolute pointer-events-none"
+                style={{
+                  left: reticlePosition.left,
+                  top: reticlePosition.top,
+                  transform: "translate(-50%, -50%)",
+                  zIndex: 8,
+                }}
+              >
+                {/* Outer ring */}
+                <div className={`w-16 h-16 rounded-full border-2 ${isActivelyTracking ? 'border-destructive' : 'border-primary'} flex items-center justify-center ${isActivelyTracking ? 'animate-pulse' : ''}`}>
+                  {/* Inner ring */}
+                  <div className={`w-9 h-9 rounded-full border ${isActivelyTracking ? 'border-destructive/70' : 'border-primary/70'}`} />
+                  {/* Center dot */}
+                  <div className={`absolute w-2.5 h-2.5 rounded-full ${isActivelyTracking ? 'bg-destructive' : 'bg-primary'}`} />
+                </div>
+                {/* Crosshair tick marks */}
+                <div className={`absolute top-1/2 -left-4 w-3 h-px ${isActivelyTracking ? 'bg-destructive' : 'bg-primary'}`} />
+                <div className={`absolute top-1/2 -right-4 w-3 h-px ${isActivelyTracking ? 'bg-destructive' : 'bg-primary'}`} />
+                <div className={`absolute -top-4 left-1/2 h-3 w-px ${isActivelyTracking ? 'bg-destructive' : 'bg-primary'}`} />
+                <div className={`absolute -bottom-4 left-1/2 h-3 w-px ${isActivelyTracking ? 'bg-destructive' : 'bg-primary'}`} />
+                {/* Label with percentage below reticle */}
+                <div className="absolute -bottom-7 left-1/2 -translate-x-1/2 flex items-center gap-1.5 whitespace-nowrap">
+                  <span className={`racing-text text-[9px] font-bold ${isActivelyTracking ? 'text-destructive' : 'text-primary'}`}>
+                    {isActivelyTracking ? "LOCKED" : "TARGET"}
+                  </span>
+                  {isActivelyTracking && (
+                    <span className={`racing-text text-[9px] font-bold ${confTextColor}`}>
+                      {confPct}%
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Template preview thumbnail */}
+            {templateUrl && (
+              <div className="absolute top-2 right-8 w-14 h-14 rounded-md overflow-hidden border-2 border-primary/60" style={{ zIndex: 12, background: "#000" }}>
+                <img src={templateUrl} alt="target" className="w-full h-full object-cover" />
+              </div>
             )}
           </div>
-          <div className="text-[10px] mb-1.5" style={{ color: "#888" }}>
-            M: L:{(m?.L ?? 0).toFixed(0)} R:{(m?.R ?? 0).toFixed(0)} | {status?.avoid ?? "--"}
+        </div>
+
+        {/* Footer Controls */}
+        <div className="px-3 py-2 border-t border-border/40 bg-card">
+          {/* Sensor readout row */}
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-1">
+              <div className={`w-2 h-2 rounded-full ${isActivelyTracking ? 'bg-destructive animate-pulse' : hasTarget ? 'bg-primary' : 'bg-muted-foreground/30'}`} />
+              <span className="racing-text text-[9px] sm:text-[10px] text-muted-foreground">
+                {isActivelyTracking ? "PURSUIT ACTIVE" : hasTarget ? "TARGET ACQUIRED" : "AWAITING TARGET"}
+              </span>
+            </div>
+            <span className="racing-text text-[9px] text-muted-foreground">
+              F:{s?.front_laser ?? "--"} S:{s?.sonar ?? "--"}{" "}
+              IR:{s?.ir_left ? "L" : "."}{s?.ir_right ? "R" : "."}{" "}
+              G:{(s?.accel ?? 0).toFixed(1)} | {status?.avoid ?? "--"}
+            </span>
           </div>
 
           {/* Control buttons */}
-          <div className="flex gap-2 justify-center flex-wrap">
+          <div className="flex items-center justify-center gap-2">
             <button
               onClick={() => sendCommand("start")}
               disabled={!hunterActive}
-              className="px-4 py-1.5 rounded text-xs font-bold tracking-wider transition-colors disabled:opacity-40"
-              style={{
-                border: "1px solid #00ff88",
-                background: "rgba(0,255,136,0.08)",
-                color: "#00ff88",
-                cursor: hunterActive ? "pointer" : "not-allowed",
-                fontFamily: "'Courier New', monospace",
-              }}
+              className={`
+                h-9 px-4 rounded-lg border flex items-center justify-center gap-1.5
+                text-[9px] sm:text-[11px] font-bold racing-text transition-all touch-feedback
+                ${!hunterActive
+                  ? 'opacity-40 pointer-events-none bg-card/80 border-border text-muted-foreground'
+                  : 'bg-primary/20 border-primary text-primary hover:bg-primary/30 glow-teal'
+                }
+              `}
             >
-              START
+              <Play className="w-3.5 h-3.5" />
+              PURSUE
             </button>
-            <button
-              onClick={() => sendCommand("stop")}
-              disabled={!hunterActive}
-              className="px-4 py-1.5 rounded text-xs font-bold tracking-wider transition-colors disabled:opacity-40"
-              style={{
-                border: "1px solid #ff3344",
-                background: "rgba(255,51,68,0.08)",
-                color: "#ff3344",
-                cursor: hunterActive ? "pointer" : "not-allowed",
-                fontFamily: "'Courier New', monospace",
-              }}
-            >
-              STOP
-            </button>
+
             <button
               onClick={() => sendCommand("scan")}
               disabled={!hunterActive}
-              className="px-4 py-1.5 rounded text-xs font-bold tracking-wider transition-colors disabled:opacity-40"
-              style={{
-                border: "1px solid #00ff88",
-                background: "rgba(0,255,136,0.08)",
-                color: "#00ff88",
-                cursor: hunterActive ? "pointer" : "not-allowed",
-                fontFamily: "'Courier New', monospace",
-              }}
+              className={`
+                h-9 px-4 rounded-lg border flex items-center justify-center gap-1.5
+                text-[9px] sm:text-[11px] font-bold racing-text transition-all touch-feedback
+                ${!hunterActive
+                  ? 'opacity-40 pointer-events-none bg-card/80 border-border text-muted-foreground'
+                  : 'bg-primary/20 border-primary text-primary hover:bg-primary/30 glow-teal'
+                }
+              `}
             >
+              <Radar className="w-3.5 h-3.5" />
               SCAN
             </button>
+
+            <button
+              onClick={() => sendCommand("stop")}
+              disabled={!hunterActive}
+              className={`
+                h-9 px-4 rounded-lg border flex items-center justify-center gap-1.5
+                text-[9px] sm:text-[11px] font-bold racing-text transition-all touch-feedback
+                ${!hunterActive
+                  ? 'opacity-40 pointer-events-none bg-card/80 border-border text-muted-foreground'
+                  : 'bg-destructive/20 border-destructive text-destructive hover:bg-destructive/30'
+                }
+              `}
+            >
+              <Square className="w-3.5 h-3.5" />
+              ABORT
+            </button>
+
             <button
               onClick={() => sendCommand("reset")}
               disabled={!hunterActive}
-              className="px-4 py-1.5 rounded text-xs font-bold tracking-wider transition-colors disabled:opacity-40"
-              style={{
-                border: "1px solid #ff3344",
-                background: "rgba(255,51,68,0.08)",
-                color: "#ff3344",
-                cursor: hunterActive ? "pointer" : "not-allowed",
-                fontFamily: "'Courier New', monospace",
-              }}
+              className={`
+                h-9 px-4 rounded-lg border flex items-center justify-center gap-1.5
+                text-[9px] sm:text-[11px] font-bold racing-text transition-all touch-feedback
+                ${!hunterActive
+                  ? 'opacity-40 pointer-events-none bg-card/80 border-border text-muted-foreground'
+                  : 'bg-destructive/20 border-destructive text-destructive hover:bg-destructive/30'
+                }
+              `}
             >
+              <RotateCcw className="w-3.5 h-3.5" />
               RESET
             </button>
           </div>

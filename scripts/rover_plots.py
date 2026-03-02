@@ -241,9 +241,9 @@ style_ax(ax1, 'DISTANCE SENSORS', 'cm')
 if 'laser_front_cm' in sn.columns:
     front = sn['laser_front_cm'].clip(upper=300)
     ax1.plot(sn['t'], front, color='#39d353', linewidth=1, label='Front Laser', alpha=0.9)
-if 'sonar_rear_cm' in sn.columns:
-    rear = sn['sonar_rear_cm'].clip(upper=300)
-    ax1.plot(sn['t'], rear, color='#f78166', linewidth=1, label='Rear Sonar', alpha=0.7)
+if 'sonar_front_cm' in sn.columns:
+    sonar = sn['sonar_front_cm'].clip(upper=300)
+    ax1.plot(sn['t'], sonar, color='#f78166', linewidth=1, label='Sonar', alpha=0.7)
 ax1.axhline(12, color='#ff3344', linestyle='--', alpha=0.5, linewidth=0.8, label='Stop 12cm')
 ax1.axhline(25, color='#ff8800', linestyle='--', alpha=0.4, linewidth=0.8, label='Creep 25cm')
 ax1.axhline(50, color='#ffcc00', linestyle='--', alpha=0.4, linewidth=0.8, label='Slow 50cm')

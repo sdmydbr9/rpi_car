@@ -36,7 +36,6 @@ export interface TelemetryData {
   sonar_distance?: number;
   sonar_enabled?: boolean;
   mpu6050_enabled?: boolean;
-  rear_sonar_enabled?: boolean;
   // MPU6050 Gyro telemetry
   gyro_z?: number;
   pid_correction?: number;
@@ -360,7 +359,6 @@ export interface SensorConfig {
   ir_enabled: boolean;
   sonar_enabled: boolean;
   mpu6050_enabled: boolean;
-  rear_sonar_enabled: boolean;
 }
 
 let sensorConfigSyncCallback: ((data: SensorConfig) => void) | null = null;
@@ -638,9 +636,8 @@ export interface StartupCheckResult {
   critical_ok?: boolean;
   all_ok?: boolean;
   pico_bridge?: boolean;
-  front_sonar?: boolean;
+  sonar?: boolean;
   laser?: boolean;
-  rear_sonar?: boolean;
   mpu6050?: boolean;
   ir_sensors?: boolean;
   encoder?: boolean;
@@ -1018,18 +1015,6 @@ export function emitSonarToggle(): void {
 }
 
 /**
- * Toggle Rear Sonar sensor control
- */
-export function emitRearSonarToggle(): void {
-  if (socket && socket.connected) {
-    console.log(`[UI Control] 🎮 REAR SONAR: TOGGLED`);
-    socket.emit('rear_sonar_toggle', {});
-  } else {
-    console.warn(`[UI Control] ⚠️ Cannot emit rear sonar toggle - socket not connected`);
-  }
-}
-
-/**
  * Toggle MPU6050 gyroscope sensor control
  */
 export function emitMPU6050Toggle(): void {
@@ -1255,7 +1240,6 @@ export default {
   emitAutoAccelDisable,
   emitIRToggle,
   emitSonarToggle,
-  emitRearSonarToggle,
   emitMPU6050Toggle,
   emitCameraToggle,
   emitVisionToggle,

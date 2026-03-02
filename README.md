@@ -11,7 +11,7 @@ A sophisticated autonomous and manual control system for a Raspberry Pi-powered 
 
 ### 🧠 Autonomous Driving
 - 7-state finite state machine (FSM) for intelligent navigation
-- Dual-direction protection (front + rear sonar)
+- Sonar-based obstacle protection
 - Adaptive speed control based on proximity
 - Escalating escape maneuvers (reverse, pivot, U-turn)
 - Stuck detection and recovery
@@ -23,8 +23,7 @@ A sophisticated autonomous and manual control system for a Raspberry Pi-powered 
 - Camera feed streaming
 
 ### 📡 Sensors
-- **Front Sonar**: HC-SR04 ultrasonic (obstacle detection)
-- **Rear Sonar**: HC-SR04 ultrasonic (reverse safety)
+- **Sonar**: HC-SR04 ultrasonic (obstacle detection)
 - **IR Sensors**: Left/Right obstacle detection
 - **System Monitoring**: CPU temperature, clock speeds, RPM
 
@@ -66,7 +65,7 @@ A sophisticated autonomous and manual control system for a Raspberry Pi-powered 
 ### Hardware
 - Raspberry Pi 3B+ or newer
 - L298N Motor Driver
-- HC-SR04 Ultrasonic Sensors (x2)
+- HC-SR04 Ultrasonic Sensor (x1)
 - IR Obstacle Sensors (x2)
 - DC Motors (x2)
 - Pi Camera or USB Camera
@@ -137,8 +136,8 @@ ENA = 12  # Left Motor Speed (PWM)
 ENB = 13  # Right Motor Speed (PWM)
 
 # Sonar Pins
-SONAR_TRIG = 25  # Front Sonar Trigger
-SONAR_ECHO = 24  # Front Sonar Echo
+SONAR_TRIG = 25  # Sonar Trigger
+SONAR_ECHO = 24  # Sonar Echo
 
 # IR Sensor Pins
 LEFT_IR = 5   # Left IR Sensor

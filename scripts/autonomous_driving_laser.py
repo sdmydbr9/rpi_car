@@ -196,8 +196,8 @@ FLOOR_REJECT_CM     = 12        # absolute minimum (anything shorter = noise)
 # Grace period — react as soon as any sector has data
 GRACE_SWEEPS        = 0         # was 2 — blinded car for ~1.5 s, causing collisions
 
-# Front sonar (HC-SR04 — primary obstacle detector, static mount)
-FRONT_SONAR_HZ      = 10        # polling rate (higher than old rear sonar)
+# Sonar (HC-SR04 — primary obstacle detector, static mount)
+FRONT_SONAR_HZ      = 10        # polling rate
 FRONT_MIN_VALID_CM  = 3.0       # reject readings shorter than this (sensor noise)
 LASER_TRIGGER_DIST  = 120       # cm — sonar distance that activates laser scan (matches APPROACH_DIST)
 SCAN_COOLDOWN_S     = 1.5       # minimum seconds between laser scans
@@ -2687,7 +2687,7 @@ def _curses_main(stdscr, controller):
         front_col = (COL_OK if fd > LASER_TRIGGER_DIST
                      else COL_WARN if fd > CRITICAL_DIST
                      else COL_DANG)
-        _safe(row, 0, f"Front Sonar: {fd:.1f}cm", front_col)
+        _safe(row, 0, f"Sonar: {fd:.1f}cm", front_col)
 
         # Laser scan status
         scan_st = t.get("scan_status", "IDLE")

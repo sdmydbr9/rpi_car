@@ -48,7 +48,7 @@ const convertSensorStatus = (
   oldStatus: Record<string, string>
 ): SensorStatus[] => {
   const sensorNameMap: Record<string, string> = {
-    front_sonar: 'Front Sonar (HC-SR04)',
+    front_sonar: 'Sonar (HC-SR04)',
     laser: 'Laser (VL53L0X)',
     left_ir: 'Left IR',
     right_ir: 'Right IR',
@@ -109,10 +109,6 @@ export const CockpitController = () => {
     const saved = localStorage.getItem('mpu6050Enabled');
     return saved !== null ? saved === 'true' : true;
   });
-  const [isRearSonarEnabled, setIsRearSonarEnabled] = useState(() => {
-    const saved = localStorage.getItem('rearSonarEnabled');
-    return saved !== null ? saved === 'true' : true;
-  });
   const [isCameraEnabled, setIsCameraEnabled] = useState(() => {
     // Load camera state from localStorage, default to false (disabled)
     const saved = localStorage.getItem('cameraEnabled');
@@ -132,7 +128,7 @@ export const CockpitController = () => {
   const [autonomousTargetSpeed, setAutonomousTargetSpeed] = useState<number>(0);
   // Sensor health state
   const [sensors, setSensors] = useState<SensorStatus[]>([
-    { name: 'Front Sonar (HC-SR04)', status: 'ok' },
+    { name: 'Sonar (HC-SR04)', status: 'ok' },
     { name: 'Laser (VL53L0X)', status: 'ok' },
     { name: 'Left IR', status: 'ok' },
     { name: 'Right IR', status: 'ok' },
@@ -483,10 +479,6 @@ export const CockpitController = () => {
         setIsMPU6050Enabled(data.mpu6050_enabled);
         localStorage.setItem('mpu6050Enabled', String(data.mpu6050_enabled));
       }
-      if (data.rear_sonar_enabled !== undefined) {
-        setIsRearSonarEnabled(data.rear_sonar_enabled);
-        localStorage.setItem('rearSonarEnabled', String(data.rear_sonar_enabled));
-      }
     });
 
     // Subscribe to camera config response (confirms applied settings)
@@ -697,10 +689,6 @@ export const CockpitController = () => {
       if (data.mpu6050_enabled !== undefined) {
         setIsMPU6050Enabled(data.mpu6050_enabled);
         localStorage.setItem('mpu6050Enabled', String(data.mpu6050_enabled));
-      }
-      if (data.rear_sonar_enabled !== undefined) {
-        setIsRearSonarEnabled(data.rear_sonar_enabled);
-        localStorage.setItem('rearSonarEnabled', String(data.rear_sonar_enabled));
       }
       // Update sensor health status
       if (data.sensor_status) {
@@ -1089,20 +1077,6 @@ export const CockpitController = () => {
     socketClient.emitSonarToggle();
   }, [isAutopilotRunning]);
 
-  const handleRearSonarToggle = useCallback(() => {
-    console.log('🎮 REAR SONAR sensor toggle');
-    if (isAutopilotRunning) {
-      console.log('🚫 Rear Sonar cannot be toggled in autonomous mode');
-      return;
-    }
-    setIsRearSonarEnabled(prev => {
-      const newState = !prev;
-      localStorage.setItem('rearSonarEnabled', String(newState));
-      return newState;
-    });
-    socketClient.emitRearSonarToggle();
-  }, [isAutopilotRunning]);
-
   const handleMPU6050Toggle = useCallback(() => {
     console.log('🎮 MPU6050 sensor toggle');
     if (isAutopilotRunning) {
@@ -1416,6 +1390,8 @@ export const CockpitController = () => {
         speed={controlState.speed}
         speedMpm={controlState.speedMpm}
         speedUnit={(tuning.SPEED_UNIT || "m/min") as import("./Speedometer").SpeedUnit}
+        rpm={controlState.rpm}
+        batteryVoltage={controlState.batteryVoltage}
         gear={controlState.gear}
         throttle={controlState.throttle}
         brake={controlState.brake}
@@ -1479,11 +1455,9 @@ export const CockpitController = () => {
           isIREnabled={isIREnabled}
           isSonarEnabled={isSonarEnabled}
           isMPU6050Enabled={isMPU6050Enabled}
-          isRearSonarEnabled={isRearSonarEnabled}
           isCameraEnabled={isCameraEnabled}
           onIRToggle={isConsoleMode ? noopVoid : handleIRToggle}
           onSonarToggle={isConsoleMode ? noopVoid : handleSonarToggle}
-          onRearSonarToggle={isConsoleMode ? noopVoid : handleRearSonarToggle}
           onMPU6050Toggle={isConsoleMode ? noopVoid : handleMPU6050Toggle}
           onCameraToggle={isConsoleMode ? noopVoid : handleCameraToggle}
           isAutopilotRunning={isAutopilotRunning}

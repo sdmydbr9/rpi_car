@@ -614,12 +614,6 @@ def headless_vision_loop():
                 touch_lost_count = 0
                 if not user_paused:
                     running = True
-                clr = (0, 255, 0) if touch_track_conf > 0.6 else \
-                      (0, 255, 255) if touch_track_conf > 0.4 else (0, 0, 255)
-                cv2.rectangle(frame, (tx, ty_p), (tx + tw_t, ty_p + th_t), clr, 3)
-                cv2.putText(frame, f"LOCK {touch_track_conf:.0%} s{touch_current_scale:.1f}x",
-                            (tx, max(ty_p - 8, 16)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, clr, 2)
                 if touch_track_conf > 0.55 and 0.8 < best_scale < 1.3:
                     crop = frame[ty_p:ty_p + th_t, tx:tx + tw_t]
                     if crop.size > 0:
@@ -641,13 +635,6 @@ def headless_vision_loop():
                     status_msg = "TARGET LOST — STOPPED"
                 else:
                     status_msg = f"TARGET LOST ({touch_lost_count}/{TOUCH_LOST_MAX})"
-                    if touch_track_pos:
-                        tx, ty_p, tw_t, th_t = touch_track_pos
-                        cv2.rectangle(frame, (tx, ty_p), (tx + tw_t, ty_p + th_t),
-                                      (0, 0, 255), 1)
-                        cv2.putText(frame, f"LOST {touch_lost_count}/{TOUCH_LOST_MAX}",
-                                    (tx, max(ty_p - 8, 16)),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
         elif vision_mode in ["SCANNING", "TRACKING", "SEARCHING"]:
             if vision_mode == "SCANNING":
@@ -680,6 +667,7 @@ def headless_vision_loop():
                         w = int(nw * coord_scale_x)
                         h = int(nh * coord_scale_y)
                         vision_bbox_area = w * h
+                        touch_track_pos = (x, y, w, h)
                         frame_center_x = CAPTURE_W // 2
                         raw_pull = (((x + w // 2) - frame_center_x) / float(frame_center_x)) * 100.0
                         pull_delta = raw_pull - vision_steering_pull
@@ -687,7 +675,6 @@ def headless_vision_loop():
                             pull_delta = VIS_PULL_MAX_JUMP if pull_delta > 0 else -VIS_PULL_MAX_JUMP
                         vision_steering_pull = vision_steering_pull + VIS_PULL_ALPHA * pull_delta
                         vision_target_found = True
-                        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 3)
                     else:
                         vision_mode = "SEARCHING"
                         vision_target_found = False
@@ -1066,6 +1053,10 @@ def get_status() -> dict:
         batt = _get_battery_voltage() if _get_battery_voltage else 0.0
     except Exception:
         batt = 0.0
+    bbox_xyxy = None
+    if touch_track_pos:
+        x, y, w, h = touch_track_pos
+        bbox_xyxy = [int(x), int(y), int(x + w), int(y + h)]
     return {
         'running': running,
         'status': status_msg,
@@ -1073,12 +1064,12 @@ def get_status() -> dict:
         'mode': vision_mode,
         'target': selected_target_name,
         'found': vision_target_found,
-        'bbox': list(touch_track_pos) if touch_track_pos else None,
+        'bbox': bbox_xyxy,
         'confidence': round(touch_track_conf, 2),
         'bbox_area': vision_bbox_area,
         'sensors': {
             'front_laser': round(sensor_front_cm, 1),
-            'front_sonar': round(sonar_front_cm, 1),
+            'sonar': round(sonar_front_cm, 1),
             'ir_left': ir_left_blocked,
             'ir_right': ir_right_blocked,
             'accel': round(accel_magnitude, 2),
