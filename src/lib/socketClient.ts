@@ -255,14 +255,17 @@ export function connectToServer(serverIp: string, port: number = 5000): Promise<
   });
 }
 
+type TuningValue = number | string | boolean;
+type TuningMap = Record<string, TuningValue>;
+
 // Tuning sync callback
-let tuningSyncCallback: ((data: { tuning: Record<string, number>; defaults: Record<string, number> }) => void) | null = null;
+let tuningSyncCallback: ((data: { tuning: TuningMap; defaults: TuningMap }) => void) | null = null;
 
 /**
  * Subscribe to tuning sync events from the backend.
  * Called automatically on connect and in response to tuning_request.
  */
-export function onTuningSync(callback: (data: { tuning: Record<string, number>; defaults: Record<string, number> }) => void): void {
+export function onTuningSync(callback: (data: { tuning: TuningMap; defaults: TuningMap }) => void): void {
   tuningSyncCallback = callback;
   if (socket) {
     socket.off('tuning_sync');  // avoid duplicate listeners
@@ -1140,7 +1143,7 @@ export function emitAutopilotDisable(): void {
  * Emit tuning constants update to the backend autopilot
  * @param tuning - Object containing all tuning constants
  */
-export function emitTuningUpdate(tuning: Record<string, number>): void {
+export function emitTuningUpdate(tuning: TuningMap): void {
   if (socket && socket.connected) {
     console.log(`[UI Control] ⚙️ TUNING UPDATE: Sending ${Object.keys(tuning).length} constants`);
     socket.emit('tuning_update', { tuning });

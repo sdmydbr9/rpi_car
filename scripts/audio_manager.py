@@ -177,6 +177,8 @@ class CarAudioManager:
         # Volume ducking state for narration
         self._narration_ducking = False
         self._duck_factor = 1.0
+        self._engine_sound_enabled = True
+        self._engine_volume_scale = 1.0  # 0.0-1.0 (mapped from 0-100 UI volume)
         self._last_mix_update_ts = time.monotonic()
 
         if not self._init_mixer_with_fallback():
@@ -190,6 +192,47 @@ class CarAudioManager:
 
     def backend(self) -> str:
         return self._active_backend or "unavailable"
+
+    def set_engine_sound_enabled(self, enabled: bool):
+        """Enable/disable engine audio playback without affecting engine state."""
+        with self._lock:
+            enabled = bool(enabled)
+            if enabled == self._engine_sound_enabled:
+                return
+
+            self._engine_sound_enabled = enabled
+            if not self._audio_ready:
+                return
+
+            if not enabled:
+                self._stop_all_locked()
+                return
+
+            # If the physical engine is already running, resume the audio sequence.
+            if self._engine_running:
+                self._start_engine_sequence_locked()
+            else:
+                self._update_audio_mix_locked()
+
+    def set_engine_volume_percent(self, percent: float):
+        """Set engine sound volume from UI percentage (0-100)."""
+        with self._lock:
+            try:
+                value = float(percent)
+            except (TypeError, ValueError):
+                value = 100.0
+
+            clamped = max(0.0, min(100.0, value))
+            self._engine_volume_scale = clamped / 100.0
+
+            if not self._audio_ready:
+                return
+
+            # If engine is running and sound is enabled, ensure audio path is active.
+            if self._engine_running and self._engine_sound_enabled and self._engine_volume_scale > 0.0 and not self._ign_started:
+                self._start_engine_sequence_locked()
+            else:
+                self._update_audio_mix_locked()
 
     def _alsa_device_candidates(self):
         configured_device = (self._audio_device or "").strip()
@@ -444,6 +487,8 @@ class CarAudioManager:
             self._ign_channel.set_volume(0.0)
             return
 
+        engine_master = ENGINE_VOLUME_MASTER * self._engine_volume_scale if self._engine_sound_enabled else 0.0
+
         # --- Twin Turntable Idle Logic ---
         if "idle" in self._sounds and self._ign_started:
             idle_length_sec = self._sounds["idle"].get_length()
@@ -478,9 +523,9 @@ class CarAudioManager:
             self._beeper_channel.set_volume(0.0)
 
         # --- Audio Ducking Mix ---
-        accel_vol = (self._throttle * ENGINE_MAX_VOLUME) * ENGINE_VOLUME_MASTER
-        idle_vol = (ENGINE_MAX_VOLUME - (self._throttle * ENGINE_MAX_VOLUME)) * ENGINE_VOLUME_MASTER
-        self._ign_channel.set_volume(ENGINE_VOLUME_MASTER * self._duck_factor)
+        accel_vol = (self._throttle * ENGINE_MAX_VOLUME) * engine_master
+        idle_vol = (ENGINE_MAX_VOLUME - (self._throttle * ENGINE_MAX_VOLUME)) * engine_master
+        self._ign_channel.set_volume(engine_master * self._duck_factor)
         self._accel_channel.set_volume(accel_vol * self._duck_factor)
         self._idle_channel_a.set_volume(idle_vol * self._duck_factor)
         self._idle_channel_b.set_volume(idle_vol * self._duck_factor)
@@ -493,6 +538,9 @@ class CarAudioManager:
     def _start_engine_sequence_locked(self):
         """Start the engine ignition sequence with crossfade to idle."""
         if not self._audio_ready:
+            return
+        if not self._engine_sound_enabled or self._engine_volume_scale <= 0.0:
+            self._ign_started = False
             return
         self._throttle = 0.0
         self._last_gas_time = 0.0

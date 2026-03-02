@@ -41,6 +41,8 @@ export interface TuningConstants {
   CAMERA_JPEG_QUALITY: number;
   CAMERA_FRAMERATE: number;
   VISION_ENABLED: boolean;
+  ENGINE_SOUND_ENABLED: boolean;
+  ENGINE_SOUND_VOLUME: number;
   // Speedometer display unit
   SPEED_UNIT: string;
 }
@@ -81,6 +83,8 @@ export const DEFAULT_TUNING: TuningConstants = {
   CAMERA_JPEG_QUALITY: 70,
   CAMERA_FRAMERATE: 30,
   VISION_ENABLED: false,
+  ENGINE_SOUND_ENABLED: true,
+  ENGINE_SOUND_VOLUME: 100,
   // Speedometer
   SPEED_UNIT: "m/min",
 };
@@ -1487,6 +1491,75 @@ export const SettingsDialog = ({
                     <div className="ml-0 text-[7px] text-amber-400/80 racing-text pb-0.5">
                       ⚠️ Configure ElevenLabs API key above to enable startup checks
                     </div>
+                  )}
+                </CollapsibleGroup>
+
+                {/* ───────── ENGINE SOUND ───────── */}
+                <CollapsibleGroup title="🔊 ENGINE SOUND" defaultOpen={false}>
+                  <SettingsRow
+                    label="Engine Sound"
+                    info="Toggle ignition/idle/acceleration engine audio. This setting is saved on the backend and restored across sessions."
+                  >
+                    <button
+                      onClick={() => handleParamChange("ENGINE_SOUND_ENABLED", !tuning.ENGINE_SOUND_ENABLED)}
+                      className={`px-3 py-0.5 rounded border text-[10px] sm:text-xs racing-text transition-colors ${
+                        tuning.ENGINE_SOUND_ENABLED
+                          ? "border-primary bg-primary/20 text-primary hover:bg-primary/30"
+                          : "border-border bg-muted/30 text-muted-foreground hover:bg-muted/50"
+                      }`}
+                    >
+                      {tuning.ENGINE_SOUND_ENABLED ? "ON" : "OFF"}
+                    </button>
+                  </SettingsRow>
+
+                  {tuning.ENGINE_SOUND_ENABLED && (
+                    <SettingsRow
+                      label="Volume"
+                      info={`Drag to set engine sound volume. Default: ${backendDefaults.ENGINE_SOUND_VOLUME ?? DEFAULT_TUNING.ENGINE_SOUND_VOLUME}%`}
+                    >
+                      <div className="flex items-center gap-1.5 w-[190px] rounded border border-primary/30 bg-primary/5 px-1.5 py-1">
+                        <span className="text-[8px] sm:text-[9px] text-primary/80 racing-text">VOL</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          step={1}
+                          value={tuning.ENGINE_SOUND_VOLUME}
+                          onChange={(e) => {
+                            const next = Math.max(0, Math.min(100, Math.round(Number(e.target.value) || 0)));
+                            handleParamChange("ENGINE_SOUND_VOLUME", next);
+                          }}
+                          className="flex-1 h-4 appearance-none rounded-full cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-primary/60
+                            [&::-webkit-slider-runnable-track]:h-1.5
+                            [&::-webkit-slider-runnable-track]:rounded-full
+                            [&::-webkit-slider-runnable-track]:bg-transparent
+                            [&::-webkit-slider-thumb]:appearance-none
+                            [&::-webkit-slider-thumb]:h-3.5
+                            [&::-webkit-slider-thumb]:w-3.5
+                            [&::-webkit-slider-thumb]:-mt-1
+                            [&::-webkit-slider-thumb]:rounded-full
+                            [&::-webkit-slider-thumb]:border-2
+                            [&::-webkit-slider-thumb]:border-primary
+                            [&::-webkit-slider-thumb]:bg-background
+                            [&::-webkit-slider-thumb]:shadow-[0_0_0_2px_hsl(var(--card))]
+                            [&::-moz-range-track]:h-1.5
+                            [&::-moz-range-track]:rounded-full
+                            [&::-moz-range-track]:bg-transparent
+                            [&::-moz-range-thumb]:h-3.5
+                            [&::-moz-range-thumb]:w-3.5
+                            [&::-moz-range-thumb]:rounded-full
+                            [&::-moz-range-thumb]:border-2
+                            [&::-moz-range-thumb]:border-primary
+                            [&::-moz-range-thumb]:bg-background"
+                          style={{
+                            background: `linear-gradient(to right, hsl(var(--primary)) 0%, hsl(var(--primary)) ${tuning.ENGINE_SOUND_VOLUME}%, hsl(var(--muted)) ${tuning.ENGINE_SOUND_VOLUME}%, hsl(var(--muted)) 100%)`,
+                          }}
+                        />
+                        <span className="w-10 rounded border border-primary/30 bg-primary/10 px-1 py-0.5 text-right text-[9px] sm:text-[10px] text-primary racing-number">
+                          {tuning.ENGINE_SOUND_VOLUME}%
+                        </span>
+                      </div>
+                    </SettingsRow>
                   )}
                 </CollapsibleGroup>
 

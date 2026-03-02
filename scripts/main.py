@@ -420,6 +420,56 @@ def _save_startup_config(config):
 
 _startup_config = _load_startup_config()
 
+# --- ENGINE SOUND CONFIG PERSISTENCE ---
+ENGINE_SOUND_CONFIG_FILE = os.path.join(PROJECT_ROOT, '.engine_sound_config.json')
+
+_ENGINE_SOUND_CONFIG_DEFAULTS = {
+    'enabled': True,
+    'volume': 100,  # 0-100 UI range, mapped to audio manager master scale
+}
+
+def _sanitize_engine_sound_volume(value, fallback=100) -> int:
+    """Clamp engine sound volume to the UI range (0-100)."""
+    try:
+        volume = int(round(float(value)))
+    except (TypeError, ValueError):
+        volume = int(fallback)
+    return max(0, min(100, volume))
+
+def _load_engine_sound_config():
+    """Load persisted engine sound config from JSON file."""
+    try:
+        if os.path.exists(ENGINE_SOUND_CONFIG_FILE):
+            with open(ENGINE_SOUND_CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+            enabled_raw = config.get('enabled', _ENGINE_SOUND_CONFIG_DEFAULTS['enabled'])
+            if isinstance(enabled_raw, str):
+                enabled = enabled_raw.strip().lower() in ('1', 'true', 'yes', 'on')
+            else:
+                enabled = bool(enabled_raw)
+            volume = _sanitize_engine_sound_volume(config.get('volume', _ENGINE_SOUND_CONFIG_DEFAULTS['volume']))
+            merged = {'enabled': enabled, 'volume': volume}
+            print(f"✅ [Engine Sound Config] Loaded persisted config: {merged}")
+            return merged
+    except Exception as e:
+        print(f"⚠️  [Engine Sound Config] Failed to load: {e}")
+    return dict(_ENGINE_SOUND_CONFIG_DEFAULTS)
+
+def _save_engine_sound_config(config):
+    """Save engine sound config for cross-session persistence."""
+    try:
+        sanitized = {
+            'enabled': bool(config.get('enabled', _ENGINE_SOUND_CONFIG_DEFAULTS['enabled'])),
+            'volume': _sanitize_engine_sound_volume(config.get('volume', _ENGINE_SOUND_CONFIG_DEFAULTS['volume'])),
+        }
+        with open(ENGINE_SOUND_CONFIG_FILE, 'w') as f:
+            json.dump(sanitized, f, indent=2)
+        print(f"💾 [Engine Sound Config] Saved to {ENGINE_SOUND_CONFIG_FILE}")
+    except Exception as e:
+        print(f"⚠️  [Engine Sound Config] Failed to save: {e}")
+
+_engine_sound_config = _load_engine_sound_config()
+
 ELEVENLABS_DEFAULT_VOICE_ID = 'JBFqnCBsd6RMkjVDRZzb'
 
 def _effective_elevenlabs_api_key() -> str:
@@ -589,6 +639,12 @@ print(
     f"idle_trim_end={CAR_IDLE_TRIM_END_S:.2f}s, "
     f"idle_xfade={CAR_IDLE_CROSSFADE_S:.3f}s, "
     f"idle_handoff_overlap={CAR_IDLE_HANDOFF_OVERLAP_S:.3f}s, sounds={SOUNDS_DIR})"
+)
+car_audio.set_engine_sound_enabled(_engine_sound_config.get('enabled', True))
+car_audio.set_engine_volume_percent(_engine_sound_config.get('volume', 100))
+print(
+    f"🔊 [Audio] Engine sound setting: enabled={_engine_sound_config.get('enabled', True)}, "
+    f"volume={_engine_sound_config.get('volume', 100)}%"
 )
 
 # ==========================================
@@ -1865,6 +1921,11 @@ autopilot = AutoPilot(
 
 # Store a copy of the original class-level defaults (immutable reference for reset)
 _AUTOPILOT_DEFAULT_TUNING = AutoPilot.get_default_tuning()
+_ENGINE_SOUND_TUNING_DEFAULTS = {
+    "ENGINE_SOUND_ENABLED": _ENGINE_SOUND_CONFIG_DEFAULTS['enabled'],
+    "ENGINE_SOUND_VOLUME": _ENGINE_SOUND_CONFIG_DEFAULTS['volume'],
+}
+_TUNING_DEFAULTS = {**_AUTOPILOT_DEFAULT_TUNING, **_ENGINE_SOUND_TUNING_DEFAULTS}
 
 # ==========================================
 # 🎯 HUNTER MODE INITIALIZATION
@@ -1891,8 +1952,16 @@ follow_target.init(
     get_rpm_fn=pico_get_rpm,
 )
 
-# Active tuning state — persists across UI reconnections
-_active_tuning = dict(_AUTOPILOT_DEFAULT_TUNING)
+# Active tuning state — persists across UI reconnections.
+# Autopilot keys live in memory; engine sound keys are also persisted to JSON.
+_active_tuning = {
+    **_AUTOPILOT_DEFAULT_TUNING,
+    "ENGINE_SOUND_ENABLED": bool(_engine_sound_config.get('enabled', _ENGINE_SOUND_CONFIG_DEFAULTS['enabled'])),
+    "ENGINE_SOUND_VOLUME": _sanitize_engine_sound_volume(
+        _engine_sound_config.get('volume', _ENGINE_SOUND_CONFIG_DEFAULTS['volume']),
+        fallback=_ENGINE_SOUND_CONFIG_DEFAULTS['volume'],
+    ),
+}
 
 # ==========================================
 # 🧠 PHYSICS ENGINE (Background Thread)
@@ -4301,7 +4370,7 @@ def on_connect():
     # Send current tuning state so UI stays in sync after refresh
     emit('tuning_sync', {
         'tuning': _active_tuning,
-        'defaults': _AUTOPILOT_DEFAULT_TUNING,
+        'defaults': _TUNING_DEFAULTS,
     })
     # Send camera specs for dynamic resolution dropdown
     emit('camera_specs_sync', camera_specs)
@@ -5064,8 +5133,38 @@ def on_tuning_update(data):
     and persist in _active_tuning so new clients pick them up."""
     tuning = data.get('tuning', {})
     applied = []
+    engine_sound_dirty = False
+
     for key, value in tuning.items():
         attr = key.upper()
+
+        if attr == "ENGINE_SOUND_ENABLED":
+            try:
+                if isinstance(value, str):
+                    enabled = value.strip().lower() in ('1', 'true', 'yes', 'on')
+                else:
+                    enabled = bool(value)
+                car_audio.set_engine_sound_enabled(enabled)
+                _engine_sound_config['enabled'] = enabled
+                _active_tuning[attr] = enabled
+                engine_sound_dirty = True
+                applied.append(attr)
+            except Exception as e:
+                print(f"⚠️ [Tuning] Failed to set {attr}={value}: {e}")
+            continue
+
+        if attr == "ENGINE_SOUND_VOLUME":
+            try:
+                volume = _sanitize_engine_sound_volume(value, fallback=_ENGINE_SOUND_CONFIG_DEFAULTS['volume'])
+                car_audio.set_engine_volume_percent(volume)
+                _engine_sound_config['volume'] = volume
+                _active_tuning[attr] = volume
+                engine_sound_dirty = True
+                applied.append(attr)
+            except Exception as e:
+                print(f"⚠️ [Tuning] Failed to set {attr}={value}: {e}")
+            continue
+
         if hasattr(autopilot, attr):
             try:
                 cast_value = type(getattr(AutoPilot, attr))(value)  # cast to original type
@@ -5074,6 +5173,10 @@ def on_tuning_update(data):
                 applied.append(attr)
             except Exception as e:
                 print(f"⚠️ [Tuning] Failed to set {attr}={value}: {e}")
+
+    if engine_sound_dirty:
+        _save_engine_sound_config(_engine_sound_config)
+
     print(f"\n⚙️ [Tuning] Applied {len(applied)} constants from UI: {applied}")
     emit('tuning_response', {'status': 'ok', 'applied': applied})
 
@@ -5082,7 +5185,7 @@ def on_tuning_request(data):
     """Send current active tuning and defaults to the requesting client."""
     emit('tuning_sync', {
         'tuning': _active_tuning,
-        'defaults': _AUTOPILOT_DEFAULT_TUNING,
+        'defaults': _TUNING_DEFAULTS,
     })
 
 @socketio.on('state_request')

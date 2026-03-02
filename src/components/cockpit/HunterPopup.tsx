@@ -315,9 +315,12 @@ export const HunterPopup = ({ isOpen, onClose, serverBaseUrl, whepUrl, hunterAct
                 />
                 {!streamConnected && (
                   <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none" style={{ zIndex: 2 }}>
-                    <Crosshair className="w-8 h-8 text-primary/40 mb-2 animate-pulse" />
-                    <span className="racing-text text-[10px] sm:text-xs text-primary/50">CONNECTING TO ROVER STREAM</span>
-                    <span className="racing-text text-[8px] text-muted-foreground mt-1">ESTABLISHING WHEP LINK...</span>
+                    <div className="relative w-16 h-16 mb-4 flex items-center justify-center">
+                      <div className="absolute inset-0 border-2 border-primary/15 border-t-primary rounded-full animate-spin" />
+                      <Crosshair className="w-8 h-8 text-primary/30" />
+                    </div>
+                    <span className="racing-text text-[10px] sm:text-xs text-primary/50 tracking-widest">CONNECTING TO ROVER STREAM</span>
+                    <span className="racing-text text-[9px] text-muted-foreground mt-1.5">ESTABLISHING WHEP LINK...</span>
                   </div>
                 )}
               </>
@@ -331,9 +334,12 @@ export const HunterPopup = ({ isOpen, onClose, serverBaseUrl, whepUrl, hunterAct
                   }}
                 />
                 <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-                  <div className="w-10 h-10 border-2 border-t-primary border-r-transparent border-b-transparent border-l-transparent rounded-full animate-spin mb-3" />
-                  <span className="racing-text text-[10px] sm:text-xs text-primary/50">STARTING HUNTER SUBSYSTEM</span>
-                  <span className="racing-text text-[8px] text-muted-foreground mt-1">RELEASING CAMERA &amp; INITIALIZING VISION</span>
+                  <div className="relative w-16 h-16 mb-4 flex items-center justify-center">
+                    <div className="absolute inset-0 border-2 border-primary/15 border-t-primary rounded-full animate-spin" />
+                    <Crosshair className="w-8 h-8 text-primary/30" />
+                  </div>
+                  <span className="racing-text text-[10px] sm:text-xs text-primary/50 tracking-widest">STARTING HUNTER SUBSYSTEM</span>
+                  <span className="racing-text text-[9px] text-muted-foreground mt-1.5">RELEASING CAMERA &amp; INITIALIZING VISION</span>
                 </div>
               </>
             )}
@@ -348,10 +354,12 @@ export const HunterPopup = ({ isOpen, onClose, serverBaseUrl, whepUrl, hunterAct
               <rect width="100%" height="100%" fill="url(#pursuit-grid)" />
             </svg>
 
-            {/* Center crosshair (faint, always present) */}
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-20" style={{ zIndex: 6 }}>
-              <Crosshair className="w-12 h-12 text-primary" />
-            </div>
+            {/* Center crosshair – only visible when feed is live and no overlay is shown */}
+            {hunterActive && streamConnected && (isActivelyTracking || hasTarget) && (
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-20" style={{ zIndex: 6 }}>
+                <Crosshair className="w-12 h-12 text-primary" />
+              </div>
+            )}
 
             {/* Scanlines */}
             <div
@@ -371,9 +379,15 @@ export const HunterPopup = ({ isOpen, onClose, serverBaseUrl, whepUrl, hunterAct
             {/* "Tap to lock" hint when no target is active */}
             {hunterActive && streamConnected && !isActivelyTracking && !hasTarget && (
               <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none" style={{ zIndex: 7 }}>
-                <Crosshair className="w-8 h-8 text-primary/40 mb-2" />
-                <span className="racing-text text-[10px] sm:text-xs text-primary/50">TAP TO LOCK TARGET</span>
-                <span className="racing-text text-[8px] text-muted-foreground mt-1">CLICK ANYWHERE ON THE FEED</span>
+                <div className="absolute inset-0 bg-black/40" />
+                <div className="relative flex flex-col items-center">
+                  <div className="relative w-16 h-16 mb-4 flex items-center justify-center">
+                    <div className="absolute inset-0 border-2 border-primary/20 rounded-full" />
+                    <Crosshair className="w-8 h-8 text-primary/40" />
+                  </div>
+                  <span className="racing-text text-[10px] sm:text-xs text-primary/50 tracking-widest">TAP TO LOCK TARGET</span>
+                  <span className="racing-text text-[9px] text-muted-foreground mt-1.5">CLICK ANYWHERE ON THE FEED</span>
+                </div>
               </div>
             )}
 
