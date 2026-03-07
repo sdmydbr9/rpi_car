@@ -17,7 +17,7 @@ class SensorPacket:
     timestamp_ms: int
     frame: int
 
-    # MPU6050 (accel in g, gyro in deg/s)
+    # MPU6500 (accel in g, gyro in deg/s)
     accel_x: float
     accel_y: float
     accel_z: float
@@ -39,8 +39,10 @@ class SensorPacket:
     ir_left: bool
     ir_right: bool
 
-    # LM393 encoder (RPM)
-    rpm: float
+    # LM393 encoders (RPM)
+    rpm_rear_right: float
+    rpm_rear_left: float
+    rpm_front_right: float
 
     # Error counter
     errors: int
@@ -119,7 +121,9 @@ class PicoSensorReader:
                             adc_a3=raw.get('adc', {}).get('A3', -1),
                             ir_left=raw['ir']['left'],
                             ir_right=raw['ir']['right'],
-                            rpm=raw.get('rpm', 0.0),
+                            rpm_rear_right=raw.get('rpm', {}).get('rear_right', 0.0),
+                            rpm_rear_left=raw.get('rpm', {}).get('rear_left', 0.0),
+                            rpm_front_right=raw.get('rpm', {}).get('front_right', 0.0),
                             errors=raw.get('errors', 0)
                         )
 
@@ -221,8 +225,15 @@ def get_ir_sensors():
     return False, False
 
 def get_rpm():
+    """Return dict of all three encoder RPMs."""
     packet = get_sensor_packet()
-    return packet.rpm if packet else 0.0
+    if packet:
+        return {
+            'rear_right': packet.rpm_rear_right,
+            'rear_left': packet.rpm_rear_left,
+            'front_right': packet.rpm_front_right
+        }
+    return {'rear_right': 0.0, 'rear_left': 0.0, 'front_right': 0.0}
 
 def get_adc_voltage_mv(channel='A0'):
     packet = get_sensor_packet()
@@ -273,7 +284,8 @@ if __name__ == "__main__":
                 
                 # Print a compact, single-line scrolling log
                 print(f"[Frame {packet.frame:05d}] V:{volts:5.2f}V | I:{amps:5.2f}A | "
-                      f"Laser:{packet.laser_mm:4}mm | RPM:{packet.rpm:5.1f} | "
+                      f"Laser:{packet.laser_mm:4}mm | "
+                      f"RPM RR:{packet.rpm_rear_right:5.1f} RL:{packet.rpm_rear_left:5.1f} FR:{packet.rpm_front_right:5.1f} | "
                       f"Acc:({packet.accel_x:5.2f}, {packet.accel_y:5.2f}, {packet.accel_z:5.2f}) | "
                       f"IR: {packet.ir_left}/{packet.ir_right}")
             else:

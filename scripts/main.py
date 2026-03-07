@@ -5886,10 +5886,17 @@ def encoder_and_power_thread():
             time.sleep(interval)
 
             # --- RPM from Pico ---
-            rpm = pico_get_rpm()
+            rpm_dict = pico_get_rpm()  # returns {'rear_right', 'rear_left', 'front_right'}
+            rpm_values = [rpm_dict.get('rear_right', 0.0),
+                          rpm_dict.get('rear_left', 0.0),
+                          rpm_dict.get('front_right', 0.0)]
+            rpm = sum(rpm_values) / max(len(rpm_values), 1)
             speed_mpm = rpm * WHEEL_CIRCUMFERENCE_M
             car_state["encoder_rpm"] = round(rpm, 1)
             car_state["encoder_speed_mpm"] = round(speed_mpm, 2)
+            car_state["encoder_rpm_wheels"] = {
+                k: round(v, 1) for k, v in rpm_dict.items()
+            }
 
             # --- Battery / Current from Pico ADC (every ~1s) ---
             power_counter += 1

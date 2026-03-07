@@ -48,13 +48,13 @@ print(f"✅ I2C devices found: {device_addrs}")
 print(f"   Expected: 0x68 (MPU6050), 0x29 (VL53L0X), 0x48 or 0x49 (ADS1115)\n")
 
 # =====================================================
-# MPU6050 (I2C IMU)
+# MPU6500 (I2C IMU)
 # =====================================================
 MPU_ADDR = 0x68
 mpu_ok = False
 
 def mpu_write(reg, data):
-    """Write to MPU6050 register with error handling."""
+    """Write to MPU6500 register with error handling."""
     try:
         i2c.writeto_mem(MPU_ADDR, reg, bytes([data]))
         return True
@@ -63,20 +63,20 @@ def mpu_write(reg, data):
         return False
 
 def mpu_read(reg, length):
-    """Read from MPU6050 register with error handling."""
+    """Read from MPU6500 register with error handling."""
     try:
         return i2c.readfrom_mem(MPU_ADDR, reg, length)
     except OSError as e:
         print(f"❌ MPU read failed: {e}")
         return None
 
-# Wake up MPU6050 (clear sleep bit)
+# Wake up MPU6500 (clear sleep bit)
 if mpu_write(0x6B, 0x00):
     time.sleep(0.1)
     mpu_ok = True
-    print("✅ MPU6050 initialized (awakened)")
+    print("✅ MPU6500 initialized (awakened)")
 else:
-    print("⚠️  MPU6050 failed to initialize")
+    print("⚠️  MPU6500 failed to initialize")
 
 # =====================================================
 # VL53L0X (I2C laser)
@@ -188,21 +188,71 @@ ir_right = Pin(9, Pin.IN)   # GPIO9 (pin 12)
 print("✅ IR sensors initialized: GPIO8 (left), GPIO9 (right)")
 
 # =====================================================
-# LM393 RPM ENCODER (INTERRUPT-DRIVEN)
+# LM393 RPM ENCODERS (INTERRUPT-DRIVEN)
+# Software debounce: 2ms lockout per channel (supports up to ~1500 RPM)
+# EMA smoothing: 100ms fast window + exponential moving average
 # =====================================================
 PULSES_PER_REV = 20
-pulse_count = 0
-last_rpm_time = time.ticks_ms()
-rpm = 0.0
+DEBOUNCE_US = 2000       # 2ms lockout in microseconds
+RPM_WINDOW_MS = 100      # 100ms calculation window (10 Hz)
+EMA_ALPHA = 0.3          # EMA smoothing factor (0.0–1.0, higher = more responsive)
 
-def rpm_callback(pin):
-    """Interrupt handler for encoder pulses (falling edge)."""
-    global pulse_count
-    pulse_count += 1
+# Rear right encoder (original) — GPIO10
+pulse_count_rr = 0
+last_rpm_time_rr = time.ticks_ms()
+rpm_rr = 0.0
+rpm_ema_rr = 0.0
+_last_irq_us_rr = 0
 
-lm393 = Pin(10, Pin.IN, Pin.PULL_UP)  # GPIO10 (pin 14)
-lm393.irq(trigger=Pin.IRQ_FALLING, handler=rpm_callback)
-print("✅ LM393 encoder initialized: GPIO10 (pin 14)")
+def rpm_callback_rr(pin):
+    """Interrupt handler for rear right encoder (falling edge, 2ms debounce)."""
+    global pulse_count_rr, _last_irq_us_rr
+    now = time.ticks_us()
+    if time.ticks_diff(now, _last_irq_us_rr) >= DEBOUNCE_US:
+        pulse_count_rr += 1
+        _last_irq_us_rr = now
+
+lm393_rr = Pin(10, Pin.IN, Pin.PULL_UP)  # GPIO10 (pin 14)
+lm393_rr.irq(trigger=Pin.IRQ_FALLING, handler=rpm_callback_rr)
+print("✅ LM393 encoder (rear right) initialized: GPIO10")
+
+# Rear left encoder — GPIO15
+pulse_count_rl = 0
+last_rpm_time_rl = time.ticks_ms()
+rpm_rl = 0.0
+rpm_ema_rl = 0.0
+_last_irq_us_rl = 0
+
+def rpm_callback_rl(pin):
+    """Interrupt handler for rear left encoder (falling edge, 2ms debounce)."""
+    global pulse_count_rl, _last_irq_us_rl
+    now = time.ticks_us()
+    if time.ticks_diff(now, _last_irq_us_rl) >= DEBOUNCE_US:
+        pulse_count_rl += 1
+        _last_irq_us_rl = now
+
+lm393_rl = Pin(15, Pin.IN, Pin.PULL_UP)  # GPIO15
+lm393_rl.irq(trigger=Pin.IRQ_FALLING, handler=rpm_callback_rl)
+print("✅ LM393 encoder (rear left) initialized: GPIO15")
+
+# Front right encoder — GPIO14
+pulse_count_fr = 0
+last_rpm_time_fr = time.ticks_ms()
+rpm_fr = 0.0
+rpm_ema_fr = 0.0
+_last_irq_us_fr = 0
+
+def rpm_callback_fr(pin):
+    """Interrupt handler for front right encoder (falling edge, 2ms debounce)."""
+    global pulse_count_fr, _last_irq_us_fr
+    now = time.ticks_us()
+    if time.ticks_diff(now, _last_irq_us_fr) >= DEBOUNCE_US:
+        pulse_count_fr += 1
+        _last_irq_us_fr = now
+
+lm393_fr = Pin(14, Pin.IN, Pin.PULL_UP)  # GPIO14
+lm393_fr.irq(trigger=Pin.IRQ_FALLING, handler=rpm_callback_fr)
+print("✅ LM393 encoder (front right) initialized: GPIO14")
 
 # =====================================================
 # MAIN TRANSMISSION LOOP (50 Hz ≈ 20ms per frame)
@@ -218,7 +268,7 @@ while True:
     try:
         ts = time.ticks_ms()
         
-        # --- MPU6050: Accel (3B-40) + Temp (41-42) + Gyro (43-48) ---
+        # --- MPU6500: Accel (3B-40) + Temp (41-42) + Gyro (43-48) ---
         if not mpu_ok:
             time.sleep_ms(20)
             continue
@@ -243,7 +293,7 @@ while True:
             "z": round(gz / 131.0, 2)
         }
         
-        temp_c = (temp / 340.0) + 36.53  # MPU6050 temperature formula
+        temp_c = (temp / 333.87) + 21.0  # MPU6500 temperature formula
         
         # --- VL53L0X: Distance ---
         laser_mm = vl53_single_measure() if vl53_ok else -1
@@ -269,14 +319,29 @@ while True:
             "right": ir_right.value() == 0
         }
         
-        # --- RPM Encoder (1-second rolling window) ---
+        # --- RPM Encoders (100ms fast window + EMA smoothing) ---
         now = time.ticks_ms()
-        dt = time.ticks_diff(now, last_rpm_time)
         
-        if dt >= 1000:
-            rpm = (pulse_count / PULSES_PER_REV) * 60.0
-            pulse_count = 0
-            last_rpm_time = now
+        dt_rr = time.ticks_diff(now, last_rpm_time_rr)
+        if dt_rr >= RPM_WINDOW_MS:
+            rpm_rr = (pulse_count_rr / PULSES_PER_REV) * (60000.0 / dt_rr)
+            rpm_ema_rr = EMA_ALPHA * rpm_rr + (1.0 - EMA_ALPHA) * rpm_ema_rr
+            pulse_count_rr = 0
+            last_rpm_time_rr = now
+        
+        dt_rl = time.ticks_diff(now, last_rpm_time_rl)
+        if dt_rl >= RPM_WINDOW_MS:
+            rpm_rl = (pulse_count_rl / PULSES_PER_REV) * (60000.0 / dt_rl)
+            rpm_ema_rl = EMA_ALPHA * rpm_rl + (1.0 - EMA_ALPHA) * rpm_ema_rl
+            pulse_count_rl = 0
+            last_rpm_time_rl = now
+        
+        dt_fr = time.ticks_diff(now, last_rpm_time_fr)
+        if dt_fr >= RPM_WINDOW_MS:
+            rpm_fr = (pulse_count_fr / PULSES_PER_REV) * (60000.0 / dt_fr)
+            rpm_ema_fr = EMA_ALPHA * rpm_fr + (1.0 - EMA_ALPHA) * rpm_ema_fr
+            pulse_count_fr = 0
+            last_rpm_time_fr = now
         
         # --- Build JSON packet ---
         packet = {
@@ -288,7 +353,11 @@ while True:
             "laser_mm": laser_mm,
             "adc": ads_channels,  # New: 4-channel ADC readings
             "ir": ir,
-            "rpm": round(rpm, 1),
+            "rpm": {
+                "rear_right": round(rpm_ema_rr, 1),
+                "rear_left": round(rpm_ema_rl, 1),
+                "front_right": round(rpm_ema_fr, 1)
+            },
             "errors": error_count
         }
         
