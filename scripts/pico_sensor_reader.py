@@ -235,6 +235,24 @@ def get_rpm():
         }
     return {'rear_right': 0.0, 'rear_left': 0.0, 'front_right': 0.0}
 
+def get_diagnostics():
+    """Return connection diagnostics dict for debugging UI."""
+    if _global_reader is None:
+        return {'connected': False, 'fresh': False, 'frames': 0, 'errors': 0,
+                'packets_received': 0, 'laser_mm': -1, 'age_s': -1}
+    packet = _global_reader.get_latest()
+    stats = _global_reader.get_stats()
+    age = _global_reader.seconds_since_last_packet()
+    return {
+        'connected': _global_reader.is_connected(),
+        'fresh': _global_reader.is_fresh(),
+        'frames': packet.frame if packet else 0,
+        'errors': packet.errors if packet else 0,
+        'packets_received': stats.get('packets_received', 0),
+        'laser_mm': packet.laser_mm if packet else -1,
+        'age_s': round(age, 2) if age >= 0 else -1,
+    }
+
 def get_adc_voltage_mv(channel='A0'):
     packet = get_sensor_packet()
     if not packet:

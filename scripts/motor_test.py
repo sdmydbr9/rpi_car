@@ -5,12 +5,18 @@ Master: Rear-Left
 Active Slaves: Rear-Right, Front-Right
 Passive Slave (Mirrored): Front-Left
 Includes Anti-Stall Deadbands for Mixed Metal/Plastic Gearboxes.
+RPM-LOCK mode: interactive RPM target with back-calculation anti-windup PI.
 """
 
+import os
 import sys
 import time
 import curses
 import datetime
+
+# Ensure the script's own directory is on sys.path so that
+# pico_sensor_reader.py is importable regardless of the working directory.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Try real GPIO first.
 try:
@@ -35,10 +41,13 @@ except (ImportError, RuntimeError):
 
 # Try to import Pico sensor reader.
 try:
-    from pico_sensor_reader import init_pico_reader, get_wheel_rpms
+    from pico_sensor_reader import init_pico_reader, get_rpm as pico_get_rpm, get_diagnostics as pico_get_diagnostics
     PICO_AVAILABLE = True
 except ImportError:
     PICO_AVAILABLE = False
+    def pico_get_diagnostics():
+        return {'connected': False, 'fresh': False, 'frames': 0, 'errors': 0,
+                'packets_received': 0, 'laser_mm': -1, 'age_s': -1}
 
 
 # Dual L298N, 4 independent wheel channels (BCM numbering).
@@ -84,8 +93,19 @@ COMMAND_MAP = {
     "r": ("rl", "forward"), "f": ("rl", "reverse"),
     "t": ("rr", "forward"), "g": ("rr", "reverse"),
     "y": ("rear_sync", "forward"), "h": ("rear_sync", "reverse"),
-    "a": ("all_sync", "forward"),  "z": ("all_sync", "reverse"), 
+    "a": ("all_sync", "forward"),  "z": ("all_sync", "reverse"),
 }
+
+# RPM Target Mode Constants
+RPM_TARGET_MIN = 100
+RPM_TARGET_MAX = 1000
+RPM_TARGET_STEP = 50
+RPM_KP = 0.015   # Proportional gain (gentle — motors are very responsive)
+RPM_KI = 0.005   # Integral gain (conservative — let it accumulate slowly)
+RPM_KT = 0.1     # Back-calculation tracking gain (fast anti-windup correction)
+RPM_FILTER_ALPHA = 0.3   # Low-pass EMA for RPM readings
+RPM_SLEW_UP = 1.0        # Max PWM increase per tick (%/tick, 20%/s)
+RPM_SLEW_DOWN = 5.0      # Max PWM decrease per tick (%/tick, 100%/s — fast over-speed correction)
 
 
 def setup_gpio():
@@ -154,54 +174,118 @@ def drive_all_sync(pwms, direction, rl_pwm, rr_pwm, fl_pwm, fr_pwm):
     pwms["fr"].ChangeDutyCycle(fr_pwm)
 
 
-def draw_ui(stdscr, speed, status_msg, rpm_data, rr_adj, fr_adj, is_logging, min_rear_pwm, min_front_pwm):
+def draw_ui(stdscr, speed, status_msg, rpm_data, rr_adj, fr_adj, is_logging, min_rear_pwm, min_front_pwm,
+            rpm_target=None, entering_rpm=False, rpm_input_buf="", rpm_pwm_vals=None, diag=None):
     stdscr.erase()
-    
-    stdscr.addstr(0, 0, "🏎️  Independent Motor Test (4WD Anti-Stall Sync)", curses.A_BOLD)
-    stdscr.addstr(1, 0, "-" * 60)
-    
-    stdscr.addstr(2, 0, "W/S: Front-Left   |  E/D: Front-Right")
-    stdscr.addstr(3, 0, "R/F: Rear-Left    |  T/G: Rear-Right")
-    stdscr.addstr(4, 0, "Y/H: Rear-Sync Drive  (Fwd/Rev)")
-    stdscr.addstr(5, 0, "A/Z: ALL-SYNC 4WD     (Fwd/Rev)")
-    stdscr.addstr(6, 0, "Space / X: Stop all motors")
-    stdscr.addstr(7, 0, "+ / -: Change target speed")
-    stdscr.addstr(8, 0, "Q: Quit")
-    
-    stdscr.addstr(10, 0, "-" * 60)
-    
-    stdscr.addstr(11, 0, "MOTOR STATUS:", curses.A_BOLD)
-    stdscr.addstr(12, 0, status_msg)
-    stdscr.addstr(13, 0, f"Target Base Speed: {int(speed)}% (Max: {MAX_PWM_DUTY}%)")
+    max_y, max_x = stdscr.getmaxyx()
 
-    if "Sync" in status_msg:
-        # Show specific power applied to each side, respecting the deadband
-        rr_power = max(min_rear_pwm, min(MAX_PWM_DUTY, speed + rr_adj))
-        fr_power = max(min_front_pwm, min(MAX_PWM_DUTY, speed + fr_adj))
-        stdscr.addstr(14, 0, f"RL: {int(speed)}% | RR: {int(rr_power)}% (Adj {rr_adj:+.1f}%)", curses.A_DIM)
-        if "ALL-SYNC" in status_msg:
-            stdscr.addstr(15, 0, f"FL: {int(fr_power)}% | FR: {int(fr_power)}% (Adj {fr_adj:+.1f}%)", curses.A_DIM)
-        
+    def safe_addstr(row, col, text, attr=curses.A_NORMAL):
+        if 0 <= row < max_y - 1:
+            stdscr.addnstr(row, col, text, max_x - col - 1, attr)
+
+    safe_addstr(0, 0, "🏎️  Independent Motor Test (4WD Anti-Stall Sync)", curses.A_BOLD)
+    safe_addstr(1, 0, "-" * 60)
+
+    safe_addstr(2, 0, "W/S: Front-Left   |  E/D: Front-Right")
+    safe_addstr(3, 0, "R/F: Rear-Left    |  T/G: Rear-Right")
+    safe_addstr(4, 0, "Y/H: Rear-Sync Drive  (Fwd/Rev)")
+    safe_addstr(5, 0, "A/Z: ALL-SYNC 4WD     (Fwd/Rev)")
+    safe_addstr(6, 0, f"I: Set target RPM     ({RPM_TARGET_MIN}-{RPM_TARGET_MAX})")
+    safe_addstr(7, 0, "Space / X: Stop all motors")
+    safe_addstr(8, 0, "+ / -: Change speed / RPM target")
+    safe_addstr(9, 0, "Q: Quit")
+
+    safe_addstr(11, 0, "-" * 60)
+
+    # RPM Input prompt overlay
+    if entering_rpm:
+        safe_addstr(12, 0, "ENTER TARGET RPM:", curses.A_BOLD)
+        safe_addstr(13, 0, f">>> {rpm_input_buf}_ ")
+        safe_addstr(14, 0, f"Range: {RPM_TARGET_MIN} - {RPM_TARGET_MAX} RPM  |  Enter=Confirm  Esc=Cancel")
+        safe_addstr(16, 0, "-" * 60)
+        safe_addstr(17, 0, "LIVE RPM SENSORS:", curses.A_BOLD)
+        if not PICO_AVAILABLE:
+            safe_addstr(18, 0, "⚠️  pico_sensor_reader not available")
+        else:
+            rr, rl, fr = rpm_data
+            safe_addstr(19, 2, f"Front-Right (FR) : {fr:6.1f} RPM")
+            safe_addstr(20, 2, f"Rear-Left   (RL) : {rl:6.1f} RPM")
+            safe_addstr(21, 2, f"Rear-Right  (RR) : {rr:6.1f} RPM")
+        stdscr.refresh()
+        return
+
+    safe_addstr(12, 0, "MOTOR STATUS:", curses.A_BOLD)
+    safe_addstr(13, 0, status_msg)
+
+    if rpm_target is not None and "RPM-LOCK" in status_msg:
+        safe_addstr(14, 0, f"Target RPM: {rpm_target}  (+/- to adjust by {RPM_TARGET_STEP})")
+        if rpm_pwm_vals:
+            safe_addstr(15, 0, f"PWM -> RL:{rpm_pwm_vals['rl']:5.1f}%  RR:{rpm_pwm_vals['rr']:5.1f}%  "
+                                f"FL:{rpm_pwm_vals['fl']:5.1f}%  FR:{rpm_pwm_vals['fr']:5.1f}%", curses.A_DIM)
+    else:
+        safe_addstr(14, 0, f"Target Base Speed: {int(speed)}% (Max: {MAX_PWM_DUTY}%)")
+        if "Sync" in status_msg:
+            rr_power = max(min_rear_pwm, min(MAX_PWM_DUTY, speed + rr_adj))
+            fr_power = max(min_front_pwm, min(MAX_PWM_DUTY, speed + fr_adj))
+            safe_addstr(15, 0, f"RL: {int(speed)}% | RR: {int(rr_power)}% (Adj {rr_adj:+.1f}%)", curses.A_DIM)
+            if "ALL-SYNC" in status_msg:
+                safe_addstr(16, 0, f"FL: {int(fr_power)}% | FR: {int(fr_power)}% (Adj {fr_adj:+.1f}%)", curses.A_DIM)
+
     if is_logging:
-        stdscr.addstr(16, 0, "⏺ REC: Saving 4WD sync data to CSV...", curses.color_pair(1) | curses.A_BLINK if curses.has_colors() else curses.A_BLINK)
+        safe_addstr(17, 0, "REC: Saving data to CSV...", curses.color_pair(1) | curses.A_BLINK if curses.has_colors() else curses.A_BLINK)
 
-    stdscr.addstr(18, 0, "-" * 60)
-    stdscr.addstr(19, 0, "LIVE RPM SENSORS:", curses.A_BOLD)
-    
+    safe_addstr(19, 0, "-" * 60)
+    safe_addstr(20, 0, "LIVE RPM SENSORS:", curses.A_BOLD)
+
     if not PICO_AVAILABLE:
-        stdscr.addstr(20, 0, "⚠️  pico_sensor_reader not available", curses.color_pair(1) if curses.has_colors() else curses.A_NORMAL)
+        safe_addstr(21, 0, "⚠️  pico_sensor_reader not available", curses.color_pair(1) if curses.has_colors() else curses.A_NORMAL)
     else:
         rr, rl, fr = rpm_data
         rl_attr = rr_attr = fr_attr = curses.A_NORMAL
-        
-        if "Sync" in status_msg and rl > 0:
+
+        if "RPM-LOCK" in status_msg and rpm_target:
+            if abs(rpm_target - rr) <= 10.0: rr_attr = curses.color_pair(2) if curses.has_colors() else curses.A_BOLD
+            if abs(rpm_target - fr) <= 10.0: fr_attr = curses.color_pair(2) if curses.has_colors() else curses.A_BOLD
+            if abs(rpm_target - rl) <= 10.0: rl_attr = curses.color_pair(2) if curses.has_colors() else curses.A_BOLD
+        elif "Sync" in status_msg and rl > 0:
             if abs(rl - rr) <= 5.0: rr_attr = curses.color_pair(2) if curses.has_colors() else curses.A_BOLD
             if abs(rl - fr) <= 5.0: fr_attr = curses.color_pair(2) if curses.has_colors() else curses.A_BOLD
             rl_attr = curses.color_pair(2) if curses.has_colors() else curses.A_BOLD
 
-        stdscr.addstr(21, 2, f"Front-Right (Slave 2) : {fr:6.1f} RPM", fr_attr)
-        stdscr.addstr(22, 2, f"Rear-Left   (MASTER)  : {rl:6.1f} RPM", rl_attr)
-        stdscr.addstr(23, 2, f"Rear-Right  (Slave 1) : {rr:6.1f} RPM", rr_attr)
+        safe_addstr(22, 2, f"Front-Right (FR) : {fr:6.1f} RPM", fr_attr)
+        safe_addstr(23, 2, f"Rear-Left   (RL) : {rl:6.1f} RPM", rl_attr)
+        safe_addstr(24, 2, f"Rear-Right  (RR) : {rr:6.1f} RPM", rr_attr)
+
+    # Pico Connection Diagnostics
+    safe_addstr(26, 0, "-" * 60)
+    safe_addstr(27, 0, "PICO DIAGNOSTICS:", curses.A_BOLD)
+    if diag:
+        conn_ok = diag.get('connected', False)
+        fresh = diag.get('fresh', False)
+        frames = diag.get('frames', 0)
+        pkts = diag.get('packets_received', 0)
+        pico_errors = diag.get('errors', 0)
+        laser = diag.get('laser_mm', -1)
+        age = diag.get('age_s', -1)
+
+        if conn_ok and fresh:
+            status_attr = curses.color_pair(2) if curses.has_colors() else curses.A_BOLD
+            conn_str = "CONNECTED (live)"
+        elif conn_ok:
+            status_attr = curses.color_pair(1) if curses.has_colors() else curses.A_DIM
+            conn_str = f"CONNECTED (stale — {age}s ago)"
+        else:
+            status_attr = curses.color_pair(1) if curses.has_colors() else curses.A_DIM
+            conn_str = "NO DATA"
+
+        safe_addstr(28, 2, f"Link: {conn_str}", status_attr)
+        safe_addstr(29, 2, f"Frames: {frames}  |  Pkts rx: {pkts}  |  Pico errors: {pico_errors}")
+        safe_addstr(30, 2, f"Laser: {laser} mm  |  Data age: {age}s")
+        if conn_ok and fresh and rr == 0.0 and rl == 0.0 and fr == 0.0:
+            safe_addstr(31, 2, "⚠️  Pico data OK but RPM=0 → check LM393 encoder wiring!",
+                        curses.color_pair(1) if curses.has_colors() else curses.A_BOLD)
+    else:
+        safe_addstr(28, 2, "No diagnostics available")
 
     stdscr.refresh()
 
@@ -220,28 +304,40 @@ def main_loop(stdscr):
     pico_reader = None
     if PICO_AVAILABLE:
         try: pico_reader = init_pico_reader()
-        except Exception: pass 
+        except Exception: pass
 
     active_wheel = None
     active_dir = None
     status_msg = "All motors stopped."
-    
+
     # 4WD PI Synchronization Variables
-    rr_pwm_adj_i = 0.0     
+    rr_pwm_adj_i = 0.0
     fr_pwm_adj_i = 0.0
-    
+
     # Tunings - Softened KP to prevent violent jerking
-    REAR_KP = 0.04         
-    REAR_KI = 0.02         
+    REAR_KP = 0.04
+    REAR_KI = 0.02
     FRONT_KP = 0.04
     FRONT_KI = 0.02
-    
-    # NEW: Deadband Limits (Minimum power required to prevent stalling)
+
+    # Deadband Limits (Minimum power required to prevent stalling)
     MIN_REAR_PWM = 18.0    # Plastic gears need more power just to keep moving
     MIN_FRONT_PWM = 8.0    # Metal gears are efficient and can run at very low power
-    
-    MAX_ADJ = float(MAX_PWM_DUTY)  
-    log_file = None      
+
+    MAX_ADJ = float(MAX_PWM_DUTY)
+    log_file = None
+
+    # RPM Target Mode Variables
+    rpm_target = None
+    entering_rpm = False
+    rpm_input_buf = ""
+    rl_rpm_integral = 0.0
+    rr_rpm_integral = 0.0
+    fr_rpm_integral = 0.0
+    rpm_filt_rl = 0.0   # Low-pass filtered RPM readings
+    rpm_filt_rr = 0.0
+    rpm_filt_fr = 0.0
+    rpm_pwm_vals = {"rl": 0.0, "rr": 0.0, "fr": 0.0, "fl": 0.0}
 
     def close_log():
         nonlocal log_file
@@ -254,57 +350,113 @@ def main_loop(stdscr):
             # 1. Non-blocking keypress check
             k = stdscr.getch()
             if k != -1:
-                try: key = chr(k).lower()
-                except ValueError: key = None
+                if entering_rpm:
+                    # RPM input mode - collect digits
+                    if k == 27:  # Escape - cancel input
+                        entering_rpm = False
+                        rpm_input_buf = ""
+                    elif k in (10, 13):  # Enter - confirm
+                        try:
+                            val = int(rpm_input_buf)
+                            if RPM_TARGET_MIN <= val <= RPM_TARGET_MAX:
+                                rpm_target = val
+                                active_wheel = "rpm_target"
+                                active_dir = "forward"
+                                # Zero integrals — slew-rate limiter handles the startup ramp
+                                rl_rpm_integral = 0.0
+                                rr_rpm_integral = 0.0
+                                fr_rpm_integral = 0.0
+                                rpm_filt_rl = rpm_filt_rr = rpm_filt_fr = 0.0
+                                rpm_pwm_vals = {"rl": 0.0, "rr": 0.0, "fr": 0.0, "fl": 0.0}
+                                status_msg = f"RPM-LOCK: Maintaining {rpm_target} RPM (4WD)"
+                                close_log()
+                                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                                log_file = open(f"rpm_lock_log_{timestamp}.csv", "w")
+                                log_file.write("time_sec,target_rpm,rl_rpm,rr_rpm,fr_rpm,rl_pwm,rr_pwm,fr_pwm,fl_pwm\n")
+                        except ValueError:
+                            pass
+                        entering_rpm = False
+                        rpm_input_buf = ""
+                    elif k in (8, 127, curses.KEY_BACKSPACE):  # Backspace
+                        rpm_input_buf = rpm_input_buf[:-1]
+                    elif 48 <= k <= 57 and len(rpm_input_buf) < 4:  # Digits 0-9
+                        rpm_input_buf += chr(k)
+                else:
+                    try: key = chr(k).lower()
+                    except ValueError: key = None
 
-                if key == "q":
-                    break
+                    if key == "q":
+                        break
 
-                elif key in (" ", "x"):
-                    stop_all(pwms)
-                    active_wheel, active_dir = None, None
-                    rr_pwm_adj_i, fr_pwm_adj_i = 0.0, 0.0
-                    status_msg = "All motors stopped."
-                    close_log()
-
-                elif key in ("+", "="):
-                    speed = min(float(MAX_PWM_DUTY), speed + SPEED_STEP)
-                elif key in ("-", "_"):
-                    speed = max(float(MIN_SPEED), speed - SPEED_STEP)
-
-                elif key in COMMAND_MAP:
-                    new_wheel, new_dir = COMMAND_MAP[key]
-                    
-                    if new_wheel in ("rear_sync", "all_sync") and active_wheel not in ("rear_sync", "all_sync"):
-                        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                        log_file = open(f"sync_4wd_log_{timestamp}.csv", "w")
-                        log_file.write("time_sec,target_speed_pwm,rl_rpm,rr_rpm,fr_rpm,rr_adj,fr_adj,final_rr_pwm,final_fr_pwm\n")
-                    elif new_wheel not in ("rear_sync", "all_sync"):
+                    elif key in (" ", "x"):
+                        stop_all(pwms)
+                        active_wheel, active_dir = None, None
+                        rr_pwm_adj_i, fr_pwm_adj_i = 0.0, 0.0
+                        rpm_target = None
+                        rl_rpm_integral = rr_rpm_integral = fr_rpm_integral = 0.0
+                        rpm_filt_rl = rpm_filt_rr = rpm_filt_fr = 0.0
+                        rpm_pwm_vals = {"rl": 0.0, "rr": 0.0, "fr": 0.0, "fl": 0.0}
+                        status_msg = "All motors stopped."
                         close_log()
 
-                    active_wheel, active_dir = new_wheel, new_dir
-                    rr_pwm_adj_i, fr_pwm_adj_i = 0.0, 0.0 
-                    
-                    if active_wheel == "all_sync":
-                        status_msg = f"ALL-SYNC 4WD driving {active_dir}"
-                    elif active_wheel == "rear_sync":
-                        status_msg = f"Rear Sync driving {active_dir}"
-                    else:
-                        drive_one_wheel(pwms, active_wheel, active_dir, speed)
-                        status_msg = f"{WHEEL_MAP[active_wheel][3]} driving {active_dir}"
+                    elif key == "i":
+                        entering_rpm = True
+                        rpm_input_buf = ""
 
-            # 2. Fetch RPM Data
+                    elif key in ("+", "="):
+                        if active_wheel == "rpm_target" and rpm_target is not None:
+                            rpm_target = min(RPM_TARGET_MAX, rpm_target + RPM_TARGET_STEP)
+                            status_msg = f"RPM-LOCK: Maintaining {rpm_target} RPM (4WD)"
+                        else:
+                            speed = min(float(MAX_PWM_DUTY), speed + SPEED_STEP)
+                    elif key in ("-", "_"):
+                        if active_wheel == "rpm_target" and rpm_target is not None:
+                            rpm_target = max(RPM_TARGET_MIN, rpm_target - RPM_TARGET_STEP)
+                            status_msg = f"RPM-LOCK: Maintaining {rpm_target} RPM (4WD)"
+                        else:
+                            speed = max(float(MIN_SPEED), speed - SPEED_STEP)
+
+                    elif key in COMMAND_MAP:
+                        new_wheel, new_dir = COMMAND_MAP[key]
+
+                        if new_wheel in ("rear_sync", "all_sync") and active_wheel not in ("rear_sync", "all_sync"):
+                            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                            log_file = open(f"sync_4wd_log_{timestamp}.csv", "w")
+                            log_file.write("time_sec,target_speed_pwm,rl_rpm,rr_rpm,fr_rpm,rr_adj,fr_adj,final_rr_pwm,final_fr_pwm\n")
+                        elif new_wheel not in ("rear_sync", "all_sync"):
+                            close_log()
+
+                        active_wheel, active_dir = new_wheel, new_dir
+                        rr_pwm_adj_i, fr_pwm_adj_i = 0.0, 0.0
+                        rpm_target = None  # Exit RPM-LOCK if switching modes
+
+                        if active_wheel == "all_sync":
+                            status_msg = f"ALL-SYNC 4WD driving {active_dir}"
+                        elif active_wheel == "rear_sync":
+                            status_msg = f"Rear Sync driving {active_dir}"
+                        else:
+                            drive_one_wheel(pwms, active_wheel, active_dir, speed)
+                            status_msg = f"{WHEEL_MAP[active_wheel][3]} driving {active_dir}"
+
+            # 2. Fetch RPM Data  (rr, rl, fr)
             rpm_data = (0.0, 0.0, 0.0)
+            diag = None
             if PICO_AVAILABLE:
-                rpm_data = get_wheel_rpms()
-                
+                _rpm = pico_get_rpm()  # dict: rear_right, rear_left, front_right
+                rpm_data = (
+                    _rpm.get('rear_right', 0.0),
+                    _rpm.get('rear_left', 0.0),
+                    _rpm.get('front_right', 0.0),
+                )
+                diag = pico_get_diagnostics()
+
             # 3. Handle Active PI Synchronization Loops
             total_adj_rr = 0.0
             total_adj_fr = 0.0
 
             if active_wheel in ("rear_sync", "all_sync"):
                 rr_rpm, rl_rpm, fr_rpm = rpm_data
-                
+
                 if PICO_AVAILABLE:
                     # REAR LOOP (Slave 1)
                     error_rr = rl_rpm - rr_rpm
@@ -312,7 +464,7 @@ def main_loop(stdscr):
                     rr_pwm_adj_i += (error_rr * REAR_KI)
                     rr_pwm_adj_i = max(-MAX_ADJ, min(MAX_ADJ, rr_pwm_adj_i))
                     total_adj_rr = max(-MAX_ADJ, min(MAX_ADJ, p_term_rr + rr_pwm_adj_i))
-                    
+
                     # FRONT LOOP (Slave 2) - Only process if 4WD is active
                     if active_wheel == "all_sync":
                         error_fr = rl_rpm - fr_rpm
@@ -328,7 +480,7 @@ def main_loop(stdscr):
                 else:
                     rr_target_pwm = 0.0
                     fr_target_pwm = 0.0
-                
+
                 if active_wheel == "rear_sync":
                     drive_rear_sync(pwms, active_dir, speed, rr_target_pwm)
                 elif active_wheel == "all_sync":
@@ -339,9 +491,79 @@ def main_loop(stdscr):
                 if log_file:
                     log_file.write(f"{time.time():.3f},{speed},{rl_rpm:.1f},{rr_rpm:.1f},{fr_rpm:.1f},{total_adj_rr:.3f},{total_adj_fr:.3f},{rr_target_pwm:.1f},{fr_target_pwm:.1f}\n")
 
+            # 3b. RPM Target Mode PI Loop
+            if active_wheel == "rpm_target" and rpm_target is not None:
+                rr_rpm, rl_rpm, fr_rpm = rpm_data
+
+                if PICO_AVAILABLE:
+                    # Low-pass filter raw RPM readings to reject encoder noise
+                    rpm_filt_rl = RPM_FILTER_ALPHA * rl_rpm + (1.0 - RPM_FILTER_ALPHA) * rpm_filt_rl
+                    rpm_filt_rr = RPM_FILTER_ALPHA * rr_rpm + (1.0 - RPM_FILTER_ALPHA) * rpm_filt_rr
+                    rpm_filt_fr = RPM_FILTER_ALPHA * fr_rpm + (1.0 - RPM_FILTER_ALPHA) * rpm_filt_fr
+
+                    def _pi_step(filt_rpm, integral, prev_pwm):
+                        """
+                        PI tick with back-calculation anti-windup + asymmetric slew.
+
+                        Back-calculation: when the actual applied output differs from
+                        the raw PI output (due to clamping or slew limiting), a
+                        tracking term pulls the integral back toward reality.  This
+                        prevents the integral from winding up during the startup ramp
+                        when the slew limiter is holding the output artificially low.
+                        """
+                        error = rpm_target - filt_rpm
+                        # Raw (unclamped, un-slewed) PI output
+                        raw = integral + error * RPM_KP
+                        # Hard clamp to valid PWM range
+                        clamped = max(0.0, min(float(MAX_PWM_DUTY), raw))
+                        # Asymmetric slew-rate limiter:
+                        #   - slow ramp UP  (careful power increase)
+                        #   - fast ramp DOWN (quick over-speed correction)
+                        delta = clamped - prev_pwm
+                        if delta > 0:
+                            output = prev_pwm + min(delta, RPM_SLEW_UP)
+                        else:
+                            output = prev_pwm + max(delta, -RPM_SLEW_DOWN)
+                        output = max(0.0, min(float(MAX_PWM_DUTY), output))
+                        # Back-calculation anti-windup:
+                        # integral += Ki * error  +  Kt * (actual_output - raw_output)
+                        # The tracking term (output - raw) is negative when the output
+                        # was limited, pulling the integral DOWN so it doesn't keep
+                        # building up behind the rate limiter.
+                        integral += RPM_KI * error + RPM_KT * (output - raw)
+                        integral = max(-float(MAX_PWM_DUTY), min(float(MAX_PWM_DUTY), integral))
+                        return output, integral
+
+                    rl_pwm_val, rl_rpm_integral = _pi_step(rpm_filt_rl, rl_rpm_integral, rpm_pwm_vals.get('rl', 0.0))
+                    rr_pwm_val, rr_rpm_integral = _pi_step(rpm_filt_rr, rr_rpm_integral, rpm_pwm_vals.get('rr', 0.0))
+                    fr_pwm_val, fr_rpm_integral = _pi_step(rpm_filt_fr, fr_rpm_integral, rpm_pwm_vals.get('fr', 0.0))
+                else:
+                    # No sensor feedback — linear PWM estimate, asymmetric slew
+                    est_pwm = (rpm_target / RPM_TARGET_MAX) * MAX_PWM_DUTY
+                    def _slew(prev, target):
+                        delta = target - prev
+                        if delta > 0:
+                            return max(0.0, min(float(MAX_PWM_DUTY), prev + min(delta, RPM_SLEW_UP)))
+                        else:
+                            return max(0.0, min(float(MAX_PWM_DUTY), prev + max(delta, -RPM_SLEW_DOWN)))
+                    rl_pwm_val = _slew(rpm_pwm_vals.get('rl', 0.0), est_pwm)
+                    rr_pwm_val = _slew(rpm_pwm_vals.get('rr', 0.0), est_pwm)
+                    fr_pwm_val = _slew(rpm_pwm_vals.get('fr', 0.0), est_pwm)
+
+                fl_pwm_val = fr_pwm_val  # Front-Left mirrors Front-Right (no sensor)
+                rpm_pwm_vals = {"rl": rl_pwm_val, "rr": rr_pwm_val, "fr": fr_pwm_val, "fl": fl_pwm_val}
+
+                drive_all_sync(pwms, active_dir, rl_pwm_val, rr_pwm_val, fl_pwm_val, fr_pwm_val)
+
+                if log_file:
+                    log_file.write(f"{time.time():.3f},{rpm_target},{rl_rpm:.1f},{rr_rpm:.1f},{fr_rpm:.1f},"
+                                   f"{rl_pwm_val:.1f},{rr_pwm_val:.1f},{fr_pwm_val:.1f},{fl_pwm_val:.1f}\n")
+
             # 4. Draw to screen
-            draw_ui(stdscr, speed, status_msg, rpm_data, total_adj_rr, total_adj_fr, bool(log_file), MIN_REAR_PWM, MIN_FRONT_PWM)
-            
+            draw_ui(stdscr, speed, status_msg, rpm_data, total_adj_rr, total_adj_fr, bool(log_file), MIN_REAR_PWM, MIN_FRONT_PWM,
+                    rpm_target=rpm_target, entering_rpm=entering_rpm, rpm_input_buf=rpm_input_buf, rpm_pwm_vals=rpm_pwm_vals,
+                    diag=diag)
+
             # 5. Loop throttle (20Hz)
             time.sleep(0.05)
 
