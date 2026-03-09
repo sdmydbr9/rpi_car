@@ -136,8 +136,19 @@ MIN_REVERSE_POWER = 15         # Minimum power needed to move motors (adjust if 
 # When driving straight forward with no steering input, a P controller
 # integrates gyro_z into a heading angle and applies a speed bias to
 # whichever side is pulling off course, keeping the car on track.
+#
+# Hardware note: the metal RL gearbox is physically capped at ~163 RPM even
+# at 100 % duty.  Reducing left_motor_speed only affects actual wheel speed
+# once the PID target drops below that ~163 RPM ceiling.  At high throttle
+# (gear S) both sides already target 500 RPM, so the left-only correction
+# approach was slow to react.  The correction now operates on BOTH sides:
+#   • Drifting right → reduce left  AND  increase right (half each)
+#   • Drifting left  → reduce right AND  increase left  (half each)
+# This gives the PID headroom on the right (RR plastic, naturally runs at
+# moderate duty) to act immediately, while the left reduction takes effect
+# as heading error grows large enough to push RL below its physical ceiling.
 STRAIGHT_KP = 1.2             # % speed correction per degree of heading error
-STRAIGHT_MAX_CORR = 25.0      # Maximum one-side speed reduction (%) per tick
+STRAIGHT_MAX_CORR = 25.0      # Maximum per-side speed change (%) per tick
 STRAIGHT_STEER_DEADBAND = 3.0 # User steering below this (°) enables gyro correction
 STRAIGHT_SPEED_THRESHOLD = 5.0 # Minimum current_pwm (%) to activate gyro correction
 
@@ -3674,10 +3685,13 @@ def physics_loop():
                 heading_error = -_integrated_heading  # positive when drifted right
                 corr = max(-STRAIGHT_MAX_CORR,
                            min(STRAIGHT_MAX_CORR, STRAIGHT_KP * heading_error))
-                if corr > 1.0:        # drifted right — throttle back left side
-                    left_motor_speed = max(0.0, left_motor_speed - corr)
-                elif corr < -1.0:     # drifted left  — throttle back right side
-                    right_motor_speed = max(0.0, right_motor_speed + corr)  # corr < 0
+                half = corr / 2.0
+                if corr > 1.0:        # drifted right — slow left AND speed up right
+                    left_motor_speed  = max(0.0, left_motor_speed - half)
+                    right_motor_speed = min(100.0, right_motor_speed + half)
+                elif corr < -1.0:     # drifted left  — slow right AND speed up left
+                    right_motor_speed = max(0.0, right_motor_speed + half)  # half < 0
+                    left_motor_speed  = min(100.0, left_motor_speed - half)  # -half > 0
                 car_state["pid_correction"] = round(corr, 2)
                 car_state["current_heading"] = round(_integrated_heading, 2)
             except Exception:
@@ -3747,6 +3761,9 @@ def physics_loop():
                     'sync_status': sync_telem.get('status', 'OFF'),
                     'target_rpm_left': round(wheels.get('rl', {}).get('target_rpm', 0), 1),
                     'target_rpm_right': round(wheels.get('rr', {}).get('target_rpm', 0), 1),
+                    'gyro_heading_deg': car_state.get('current_heading', 0.0),
+                    'gyro_correction_pct': car_state.get('pid_correction', 0.0),
+                    'gyro_active': _heading_locked,
                 })
             except Exception:
                 pass  # Never let logging crash the drive loop

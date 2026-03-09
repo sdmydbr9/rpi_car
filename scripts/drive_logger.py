@@ -61,6 +61,10 @@ COLUMNS = [
     'gear', 'throttle_input', 'steering_input', 'is_braking', 'is_forward',
     # Wheel sync controller state
     'sync_status', 'target_rpm_left', 'target_rpm_right',
+    # Gyro heading correction
+    'gyro_heading_deg',    # integrated yaw heading (°) — resets each straight run
+    'gyro_correction_pct', # PWM correction applied (% — positive = slowed left)
+    'gyro_active',         # True when heading lock is active
 ]
 
 

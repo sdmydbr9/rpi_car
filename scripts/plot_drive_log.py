@@ -74,6 +74,7 @@ num_cols = [
     'applied_pwm_fl', 'applied_pwm_fr', 'applied_pwm_rl', 'applied_pwm_rr',
     'throttle_input', 'steering_input',
     'target_rpm_left', 'target_rpm_right',
+    'gyro_heading_deg', 'gyro_correction_pct',
 ]
 for c in num_cols:
     if c in raw.columns:
@@ -123,6 +124,19 @@ if len(moving) > 0:
         bias = "RIGHT (RR faster)" if drift.mean() > 5 else \
                "LEFT (RL faster)" if drift.mean() < -5 else "NONE"
         print(f"  Drift bias: {bias}")
+
+# Gyro heading correction stats
+if 'gyro_correction_pct' in raw.columns:
+    corr = raw['gyro_correction_pct'].dropna()
+    active_corr = corr[corr.abs() > 0.5]
+    if len(active_corr) > 0:
+        print(f"  Gyro correction: mean={active_corr.mean():.2f}%  "
+              f"max_abs={active_corr.abs().max():.2f}%  "
+              f"active_pct={100*len(active_corr)/max(len(moving),1):.0f}%")
+if 'gyro_heading_deg' in raw.columns:
+    hdg = raw['gyro_heading_deg'].dropna()
+    if len(hdg) > 0:
+        print(f"  Max heading drift tracked: {hdg.abs().max():.1f}°")
 
 # Sync status distribution
 if 'sync_status' in raw.columns:
@@ -194,12 +208,12 @@ def style_ax(ax, title, ylabel=''):
 
 
 # ── FIGURE LAYOUT ─────────────────────────────────────────────────
-fig = plt.figure(figsize=(18, 28), facecolor=DARK)
+fig = plt.figure(figsize=(18, 32), facecolor=DARK)
 fig.suptitle(
     f'DRIVE TELEMETRY — {Path(paths[-1]).stem}  ({duration:.1f}s, {total_rows} rows)',
     fontsize=14, color=BLUE, fontweight='bold', y=0.998
 )
-gs = GridSpec(10, 2, figure=fig, hspace=0.42, wspace=0.25,
+gs = GridSpec(11, 2, figure=fig, hspace=0.42, wspace=0.25,
               left=0.06, right=0.97, top=0.977, bottom=0.02)
 
 t = raw['t']
@@ -386,7 +400,7 @@ ax9.legend(loc='upper right', fontsize=7, facecolor=DARK, edgecolor=GRID,
 # ──────────────────────────────────────────────────────────────────
 # 10. DRIFT INDICATOR — RR-RL RPM difference
 # ──────────────────────────────────────────────────────────────────
-ax10 = fig.add_subplot(gs[8, :])
+ax10 = fig.add_subplot(gs[8, :])  # row 8 → unchanged
 style_ax(ax10, '10. Drift Indicator (RR - RL RPM) — Positive = Right Faster', 'RPM Diff')
 
 ax10.axhline(0, color='white', linewidth=1, linestyle='--', alpha=0.4)
@@ -409,9 +423,51 @@ ax10.legend(loc='upper right', fontsize=7, facecolor=DARK, edgecolor=GRID,
            labelcolor=TXT)
 
 # ──────────────────────────────────────────────────────────────────
+# 10b. GYRO HEADING CORRECTION
+# ──────────────────────────────────────────────────────────────────
+ax10b = fig.add_subplot(gs[9, :])
+style_ax(ax10b, '10b. Gyro Heading Correction (MPU6500)', '')
+
+ax10b.axhline(0, color='white', linewidth=0.8, linestyle='--', alpha=0.4)
+
+has_gyro_cols = ('gyro_heading_deg' in raw.columns and
+                 'gyro_correction_pct' in raw.columns)
+if has_gyro_cols:
+    hdg = pd.to_numeric(raw['gyro_heading_deg'], errors='coerce').fillna(0)
+    corr = pd.to_numeric(raw['gyro_correction_pct'], errors='coerce').fillna(0)
+    ax10b_r = ax10b.twinx()
+    ax10b_r.set_facecolor(DARK)
+    ax10b_r.tick_params(colors=TXT, labelsize=7)
+    ax10b_r.set_ylabel('Heading (°)', color=CYAN, fontsize=8)
+    ax10b_r.plot(t, hdg, color=CYAN, linewidth=1.0, alpha=0.8, label='Heading °')
+    ax10b_r.axhline(0, color=CYAN, linewidth=0.5, linestyle=':', alpha=0.2)
+    ax10b.set_ylabel('Correction (% PWM)', color=PURPLE, fontsize=8)
+    ax10b.plot(t, corr, color=PURPLE, linewidth=1.2, alpha=0.9, label='Correction %')
+    ax10b.fill_between(t, 0, corr, where=(corr > 0), alpha=0.15, color=PURPLE,
+                       label='Left slowed (right drift)')
+    ax10b.fill_between(t, 0, corr, where=(corr < 0), alpha=0.15, color=ORANGE,
+                       label='Right slowed (left drift)')
+    # Shade when gyro is active
+    if 'gyro_active' in raw.columns:
+        ga = raw['gyro_active'].map({'True': True, 'False': False,
+                                     True: True, False: False}).fillna(False)
+        ax10b.fill_between(t, ax10b.get_ylim()[0], ax10b.get_ylim()[1],
+                           where=ga, alpha=0.06, color=GREEN, label='Gyro active')
+    lines1, labels1 = ax10b.get_legend_handles_labels()
+    lines2, labels2 = ax10b_r.get_legend_handles_labels()
+    ax10b.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=6,
+                 facecolor=DARK, edgecolor=GRID, labelcolor=TXT)
+else:
+    ax10b.text(0.5, 0.5, 'No gyro correction data\n(run logged before this feature)',
+               ha='center', va='center', color=TXT, fontsize=9,
+               transform=ax10b.transAxes)
+
+ax10b.set_xlabel('Time (s)', color=TXT, fontsize=8)
+
+# ──────────────────────────────────────────────────────────────────
 # 11. TEMPERATURE
 # ──────────────────────────────────────────────────────────────────
-ax11 = fig.add_subplot(gs[9, 0])
+ax11 = fig.add_subplot(gs[10, 0])
 style_ax(ax11, '11. IMU Temperature', '°C')
 
 if 'temp_c' in raw.columns:
@@ -425,7 +481,7 @@ ax11.legend(loc='upper right', fontsize=6, facecolor=DARK, edgecolor=GRID,
 # ──────────────────────────────────────────────────────────────────
 # 12. SYNC STATUS TIMELINE
 # ──────────────────────────────────────────────────────────────────
-ax12 = fig.add_subplot(gs[9, 1])
+ax12 = fig.add_subplot(gs[10, 1])
 style_ax(ax12, '12. Wheel Sync Status', '')
 
 if 'sync_status' in raw.columns:

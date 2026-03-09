@@ -33,9 +33,13 @@ SYNC_KD = 0.012       # Derivative on measurement (damps oscillation)
 SYNC_KT = 0.5         # Back-calculation anti-windup tracking gain
 
 # Feedforward: PWM% ≈ RPM × FF_GAIN  (empirical from motor_test.py)
-# Separate gains for metal vs plastic gearboxes
-FF_GAIN_METAL = 0.060    # Metal gears (FL, FR, RL): efficient, lower RPM
-FF_GAIN_PLASTIC = 0.070  # Plastic gears (RR only): need more PWM per RPM
+# Separate gains for metal vs plastic gearboxes.
+# NOTE: the plastic RR gearbox has a LOWER reduction ratio than the metal gearboxes,
+# producing MORE RPM per PWM% — it therefore needs LESS feedforward per target RPM,
+# not more.  Setting this equal to or higher than FF_GAIN_METAL caused RR to always
+# start with excess PWM, immediately triggering the sync cap and causing rightward drift.
+FF_GAIN_METAL = 0.060    # Metal gears (FL, FR, RL): high reduction, lower RPM output
+FF_GAIN_PLASTIC = 0.050  # Plastic gear (RR only): lower reduction, more RPM per PWM%
 
 # Signal conditioning
 FILTER_ALPHA = 0.4     # EMA low-pass filter coefficient (0=smooth, 1=raw)
@@ -68,8 +72,9 @@ CONVERGENCE_BAND_RPM = 10.0
 # Each gear defines (min_rpm, max_rpm).  The PID target is clamped
 # to this window so the car never exceeds the gear's intended speed.
 # This is critical because the plastic RR gear spins faster than the
-# 3 metal gears at the same PWM — without RPM capping, RR would
-# overshoot the gear's intended speed band.
+# 3 metal gears at the same PWM.  The gear ceiling enforces a maximum
+# speed for each gear; the per-wheel PIDs naturally settle at different
+# duty cycles to reach the same RPM target given their different efficiencies.
 
 GEAR_RPM_LIMITS = {
     "N": (0, 0),         # Neutral — no drive
@@ -339,28 +344,56 @@ class WheelSpeedController:
         # limits through closed-loop control — the PID will actively
         # hold the wheels at (or below) the gear's max RPM even if
         # the commanded PWM would produce a higher speed.
+        #
+        # IMPORTANT: use proportional (ratio-preserving) scaling rather than
+        # independent per-side clamping.  Independent clamping silently erases
+        # any left/right differential introduced by the gyro heading corrector
+        # (which sets speed_l ≠ speed_r to counteract drift).  When both raw
+        # targets exceed the gear cap, both would snap to the same max_rpm,
+        # making the gyro correction have zero effect at any throttle level
+        # where the target exceeds the gear ceiling.
+        #
+        # Proportional scaling: find the faster side, scale it to max_rpm,
+        # apply the same scale factor to the slower side — their ratio is
+        # preserved exactly as commanded by the gyro/steering mixer.
         _, max_rpm = GEAR_RPM_LIMITS.get(self._gear, (0, DEFAULT_MAX_RPM))
         if max_rpm > 0:
-            target_rpm_l = min(target_rpm_l, float(max_rpm))
-            target_rpm_r = min(target_rpm_r, float(max_rpm))
+            fmax = float(max_rpm)
+            faster = max(target_rpm_l, target_rpm_r)
+            if faster > fmax:
+                scale = fmax / faster
+                target_rpm_l *= scale
+                target_rpm_r *= scale
         else:
             # Neutral or unknown — no drive
             target_rpm_l = 0.0
             target_rpm_r = 0.0
 
-        # Min-wheel sync: when driving straight (both sides commanded the
-        # same speed), cap the right-side target to RL's actual filtered
-        # RPM.  The plastic-geared RR naturally overruns the metal-geared
-        # RL at equal PWM, causing a consistent rightward drift.  By
-        # telling the RR PID "don't exceed what RL is actually doing",
-        # RR is forced to match the slower wheel and the car tracks
-        # straight.  A 5 RPM tolerance prevents micro-corrections when
-        # already in sync.  This only applies when going straight —
-        # during turns speed_l ≠ speed_r so the differential is preserved.
-        if (abs(speed_l - speed_r) < 2.0 and
-                self._rl.filtered_rpm > 10.0):
-            sync_cap = self._rl.filtered_rpm + 5.0   # 5 RPM tolerance band
-            target_rpm_r = min(target_rpm_r, sync_cap)
+        # ── Hardware-ratio runaway safety abort ─────────────────────────────
+        # The plastic RR gearbox has a LOWER gear reduction than the three
+        # metal gearboxes (FL, FR, RL).  At equal wheel speeds the RR encoder
+        # naturally reads substantially MORE RPM than the RL encoder because
+        # the encoder sits on the motor shaft, and the two gearboxes step down
+        # the shaft speed by different ratios.
+        #
+        # The previous code capped target_rpm_r to (rpm_rl + 5) whenever
+        # rpm_rr exceeded rpm_rl by just 5 RPM.  Telemetry showed this fired
+        # IMMEDIATELY during every straight run, forcing:
+        #   • RL: 95 % PWM duty (at its physical ceiling, ~163 RPM)
+        #   • RR: 18 % PWM floor   (still 242 RPM — impossible target of 168)
+        # Because RR at its stall-prevention minimum floor (18 %) still runs
+        # ~80 RPM faster than RL at full power (95 %), the cap was setting an
+        # unachievable target and the rightward drift accumulated to >20 °.
+        #
+        # Correct approach: let each PID find its own natural operating point
+        # for the given target RPM (the PIDs correctly handle the different
+        # gearbox efficiencies), and rely on the gyro heading corrector in
+        # physics_loop for fine balance.  Only abort for a genuine runaway
+        # (RR reading more than 250 RPM above RL with both sensors valid),
+        # which would indicate a sensor fault or mechanical failure, not the
+        # normal gearbox ratio difference.
+        if rpm_rl > 10.0 and (rpm_rr - rpm_rl) > 250.0:
+            target_rpm_r = min(target_rpm_r, rpm_rl + 250.0)
 
         # Run per-wheel PID controllers
         rl_pwm = self._pid_tick(target_rpm_l, rpm_rl, self._rl, duty_cap)
