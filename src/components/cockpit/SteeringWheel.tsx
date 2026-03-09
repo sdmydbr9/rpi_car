@@ -1,0 +1,159 @@
+import { useState, useRef, useCallback } from "react";
+import { useTouchTracking } from "@/hooks/useTouchTracking";
+
+interface SteeringWheelProps {
+  onAngleChange: (angle: number) => void;
+  angle: number;
+  isEnabled?: boolean;
+}
+
+export const SteeringWheel = ({ onAngleChange, angle, isEnabled = true }: SteeringWheelProps) => {
+  const wheelRef = useRef<HTMLDivElement>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const startAngleRef = useRef(0);
+  const startTouchAngleRef = useRef(0);
+
+  // RAF-throttled angle emission: only emit once per animation frame
+  const pendingAngleRef = useRef<number | null>(null);
+  const rafIdRef = useRef<number | null>(null);
+
+  const emitAngle = useCallback((newAngle: number) => {
+    pendingAngleRef.current = newAngle;
+    if (rafIdRef.current === null) {
+      rafIdRef.current = requestAnimationFrame(() => {
+        if (pendingAngleRef.current !== null) {
+          onAngleChange(pendingAngleRef.current);
+          pendingAngleRef.current = null;
+        }
+        rafIdRef.current = null;
+      });
+    }
+  }, [onAngleChange]);
+
+  const calculateAngle = useCallback((clientX: number, clientY: number) => {
+    if (!wheelRef.current) return 0;
+    const rect = wheelRef.current.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    return Math.atan2(clientY - centerY, clientX - centerX) * (180 / Math.PI);
+  }, []);
+
+  // --- Multitouch-safe touch handling via useTouchTracking ---
+  // Tracks the specific finger (by touch.identifier) on the wheel element,
+  // so holding throttle/brake with another finger won't interfere.
+  useTouchTracking(wheelRef, {
+    onTouchStart: (touch) => {
+      setIsDragging(true);
+      startTouchAngleRef.current = calculateAngle(touch.clientX, touch.clientY);
+      startAngleRef.current = angle;
+      // Haptic feedback on grab
+      navigator.vibrate?.(10);
+    },
+    onTouchMove: (touch) => {
+      const currentTouchAngle = calculateAngle(touch.clientX, touch.clientY);
+      let deltaAngle = currentTouchAngle - startTouchAngleRef.current;
+
+      // Normalize delta
+      if (deltaAngle > 180) deltaAngle -= 360;
+      if (deltaAngle < -180) deltaAngle += 360;
+
+      let newAngle = startAngleRef.current + deltaAngle;
+      // Clamp between -90 and 90
+      newAngle = Math.max(-90, Math.min(90, newAngle));
+      emitAngle(newAngle);
+    },
+    onTouchEnd: () => {
+      setIsDragging(false);
+      // Cancel any pending RAF emission and snap to center
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+        pendingAngleRef.current = null;
+      }
+      onAngleChange(0);
+    },
+  }, isEnabled);
+
+  return (
+    <div className="flex flex-col items-center justify-center h-full w-full overflow-hidden p-0.5">
+      <div
+        ref={wheelRef}
+        className={`relative cursor-grab active:cursor-grabbing touch-none select-none w-[min(95%,95vh)] h-[min(95%,95vh)] aspect-square max-w-full max-h-full ${!isEnabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+        onMouseDown={(e) => {
+          if (!isEnabled) return;
+          setIsDragging(true);
+          startTouchAngleRef.current = calculateAngle(e.clientX, e.clientY);
+          startAngleRef.current = angle;
+        }}
+        onMouseMove={(e) => {
+          if (!isDragging || !isEnabled) return;
+          const currentTouchAngle = calculateAngle(e.clientX, e.clientY);
+          let deltaAngle = currentTouchAngle - startTouchAngleRef.current;
+          if (deltaAngle > 180) deltaAngle -= 360;
+          if (deltaAngle < -180) deltaAngle += 360;
+          let newAngle = startAngleRef.current + deltaAngle;
+          newAngle = Math.max(-90, Math.min(90, newAngle));
+          onAngleChange(newAngle);
+        }}
+        onMouseUp={() => {
+          setIsDragging(false);
+          onAngleChange(0);
+        }}
+        onMouseLeave={() => {
+          if (isDragging) {
+            setIsDragging(false);
+            onAngleChange(0);
+          }
+        }}
+      >
+        {/* Steering Wheel Container */}
+        <div
+          className="steering-wheel relative w-full h-full"
+          style={{ transform: `rotate(${angle}deg)` }}
+        >
+          {/* Outer Ring */}
+          <div className="w-full h-full relative">
+            {/* Top Section */}
+            <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[70%] h-[12%] bg-gradient-to-b from-muted to-card rounded-t-full border-t border-l border-r border-primary/30" />
+            
+            {/* Left Grip */}
+            <div className="absolute left-0 top-1/2 -translate-y-1/2 w-[15%] h-[65%] carbon-fiber rounded-l-full border border-primary/20">
+              <div className="absolute inset-1 bg-gradient-to-r from-muted-foreground/20 to-transparent rounded-l-full" />
+            </div>
+            
+            {/* Right Grip */}
+            <div className="absolute right-0 top-1/2 -translate-y-1/2 w-[15%] h-[65%] carbon-fiber rounded-r-full border border-primary/20">
+              <div className="absolute inset-1 bg-gradient-to-l from-muted-foreground/20 to-transparent rounded-r-full" />
+            </div>
+            
+            {/* Bottom Section */}
+            <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-[60%] h-[10%] bg-gradient-to-t from-muted to-card rounded-b-lg border-b border-l border-r border-primary/30" />
+            
+            {/* Center Display */}
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[55%] h-[55%] racing-panel flex flex-col items-center justify-center gap-0.5">
+              {/* AMG Logo */}
+              <div className="text-[6px] sm:text-[7px] md:text-[10px] lg:text-[12px] text-primary racing-text">AMG</div>
+
+              {/* Angle Display */}
+              <div className={`text-[10px] sm:text-[14px] md:text-[20px] lg:text-[24px] racing-number ${isDragging ? 'text-primary text-glow-teal' : 'text-foreground'}`}>
+                {Math.round(angle)}°
+              </div>
+              
+              {/* Direction Indicator */}
+              <div className="flex gap-0.5">
+                <div className={`w-0.5 sm:w-1 h-[2px] sm:h-0.5 rounded-full transition-colors ${angle < -10 ? 'bg-primary glow-teal' : 'bg-muted'}`} />
+                <div className={`w-0.5 sm:w-1 h-[2px] sm:h-0.5 rounded-full transition-colors ${Math.abs(angle) <= 10 ? 'bg-primary' : 'bg-muted'}`} />
+                <div className={`w-0.5 sm:w-1 h-[2px] sm:h-0.5 rounded-full transition-colors ${angle > 10 ? 'bg-primary glow-teal' : 'bg-muted'}`} />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      {/* Instructions */}
+      <div className="text-[6px] sm:text-[7px] md:text-[9px] text-muted-foreground mt-0.5 racing-text whitespace-nowrap">
+        DRAG TO STEER
+      </div>
+    </div>
+  );
+};

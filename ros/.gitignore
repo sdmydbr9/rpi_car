@@ -1,0 +1,7 @@
+ws/build/
+ws/install/
+ws/log/
+.server_url
+.server_url.tmp
+**/__pycache__/
+**/*.pyc

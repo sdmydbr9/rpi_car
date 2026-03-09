@@ -1,0 +1,469 @@
+"""
+wheel_sync.py — Closed-Loop Wheel Speed Synchronization Controller
+
+Transparently intercepts motor PWM commands and applies per-wheel PID
+correction using live RPM feedback from 3 LM393 encoders (via Pico bridge).
+
+Hardware context:
+  - 3 metal gearbox motors: FL, FR, RL (lower RPM, higher torque)
+  - 1 plastic gearbox motor: RR (higher RPM, lower torque)
+  - Front-Left: NO encoder — estimated from RL (same side, same gearbox)
+  - 3 encoders: Rear-Left (RL), Rear-Right (RR), Front-Right (FR)
+
+Algorithm: PID + feedforward with back-calculation anti-windup,
+           asymmetric slew limiting, and EMA-filtered RPM readings.
+           Ported from motor_test.py RPM-LOCK mode (proven on hardware).
+
+Integration: Called from CarSystem._set_raw_motors() — the single
+             chokepoint for ALL motor output (manual, autopilot, hunter).
+"""
+
+import time
+import threading
+
+
+# ──────────────────────────────────────────────────────────────
+# Tuning Constants
+# ──────────────────────────────────────────────────────────────
+
+# PID gains (shared across all wheels — integral absorbs per-wheel differences)
+SYNC_KP = 0.012       # Proportional (gentle — feedforward does heavy lifting)
+SYNC_KI = 0.004       # Integral (trims steady-state error)
+SYNC_KD = 0.012       # Derivative on measurement (damps oscillation)
+SYNC_KT = 0.5         # Back-calculation anti-windup tracking gain
+
+# Feedforward: PWM% ≈ RPM × FF_GAIN  (empirical from motor_test.py)
+# Separate gains for metal vs plastic gearboxes
+FF_GAIN_METAL = 0.060    # Metal gears (FL, FR, RL): efficient, lower RPM
+FF_GAIN_PLASTIC = 0.070  # Plastic gears (RR only): need more PWM per RPM
+
+# Signal conditioning
+FILTER_ALPHA = 0.4     # EMA low-pass filter coefficient (0=smooth, 1=raw)
+
+# Slew rate limiters (PWM %/tick at 50Hz → %/second)
+SLEW_UP = 6.0          # Max PWM increase per tick (300%/s — fast ramp)
+SLEW_DOWN = 100.0      # Max PWM decrease per tick (instant cut for steering)
+
+# Anti-stall minimum PWM floors (per gearbox type)
+MIN_PWM_METAL = 8.0     # Metal gears (FL, FR, RL): run at very low power
+MIN_PWM_PLASTIC = 18.0  # Plastic gears (RR only): need this much to not stall
+
+# PWM-to-RPM conversion factor for target calculation
+# Derived from: ~300 RPM at ~20% PWM → ratio ≈ 15.0 RPM per PWM%
+# This converts commanded PWM% to a target RPM for the PID
+PWM_TO_RPM = 15.0
+
+# Stale data threshold — fall back to open-loop if Pico data is older
+STALE_THRESHOLD_S = 1.0
+
+# Minimum commanded PWM to activate sync (below this, just pass through)
+MIN_ACTIVE_PWM = 3.0
+
+# Convergence band — RPM is "on target" within this tolerance
+CONVERGENCE_BAND_RPM = 10.0
+
+# ──────────────────────────────────────────────────────────────
+# Gear-Based RPM Limits
+# ──────────────────────────────────────────────────────────────
+# Each gear defines (min_rpm, max_rpm).  The PID target is clamped
+# to this window so the car never exceeds the gear's intended speed.
+# This is critical because the plastic RR gear spins faster than the
+# 3 metal gears at the same PWM — without RPM capping, RR would
+# overshoot the gear's intended speed band.
+
+GEAR_RPM_LIMITS = {
+    "N": (0, 0),         # Neutral — no drive
+    "1": (0, 180),       # Gentle / precision maneuvering
+    "2": (0, 250),       # Moderate cruising
+    "3": (0, 320),       # Fast driving
+    "S": (0, 500),       # Sport — max safe speed
+    "R": (0, 200),       # Reverse — moderate
+}
+
+# Default RPM limit when gear is unknown
+DEFAULT_MAX_RPM = 180
+
+
+# ──────────────────────────────────────────────────────────────
+# Per-Wheel PID State
+# ──────────────────────────────────────────────────────────────
+
+class _WheelPIDState:
+    """Tracks PID state for a single wheel."""
+
+    __slots__ = (
+        'name', 'ff_gain', 'min_pwm',
+        'integral', 'filtered_rpm', 'prev_filtered_rpm',
+        'prev_output', 'target_rpm', 'actual_rpm',
+        'error', 'applied_pwm',
+    )
+
+    def __init__(self, name: str, ff_gain: float, min_pwm: float):
+        self.name = name
+        self.ff_gain = ff_gain
+        self.min_pwm = min_pwm
+        self.reset()
+
+    def reset(self):
+        self.integral = 0.0
+        self.filtered_rpm = 0.0
+        self.prev_filtered_rpm = 0.0
+        self.prev_output = 0.0
+        self.target_rpm = 0.0
+        self.actual_rpm = 0.0
+        self.error = 0.0
+        self.applied_pwm = 0.0
+
+
+# ──────────────────────────────────────────────────────────────
+# Main Controller
+# ──────────────────────────────────────────────────────────────
+
+class WheelSpeedController:
+    """
+    Closed-loop wheel speed synchronization.
+
+    Usage:
+        ctrl = WheelSpeedController(get_rpm_fn, get_duty_cap_fn)
+        # Inside _set_raw_motors:
+        fl, fr, rl, rr = ctrl.correct(speed_l, speed_r, duty_cap)
+    """
+
+    def __init__(self, get_rpm_fn, get_duty_cap_fn, get_freshness_fn=None):
+        """
+        Args:
+            get_rpm_fn:  callable() -> dict with keys 'rear_left', 'rear_right', 'front_right'
+            get_duty_cap_fn: callable() -> float (max safe duty from PowerLimiter)
+            get_freshness_fn: callable() -> bool (True if Pico data is fresh)
+        """
+        self._get_rpm = get_rpm_fn
+        self._get_duty_cap = get_duty_cap_fn
+        self._get_freshness = get_freshness_fn
+
+        # Per-wheel PID states (FL=metal, FR=metal, RL=metal, RR=plastic)
+        self._rl = _WheelPIDState('rear_left',   FF_GAIN_METAL,   MIN_PWM_METAL)
+        self._rr = _WheelPIDState('rear_right',  FF_GAIN_PLASTIC, MIN_PWM_PLASTIC)
+        self._fr = _WheelPIDState('front_right', FF_GAIN_METAL,   MIN_PWM_METAL)
+
+        # Controller state
+        self._enabled = True
+        self._status = "IDLE"       # IDLE | ACTIVE | FALLBACK | OFF
+        self._gear = "1"            # Current gear (set by CarSystem)
+        self._lock = threading.Lock()
+
+        # Telemetry snapshot (updated each tick, read by UI thread)
+        self._telemetry = {}
+
+        # Fallback tracking
+        self._fallback_count = 0
+        self._active_ticks = 0
+
+    # ── Properties ──────────────────────────────────────────
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    @enabled.setter
+    def enabled(self, value: bool):
+        self._enabled = bool(value)
+        if not self._enabled:
+            self._status = "OFF"
+            self.reset()
+
+    @property
+    def status(self) -> str:
+        return self._status
+
+    @property
+    def gear(self) -> str:
+        return self._gear
+
+    @gear.setter
+    def gear(self, value: str):
+        """Update current gear.  Called from CarSystem before each tick."""
+        self._gear = str(value) if value else "1"
+
+    # ── Core PID Tick ───────────────────────────────────────
+
+    def _pid_tick(self, target_rpm: float, actual_rpm: float,
+                  state: _WheelPIDState, duty_cap: float) -> float:
+        """
+        Run one PID iteration for a single wheel.
+
+        PID + feedforward with back-calculation anti-windup.
+        Ported from motor_test.py _pid_step (proven on hardware).
+
+        Args:
+            target_rpm: desired wheel RPM
+            actual_rpm: measured wheel RPM from encoder
+            state: per-wheel PID state object (mutated in place)
+            duty_cap: maximum allowed PWM from PowerLimiter
+
+        Returns:
+            Corrected PWM duty cycle for this wheel.
+        """
+        # Store for telemetry
+        state.target_rpm = target_rpm
+        state.actual_rpm = actual_rpm
+
+        # Low-pass EMA filter on raw RPM to reject encoder noise
+        state.prev_filtered_rpm = state.filtered_rpm
+        state.filtered_rpm = (FILTER_ALPHA * actual_rpm +
+                              (1.0 - FILTER_ALPHA) * state.filtered_rpm)
+
+        # Error (positive = too slow, need more PWM)
+        error = target_rpm - state.filtered_rpm
+        state.error = error
+
+        # Feedforward: jump-start output near correct PWM
+        ff = target_rpm * state.ff_gain
+
+        # Derivative on measurement (not error) — damps oscillation
+        # without amplifying setpoint changes.  Negative sign because
+        # rising RPM should reduce output.
+        d_rpm = state.filtered_rpm - state.prev_filtered_rpm
+        d_term = -SYNC_KD * d_rpm
+
+        # Raw (unclamped, un-slewed) PID output
+        raw = ff + state.integral + error * SYNC_KP + d_term
+
+        # Hard clamp to valid PWM range
+        clamped = max(0.0, min(duty_cap, raw))
+
+        # Asymmetric slew-rate limiter:
+        #   Moderate ramp UP  (feedforward already near target)
+        #   Fast    ramp DOWN (quick over-speed correction)
+        delta = clamped - state.prev_output
+        if delta > 0:
+            output = state.prev_output + min(delta, SLEW_UP)
+        else:
+            output = state.prev_output + max(delta, -SLEW_DOWN)
+        output = max(0.0, min(duty_cap, output))
+
+        # Anti-stall floor: when the target RPM is above a meaningful
+        # threshold, don't let PWM drop below the gearbox minimum.
+        # A very low target (< 5 RPM) means the steering mixer wants
+        # this wheel stopped — honour that and let output reach 0.
+        if target_rpm > 5.0 and output < state.min_pwm:
+            output = state.min_pwm
+
+        # Back-calculation anti-windup:
+        # integral += Ki × error + Kt × (actual_applied - raw_desired)
+        # When output is clamped/slewed, the tracking term pulls the
+        # integral back toward reality, preventing windup.
+        state.integral += SYNC_KI * error + SYNC_KT * (output - raw)
+        state.integral = max(-duty_cap, min(duty_cap, state.integral))
+
+        state.prev_output = output
+        state.applied_pwm = output
+        return output
+
+    # ── Main Correction Entry Point ─────────────────────────
+
+    def correct(self, speed_l: float, speed_r: float, duty_cap: float = 63.0):
+        """
+        Apply closed-loop wheel speed corrections.
+
+        Called from CarSystem._set_raw_motors() every tick (~50Hz).
+        Converts left/right PWM commands into target RPMs, runs PID
+        for each instrumented wheel, mirrors FR→FL.
+
+        When turning, the steering mixer already produces different
+        speed_l / speed_r values.  We convert each side's PWM to a
+        target RPM independently, so the differential ratio is
+        naturally preserved while ensuring each wheel actually
+        achieves its intended speed.
+
+        Args:
+            speed_l: commanded left-side PWM duty %
+            speed_r: commanded right-side PWM duty %
+            duty_cap: max safe duty from PowerLimiter
+
+        Returns:
+            (fl_pwm, fr_pwm, rl_pwm, rr_pwm) — corrected per-wheel duties
+        """
+        # Not enabled or too-low speed → pass through unchanged
+        if not self._enabled:
+            self._status = "OFF"
+            return speed_l, speed_r, speed_l, speed_r
+
+        if speed_l < MIN_ACTIVE_PWM and speed_r < MIN_ACTIVE_PWM:
+            self._status = "IDLE"
+            # Don't reset PIDs here — brief zero-throttle moments
+            # (e.g., between physics ticks) shouldn't wipe state
+            return speed_l, speed_r, speed_l, speed_r
+
+        # Check Pico data freshness
+        data_fresh = True
+        if self._get_freshness is not None:
+            try:
+                data_fresh = self._get_freshness()
+            except Exception:
+                data_fresh = False
+
+        if not data_fresh:
+            self._status = "FALLBACK"
+            self._fallback_count += 1
+            # Open-loop fallback: only RR (plastic) needs a boost.
+            # The 3 metal-geared motors (FL, FR, RL) pass through as-is.
+            fl = speed_l
+            fr = speed_r
+            rl = speed_l           # Metal gear — no boost needed
+            rr = speed_r * 1.15    # Plastic gear: higher RPM per PWM, boost to match
+            rr = min(duty_cap, rr)
+            self._update_telemetry(fl, fr, rl, rr, fallback=True)
+            return fl, fr, rl, rr
+
+        # Read live RPM data
+        try:
+            rpm = self._get_rpm()
+        except Exception:
+            self._status = "FALLBACK"
+            self._fallback_count += 1
+            return speed_l, speed_r, speed_l, speed_r
+
+        rpm_rl = rpm.get('rear_left', 0.0)
+        rpm_rr = rpm.get('rear_right', 0.0)
+        rpm_fr = rpm.get('front_right', 0.0)
+
+        # Convert commanded PWM to target RPMs (per side)
+        # This preserves the steering mixer's differential ratio:
+        # e.g., if turning right → speed_l=30, speed_r=15
+        #        → target_rpm_left=450, target_rpm_right=225
+        target_rpm_l = speed_l * PWM_TO_RPM
+        target_rpm_r = speed_r * PWM_TO_RPM
+
+        # Clamp target RPMs to the current gear's allowed band.
+        # This is the key mechanism that enforces gear-based speed
+        # limits through closed-loop control — the PID will actively
+        # hold the wheels at (or below) the gear's max RPM even if
+        # the commanded PWM would produce a higher speed.
+        _, max_rpm = GEAR_RPM_LIMITS.get(self._gear, (0, DEFAULT_MAX_RPM))
+        if max_rpm > 0:
+            target_rpm_l = min(target_rpm_l, float(max_rpm))
+            target_rpm_r = min(target_rpm_r, float(max_rpm))
+        else:
+            # Neutral or unknown — no drive
+            target_rpm_l = 0.0
+            target_rpm_r = 0.0
+
+        # Min-wheel sync: when driving straight (both sides commanded the
+        # same speed), cap the right-side target to RL's actual filtered
+        # RPM.  The plastic-geared RR naturally overruns the metal-geared
+        # RL at equal PWM, causing a consistent rightward drift.  By
+        # telling the RR PID "don't exceed what RL is actually doing",
+        # RR is forced to match the slower wheel and the car tracks
+        # straight.  A 5 RPM tolerance prevents micro-corrections when
+        # already in sync.  This only applies when going straight —
+        # during turns speed_l ≠ speed_r so the differential is preserved.
+        if (abs(speed_l - speed_r) < 2.0 and
+                self._rl.filtered_rpm > 10.0):
+            sync_cap = self._rl.filtered_rpm + 5.0   # 5 RPM tolerance band
+            target_rpm_r = min(target_rpm_r, sync_cap)
+
+        # Run per-wheel PID controllers
+        rl_pwm = self._pid_tick(target_rpm_l, rpm_rl, self._rl, duty_cap)
+        rr_pwm = self._pid_tick(target_rpm_r, rpm_rr, self._rr, duty_cap)
+        fr_pwm = self._pid_tick(target_rpm_r, rpm_fr, self._fr, duty_cap)
+
+        # Front-Left has no encoder — estimate from RL (same side, same
+        # metal gearbox).  RL's PID-corrected output is the best proxy
+        # for what FL needs, and it naturally preserves the steering
+        # differential without any ratio math.
+        if target_rpm_l > 0:
+            fl_pwm = rl_pwm  # Same side, same gearbox type — direct copy
+        else:
+            fl_pwm = 0.0
+        fl_pwm = max(0.0, min(duty_cap, fl_pwm))
+
+        # Hard override: when one side is commanded to 0 by the steering
+        # mixer, bypass the PID slew limiter and force immediate 0 PWM.
+        # Without this, the slew-down rate (4%/tick) causes a ~160ms lag
+        # before the inner wheels actually stop, ruining the turn.
+        if speed_l < MIN_ACTIVE_PWM:
+            fl_pwm = 0.0
+            rl_pwm = 0.0
+            self._rl.prev_output = 0.0
+            self._rl.integral = 0.0
+        if speed_r < MIN_ACTIVE_PWM:
+            fr_pwm = 0.0
+            rr_pwm = 0.0
+            self._fr.prev_output = 0.0
+            self._rr.prev_output = 0.0
+            self._fr.integral = 0.0
+            self._rr.integral = 0.0
+
+        self._status = "ACTIVE"
+        self._active_ticks += 1
+
+        self._update_telemetry(fl_pwm, fr_pwm, rl_pwm, rr_pwm)
+        return fl_pwm, fr_pwm, rl_pwm, rr_pwm
+
+    # ── Reset ───────────────────────────────────────────────
+
+    def reset(self):
+        """Zero all PID state.  Call on stop, brake, direction change."""
+        self._rl.reset()
+        self._rr.reset()
+        self._fr.reset()
+        # Don't change _enabled or _status here
+
+    # ── Telemetry ───────────────────────────────────────────
+
+    def _update_telemetry(self, fl_pwm, fr_pwm, rl_pwm, rr_pwm, fallback=False):
+        """Snapshot per-wheel data for the web UI (thread-safe read)."""
+        _, gear_max_rpm = GEAR_RPM_LIMITS.get(self._gear, (0, DEFAULT_MAX_RPM))
+        self._telemetry = {
+            'status': self._status,
+            'active_ticks': self._active_ticks,
+            'fallback_count': self._fallback_count,
+            'gear': self._gear,
+            'gear_max_rpm': gear_max_rpm,
+            'wheels': {
+                'fl': {
+                    'target_rpm': round(self._rl.target_rpm, 1),  # left-side target (same as RL)
+                    'actual_rpm': 0.0,  # no encoder
+                    'applied_pwm': round(fl_pwm, 1),
+                    'error': 0.0,
+                    'has_encoder': False,
+                },
+                'fr': {
+                    'target_rpm': round(self._fr.target_rpm, 1),
+                    'actual_rpm': round(self._fr.actual_rpm, 1),
+                    'applied_pwm': round(fr_pwm, 1),
+                    'error': round(self._fr.error, 1),
+                    'has_encoder': True,
+                    'on_target': abs(self._fr.error) <= CONVERGENCE_BAND_RPM,
+                },
+                'rl': {
+                    'target_rpm': round(self._rl.target_rpm, 1),
+                    'actual_rpm': round(self._rl.actual_rpm, 1),
+                    'applied_pwm': round(rl_pwm, 1),
+                    'error': round(self._rl.error, 1),
+                    'has_encoder': True,
+                    'on_target': abs(self._rl.error) <= CONVERGENCE_BAND_RPM,
+                },
+                'rr': {
+                    'target_rpm': round(self._rr.target_rpm, 1),
+                    'actual_rpm': round(self._rr.actual_rpm, 1),
+                    'applied_pwm': round(rr_pwm, 1),
+                    'error': round(self._rr.error, 1),
+                    'has_encoder': True,
+                    'on_target': abs(self._rr.error) <= CONVERGENCE_BAND_RPM,
+                },
+            },
+        }
+
+    def get_telemetry(self) -> dict:
+        """Return latest sync telemetry snapshot for the web UI."""
+        return self._telemetry.copy() if self._telemetry else {
+            'status': self._status,
+            'active_ticks': 0,
+            'fallback_count': 0,
+            'wheels': {},
+        }
+
+    def __repr__(self):
+        return (f"WheelSpeedController(status={self._status}, "
+                f"enabled={self._enabled}, ticks={self._active_ticks})")
