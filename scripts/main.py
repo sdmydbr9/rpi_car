@@ -56,6 +56,7 @@ from tts_local import get_tts_synthesizer
 from audio_manager import CarAudioManager
 from network_core import PiCarNetworkManager
 from drive_logger import DriveLogger
+from telemetry_postman import TelemetryPostman
 from pico_sensor_reader import (
     init_pico_reader, get_gyro_z as pico_get_gyro_z,
     get_accel_xyz as pico_get_accel_xyz,
@@ -6089,6 +6090,10 @@ def telemetry_broadcast():
 telemetry_thread = threading.Thread(target=telemetry_broadcast, daemon=True)
 telemetry_thread.start()
 
+# Start Grafana telemetry postman (2 Hz → Telegraf → InfluxDB → Grafana)
+_telemetry_postman = TelemetryPostman(car_state, car_system)
+_telemetry_postman.start()
+
 # ==========================================
 # 🌐 HTTP ENDPOINTS (kept for backwards compatibility)
 # ==========================================
@@ -6476,6 +6481,7 @@ if __name__ == "__main__":
         print("🛑 [System] Shutdown requested")
     finally:
         # Safety cleanup — car_system.cleanup() stops PWMs + releases GPIO
+        _telemetry_postman.stop()
         _drive_logger.stop()
         follow_target.stop()
         _camera_broadcaster.stop()

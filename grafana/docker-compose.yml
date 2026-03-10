@@ -1,0 +1,56 @@
+# RPi Car — Grafana telemetry stack add-on
+# Run alongside the existing Grafana Docker container on 192.168.29.105.
+#
+# Usage (on 192.168.29.105):
+#   ./server_setup.sh          ← recommended (auto-detects existing Grafana)
+#   — or —
+#   docker compose up -d       ← manual start
+
+version: "3.9"
+
+services:
+
+  # ── InfluxDB 2.7 ──────────────────────────────────────────────────────────
+  influxdb:
+    image: influxdb:2.7
+    container_name: rpicar_influxdb
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE:        setup
+      DOCKER_INFLUXDB_INIT_USERNAME:    rpicar_admin
+      DOCKER_INFLUXDB_INIT_PASSWORD:    rpicar_password_change_me
+      DOCKER_INFLUXDB_INIT_ORG:         rpicar
+      DOCKER_INFLUXDB_INIT_BUCKET:      car_telemetry
+      DOCKER_INFLUXDB_INIT_RETENTION:   30d
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: rpicar-secret-token-change-me
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+      - influxdb_config:/etc/influxdb2
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ── Telegraf 1.30 ─────────────────────────────────────────────────────────
+  telegraf:
+    image: telegraf:1.30
+    container_name: rpicar_telegraf
+    restart: unless-stopped
+    ports:
+      - "8186:8186"    # influxdb_listener — car POSTs here
+    environment:
+      INFLUX_TOKEN: rpicar-secret-token-change-me
+      INFLUX_ORG:   rpicar
+      INFLUX_URL:   http://influxdb:8086
+    volumes:
+      - ./telegraf.conf:/etc/telegraf/telegraf.conf:ro
+    depends_on:
+      influxdb:
+        condition: service_healthy
+
+volumes:
+  influxdb_data:
+  influxdb_config:

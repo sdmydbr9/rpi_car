@@ -66,6 +66,22 @@ MIN_ACTIVE_PWM = 3.0
 # Convergence band — RPM is "on target" within this tolerance
 CONVERGENCE_BAND_RPM = 10.0
 
+# RR kick-start: overcome plastic-gear static friction on idle→active transition.
+# A brief PWM burst above the normal anti-stall floor breaks the wheel free;
+# after the kick window the PID takes over and syncs RPM to the right side.
+RR_KICKSTART_PWM   = 55.0  # PWM % injected during the kick window (must exceed idle stall at ~48%)
+RR_KICKSTART_TICKS = 5     # Number of 20 ms ticks (= 100 ms)
+
+# RR stall detection + burst recovery.
+# When the wheel is commanded high PWM but encoder shows near-zero RPM for
+# several consecutive ticks (gear physically jammed), fire a brief powerful
+# burst to break static friction, then let the PID take back over.
+RR_STALL_DETECT_PWM   = 30.0   # PWM % above which a near-zero RPM counts as stall
+RR_STALL_DETECT_RPM   = 8.0    # RPM below which the wheel is "stalled"
+RR_STALL_DETECT_TICKS = 3      # Consecutive stall ticks before triggering burst
+RR_STALL_BURST_PWM    = 70.0   # Burst PWM % — strong enough to overcome plastc-gear jam
+RR_STALL_BURST_TICKS  = 3      # Burst duration (60 ms) — short to avoid overheating
+
 # ──────────────────────────────────────────────────────────────
 # Gear-Based RPM Limits
 # ──────────────────────────────────────────────────────────────
@@ -162,6 +178,14 @@ class WheelSpeedController:
         # Fallback tracking
         self._fallback_count = 0
         self._active_ticks = 0
+
+        # RR kick-start state
+        self._rr_was_idle   = True  # True when right-side commanded speed was below MIN_ACTIVE_PWM
+        self._rr_kick_ticks = 0     # Ticks remaining in the current kick-start burst
+
+        # RR stall detection state
+        self._rr_stall_ticks = 0    # Consecutive ticks where PWM high but RPM near zero
+        self._rr_burst_ticks = 0    # Ticks remaining in the current stall-burst
 
     # ── Properties ──────────────────────────────────────────
 
@@ -295,8 +319,18 @@ class WheelSpeedController:
 
         if speed_l < MIN_ACTIVE_PWM and speed_r < MIN_ACTIVE_PWM:
             self._status = "IDLE"
-            # Don't reset PIDs here — brief zero-throttle moments
-            # (e.g., between physics ticks) shouldn't wipe state
+            # Mark RR as idle so the kick-start fires on the next active tick.
+            # Also reset prev_output / integral so the PID starts from a known
+            # state rather than resuming at whatever duty was set in the last run.
+            self._rr_was_idle = True
+            self._rr_stall_ticks = 0
+            self._rr_burst_ticks = 0
+            self._rr.prev_output = 0.0
+            self._rr.integral    = 0.0
+            self._fr.prev_output = 0.0
+            self._fr.integral    = 0.0
+            self._rl.prev_output = 0.0
+            self._rl.integral    = 0.0
             return speed_l, speed_r, speed_l, speed_r
 
         # Check Pico data freshness
@@ -395,10 +429,47 @@ class WheelSpeedController:
         if rpm_rl > 10.0 and (rpm_rr - rpm_rl) > 250.0:
             target_rpm_r = min(target_rpm_r, rpm_rl + 250.0)
 
+        # RR kick-start: detect idle→active transition on the right side.
+        # When the right side was idle (speed_r ≈ 0) and is now commanded to
+        # move, arm a short PWM burst to overcome plastic-gear static friction.
+        if speed_r >= MIN_ACTIVE_PWM and self._rr_was_idle and target_rpm_r > 5.0:
+            self._rr_kick_ticks = RR_KICKSTART_TICKS
+            self._rr_stall_ticks = 0  # fresh start — don't immediately stall-detect
+        self._rr_was_idle = speed_r < MIN_ACTIVE_PWM
+
         # Run per-wheel PID controllers
         rl_pwm = self._pid_tick(target_rpm_l, rpm_rl, self._rl, duty_cap)
         rr_pwm = self._pid_tick(target_rpm_r, rpm_rr, self._rr, duty_cap)
         fr_pwm = self._pid_tick(target_rpm_r, rpm_fr, self._fr, duty_cap)
+
+        # Apply RR kick-start burst if active (overrides PID output upward only)
+        if self._rr_kick_ticks > 0:
+            rr_pwm = max(rr_pwm, min(RR_KICKSTART_PWM, duty_cap))
+            self._rr_kick_ticks -= 1
+
+        # RR stall detection + burst recovery.
+        # If the wheel is commanded significant PWM but shows near-zero RPM for
+        # several ticks in a row, the plastic gear is jammed.  Fire a short
+        # high-power burst to break the stiction, then let the PID re-converge.
+        # Only active when right side is commanded (target_rpm_r > 5) and kick
+        # is not already running (avoid double-counting the first ticks).
+        if (target_rpm_r > 5.0 and self._rr_kick_ticks == 0
+                and rr_pwm >= RR_STALL_DETECT_PWM and rpm_rr < RR_STALL_DETECT_RPM):
+            self._rr_stall_ticks += 1
+        else:
+            self._rr_stall_ticks = 0
+
+        if self._rr_stall_ticks >= RR_STALL_DETECT_TICKS:
+            self._rr_burst_ticks = RR_STALL_BURST_TICKS
+            self._rr_stall_ticks = 0  # reset so it can re-arm if still stalled
+
+        if self._rr_burst_ticks > 0:
+            rr_pwm = min(RR_STALL_BURST_PWM, duty_cap)
+            self._rr_burst_ticks -= 1
+            # Also zero the PID state so it ramps cleanly after the burst
+            if self._rr_burst_ticks == 0:
+                self._rr.prev_output = rr_pwm
+                self._rr.integral    = 0.0
 
         # Front-Left has no encoder — estimate from RL (same side, same
         # metal gearbox).  RL's PID-corrected output is the best proxy
@@ -440,6 +511,10 @@ class WheelSpeedController:
         self._rl.reset()
         self._rr.reset()
         self._fr.reset()
+        self._rr_was_idle    = True
+        self._rr_kick_ticks  = 0
+        self._rr_stall_ticks = 0
+        self._rr_burst_ticks = 0
         # Don't change _enabled or _status here
 
     # ── Telemetry ───────────────────────────────────────────
