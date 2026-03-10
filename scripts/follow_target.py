@@ -35,7 +35,6 @@ logging.basicConfig(
 # =================================================================
 import time
 import threading
-import csv
 import os
 import cv2
 import zmq
@@ -44,51 +43,9 @@ import subprocess
 import atexit
 from datetime import datetime
 
-# =================================================================
-# TELEMETRY CSV LOGGER
-# =================================================================
-_TELEM_FIELDS = [
-    'timestamp', 'dt_ms',
-    'laser_front_cm', 'sonar_front_cm',
-    'accel_x', 'accel_y', 'accel_z', 'accel_mag',
-    'gyro_z',
-    'rpm', 'battery_v', 'current_a',
-    'vision_mode', 'target_name', 'target_found',
-    'target_bbox_area', 'vision_steer_pull',
-    'avoid_state', 'raw_throttle', 'raw_steering',
-    'smooth_throttle', 'smooth_steering',
-    'motor_L', 'motor_R',
-    'sweep_active', 'sweep_esc_angle', 'sweep_esc_dist',
-    'rover_heading', 'target_bearing', 'laser_healthy',
-    'touch_x', 'touch_y', 'touch_conf',
-    'status_msg',
-]
-
-_telem_file = None
-_telem_writer = None
-_telem_lock = threading.Lock()
-
-def _init_telemetry():
-    global _telem_file, _telem_writer
-    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-    path = os.path.join(PROJECT_ROOT, 'rover_logs', f'hunter_telem_{ts}.csv')
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    _telem_file = open(path, 'w', newline='', buffering=1)
-    _telem_writer = csv.DictWriter(_telem_file, fieldnames=_TELEM_FIELDS, extrasaction='ignore')
-    _telem_writer.writeheader()
-    return path
-
+# Telemetry CSV logging removed — now handled by Telegraf/Grafana pipeline.
 def tlog(**kwargs):
-    if _telem_writer is None:
-        return
-    kwargs['timestamp'] = time.time()
-    with _telem_lock:
-        try:
-            _telem_writer.writerow(kwargs)
-        except Exception:
-            pass
-
-telem_path = _init_telemetry()
+    pass
 
 # =================================================================
 # CONFIGURATION
@@ -1019,7 +976,7 @@ def get_status() -> dict:
         'bbox_area': vision_bbox_area,
         'sensors': {
             'front_laser': round(sensor_front_cm, 1),
-            'sonar': round(sonar_front_cm, 1),
+            'laser_alt': round(sonar_front_cm, 1),
             'accel': round(accel_magnitude, 2),
             'gyro': round(gyro_z_val, 1),
         },

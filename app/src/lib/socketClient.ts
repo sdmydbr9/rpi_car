@@ -30,7 +30,6 @@ export interface TelemetryData {
   autonomous_state?: string;
   autonomous_target_speed?: number;
   sonar_distance?: number;
-  sonar_enabled?: boolean;
   camera_enabled?: boolean;
   vision_active?: boolean;
 }
@@ -140,13 +139,6 @@ export function emitEmergencyStopRelease(): void {
   if (socket && socket.connected) {
     console.log(`[UI Control] EMERGENCY STOP RELEASED`);
     socket.emit('emergency_stop_release', {});
-  }
-}
-
-export function emitSonarToggle(): void {
-  if (socket && socket.connected) {
-    console.log(`[UI Control] SONAR: TOGGLED`);
-    socket.emit('sonar_toggle', {});
   }
 }
 

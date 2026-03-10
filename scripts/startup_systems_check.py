@@ -3,7 +3,7 @@
 ⬛ TARS TACTICAL BOOT SEQUENCE
 ──────────────────────────────────────────
 Performs critical system diagnostics at boot and speaks status via AI.
-- Critical systems: Pico bridge, sonar, laser
+- Critical systems: Pico bridge, laser
 - Optional systems: camera, battery monitoring, etc.
 - Uses Gemini for TARS persona generation + ElevenLabs for TTS
 
@@ -217,7 +217,6 @@ class SystemStatus:
     def __init__(self):
         # Critical systems
         self.pico_bridge_ok = False
-        self.sonar_ok = False
         self.laser_ok = False
 
         # Optional systems
@@ -248,23 +247,6 @@ def check_pico_bridge():
             print("NO RESPONSE")
             return False
         print(f"NOMINAL (frame {packet.frame})")
-        return True
-    except Exception as e:
-        print(f"ERROR: {e}")
-        return False
-
-
-def check_front_sonar():
-    if not SENSOR_SYSTEM_AVAILABLE:
-        return False
-    try:
-        print("  [>] Pinging sonar...", end=" ", flush=True)
-        sensor_sys = SensorSystem()
-        dist = sensor_sys.get_distance()
-        if dist is None or dist < 0:
-            print("INVALID ECHO")
-            return False
-        print(f"NOMINAL ({dist:.1f} cm)")
         return True
     except Exception as e:
         print(f"ERROR: {e}")
@@ -935,12 +917,10 @@ def run_system_check() -> SystemStatus:
     print("[CRITICAL SYSTEMS]")
     print("-" * 30)
     status.pico_bridge_ok = check_pico_bridge()
-    status.sonar_ok = check_front_sonar()
     status.laser_ok = check_laser()
 
     status.critical_systems_ready = (
         status.pico_bridge_ok and
-        status.sonar_ok and
         status.laser_ok
     )
 
@@ -988,7 +968,6 @@ def generate_status_summary(status: SystemStatus) -> str:
     lines = []
     lines.append("CRITICAL DECK:")
     lines.append(f"  Pico Bridge: {'NOMINAL' if status.pico_bridge_ok else 'OFFLINE'}")
-    lines.append(f"  Sonar: {'NOMINAL' if status.sonar_ok else 'OFFLINE'}")
     lines.append(f"  Laser Array: {'NOMINAL' if status.laser_ok else 'OFFLINE'}")
     lines.append("")
     lines.append("SECONDARY DECK:")

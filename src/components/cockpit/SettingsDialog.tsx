@@ -31,7 +31,7 @@ export interface TuningConstants {
   ESCAPE_REVERSE_TIME: number;
   ESCAPE_SPIN_TIME: number;
   ESCAPE_RESUME_TIME: number;
-  // Sonar clearance
+  // Rear clearance
   REAR_CLEAR_CM: number;
   // Gyro
   CALIBRATION_TIME: number;
@@ -73,7 +73,7 @@ export const DEFAULT_TUNING: TuningConstants = {
   ESCAPE_REVERSE_TIME: 0.8,
   ESCAPE_SPIN_TIME: 0.5,
   ESCAPE_RESUME_TIME: 0.2,
-  // Sonar clearance
+  // Rear clearance
   REAR_CLEAR_CM: 20,
   // Gyro
   CALIBRATION_TIME: 2.0,
@@ -155,8 +155,8 @@ const TUNING_GROUPS: { title: string; params: ParamConfig[] }[] = [
   {
     title: "DISTANCE THRESHOLDS",
     params: [
-      { key: "CRITICAL_DIST", label: "Critical Distance", min: 5, max: 50, step: 1, unit: "cm", info: "Sonar distance that triggers P1 escape maneuver. ↑ Increase: reacts earlier. ↓ Decrease: gets closer before escaping." },
-      { key: "WARN_DIST", label: "Warning Distance", min: 30, max: 200, step: 5, unit: "cm", info: "Sonar distance that triggers P2 slalom dodge. ↑ Increase: starts dodging earlier. ↓ Decrease: approaches closer before dodging." },
+      { key: "CRITICAL_DIST", label: "Critical Distance", min: 5, max: 50, step: 1, unit: "cm", info: "Laser distance that triggers P1 escape maneuver. ↑ Increase: reacts earlier. ↓ Decrease: gets closer before escaping." },
+      { key: "WARN_DIST", label: "Warning Distance", min: 30, max: 200, step: 5, unit: "cm", info: "Laser distance that triggers P2 slalom dodge. ↑ Increase: starts dodging earlier. ↓ Decrease: approaches closer before dodging." },
       { key: "REAR_CLEAR_CM", label: "Reverse Clearance", min: 5, max: 50, step: 1, unit: "cm", info: "Minimum clearance to allow reversing during escape. ↑ Increase: needs more space. ↓ Decrease: reverses in tighter spaces." },
     ],
   },
@@ -234,10 +234,8 @@ interface SettingsDialogProps {
   imageAnalysisEnabled?: boolean;
   onImageAnalysisToggle?: (enabled: boolean) => void;
   // Sensor toggle props
-  isSonarEnabled?: boolean;
   isMPU6050Enabled?: boolean;
   isCameraEnabled?: boolean;
-  onSonarToggle?: () => void;
   onMPU6050Toggle?: () => void;
   onCameraToggle?: () => void;
   isWheelSyncEnabled?: boolean;
@@ -499,10 +497,8 @@ export const SettingsDialog = ({
   narrationConfig,
   imageAnalysisEnabled = false,
   onImageAnalysisToggle,
-  isSonarEnabled = true,
   isMPU6050Enabled = true,
   isCameraEnabled = false,
-  onSonarToggle,
   onMPU6050Toggle,
   onCameraToggle,
   isWheelSyncEnabled = true,
@@ -1056,7 +1052,6 @@ export const SettingsDialog = ({
                 {/* ───────── SENSORS ───────── */}
                 <CollapsibleGroup title="📡 SENSORS" defaultOpen={false}>
                   {[
-                    { label: 'Sonar (HC-SR04)', enabled: isSonarEnabled, onToggle: onSonarToggle, required: true },
                     { label: 'MPU6050', enabled: isMPU6050Enabled, onToggle: onMPU6050Toggle, required: true },
                     { label: 'Camera', enabled: isCameraEnabled, onToggle: onCameraToggle, required: false },
                     { label: 'Wheel Sync', enabled: isWheelSyncEnabled, onToggle: onWheelSyncToggle, required: false },

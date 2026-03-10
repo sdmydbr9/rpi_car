@@ -11,7 +11,7 @@ def main():
     print("-" * 50)
 
     # 1. Initialize the Sensor System
-    # This automatically sets up all pins (Front sonar, Laser)
+    # This automatically sets up all pins (Laser via Pico)
     try:
         car = SensorSystem()
         print(f"{'GPIO Setup':<15} | {'Done':<15} | [OK] ✅")
@@ -33,8 +33,8 @@ def main():
     except Exception as e:
         print(f"{'MPU6050':<15} | {'Pico error':<15} | [FAILED] ❌  {e}")
 
-    # 2. TEST SONAR
-    dist_front = car.get_sonar_distance_raw()
+    # 2. TEST LASER (via Pico bridge → SensorSystem.get_forward_distance)
+    dist_front = car.get_forward_distance()
     status_front = "UNKNOWN"
     if dist_front == -1:
         status_front = "[FAILED] ❌ (Timeout)"
@@ -43,7 +43,7 @@ def main():
     else:
         status_front = "[OK] ✅"
     
-    print(f"{'Sonar':<15} | {str(dist_front) + ' cm':<15} | {status_front}")
+    print(f"{'Laser':<15} | {str(dist_front) + ' cm':<15} | {status_front}")
     time.sleep(0.1)
 
     print("-" * 50)

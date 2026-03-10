@@ -55,7 +55,6 @@ from kokoro_client import get_kokoro_client
 from tts_local import get_tts_synthesizer
 from audio_manager import CarAudioManager
 from network_core import PiCarNetworkManager
-from drive_logger import DriveLogger
 from telemetry_postman import TelemetryPostman
 from pico_sensor_reader import (
     init_pico_reader, get_gyro_z as pico_get_gyro_z,
@@ -94,11 +93,6 @@ SOUNDS_DIR = os.path.join(PROJECT_ROOT, "sounds")
 # Driver 1 (Front): FL_IN1=17, FL_IN2=27, FL_ENA=12, FR_IN3=23, FR_IN4=22, FR_ENB=13
 # Driver 2 (Rear):  RL_IN1=9,  RL_IN2=11, RL_ENA=26, RR_IN3=10, RR_IN4=7,  RR_ENB=16
 
-# --- SONAR SENSOR PINS (BCM Numbering) ---
-# Sonar: TRIG → Pin 22 (GPIO 25), ECHO → Pin 18 (GPIO 24)
-SONAR_TRIG = 25  # GPIO 25 - Sonar Trigger
-SONAR_ECHO = 24  # GPIO 24 - Sonar Echo
-
 AVOID_SWERVE_ANGLE = 85  # Degrees to swerve when obstacle detected (increased for aggressive steering)
 
 # --- SPEED ENCODER (Rear-Right Wheel) ---
@@ -122,12 +116,12 @@ STEER_RATE_LIMIT_PER_TICK = 30   # Max degrees steering change per 20 ms tick (1
 MIN_SPEED_FOR_GEAR_CHANGE = 5.0  # Max current_pwm to allow forward↔reverse gear switch
 BRAKE_DECEL_RATE = 3.0           # Brake ramp-down rate (%/tick) — ~150 %/s, ~670 ms to stop from 100
 
-# --- SONAR DISTANCE THRESHOLDS (cm) ---
-SONAR_STOP_DISTANCE = 15      # Emergency stop below this distance
-SONAR_CRAWL_DISTANCE = 25      # Very slow movement (5% speed) at this distance
-SONAR_SLOW_DISTANCE = 40       # Start slowing down at this distance
-SONAR_CAUTION_DISTANCE = 60     # Reduce speed moderately at this distance
-SONAR_MAX_DISTANCE = 400        # Maximum reliable distance
+# --- LASER DISTANCE THRESHOLDS (cm) ---
+LASER_STOP_DISTANCE = 15      # Emergency stop below this distance
+LASER_CRAWL_DISTANCE = 25      # Very slow movement (5% speed) at this distance
+LASER_SLOW_DISTANCE = 40       # Start slowing down at this distance
+LASER_CAUTION_DISTANCE = 60     # Reduce speed moderately at this distance
+LASER_MAX_DISTANCE = 400        # Maximum reliable distance
 
 # --- OBSTACLE AVOIDANCE POWER SETTINGS ---
 REVERSE_POWER = 40            # Power level (%) for obstacle avoidance reverse (20-60 recommended)
@@ -373,7 +367,6 @@ _narration_config = _load_narration_config()
 SENSOR_CONFIG_FILE = os.path.join(PROJECT_ROOT, '.sensor_config.json')
 
 _SENSOR_CONFIG_DEFAULTS = {
-    'sonar_enabled': True,
     'mpu6050_enabled': True,
 }
 
@@ -1909,20 +1902,15 @@ try:
 except Exception as e:
     print(f"⚠️  Wheel sync init error: {e}")
 
-# Drive telemetry logger — starts/stops with the engine so each drive
-# session gets its own log file instead of one per service restart.
-_drive_logger = DriveLogger(source="webui")
-
-# Initialize Sensor System (servo + sonar stay on Pi)
+# Initialize Sensor System (servo + laser on Pi)
 try:
     sensor_system = SensorSystem()
-    print("✅ Sensor system initialized (Servo + Sonar)")
+    print("✅ Sensor system initialized (Servo + Laser)")
 except Exception as e:
     print(f"⚠️  Sensor system initialization error: {e}")
     # Create dummy sensor system for testing
     class DummySensorSystem:
-        def get_sonar_distance(self): return 100
-        def get_sonar_distance_raw(self): return 100
+        def get_forward_distance(self): return 100
         def set_servo_angle(self, a): pass
         def center_servo(self): pass
         def scan_sweep(self, **kw): return []
@@ -1958,18 +1946,11 @@ _TUNING_DEFAULTS = {**_AUTOPILOT_DEFAULT_TUNING, **_ENGINE_SOUND_TUNING_DEFAULTS
 # ==========================================
 # Wire up follow_target with shared hardware (like autopilot uses car_system).
 # This replaces the old standalone GPIO/Pico/SensorSystem init.
-def _get_sonar_for_hunter():
-    """Read sonar distance for hunter mode."""
-    try:
-        return sensor_system.get_sonar_distance_raw()
-    except Exception:
-        return 999
-
 follow_target.init(
     car_system=car_system,
     sensor_system=sensor_system,
     get_laser=_get_laser_for_autopilot,
-    get_sonar=_get_sonar_for_hunter,
+    get_sonar=_get_laser_for_autopilot,
     get_gyro_z_fn=pico_get_gyro_z,
     get_accel_xyz_fn=pico_get_accel_xyz,
     get_battery_voltage_fn=pico_get_battery_voltage,
@@ -2015,8 +1996,7 @@ car_state = {
     "obstacle_state": "IDLE",  # Obstacle avoidance state: IDLE, STOPPED, STEERING
     "is_braking": False,  # Flag to indicate normal brake is applied for motor control
     "heartbeat_active": True,  # Heartbeat status: True = client responding, False = lost connection
-    "sonar_distance": 100,  # Distance from sonar sensor in cm
-    "sonar_enabled": _sensor_config.get('sonar_enabled', True),   # Sonar sensor toggle
+    "laser_distance": 100,  # Distance from laser sensor in cm
     # 🤖 AUTONOMOUS DRIVING MODE
     "autonomous_mode": False,  # Smart Driver autonomous mode toggle
     "hunter_mode": False,        # Hunter target-pursuit mode toggle
@@ -2029,7 +2009,6 @@ car_state = {
     "slalom_sign": 0,               # Dodge direction: -1=left, 0=none, 1=right
     # 🚨 SENSOR HEALTH STATUS
     "sensor_status": {
-        "sonar": "OK",    # HC-SR04 ultrasonic on Pi GPIO 25/24
         "laser": "OK",          # VL53L0X laser rangefinder via Pico
         "mpu6050": "OK",
         "pico_bridge": "OK",
@@ -2309,9 +2288,6 @@ def get_smoothed_laser():
         return sum(laser_buffer) / len(laser_buffer)
     return 100  # Safe default
 
-# Backward-compat alias used by physics_loop
-def get_smoothed_sonar():
-    return get_smoothed_laser()
 
 # ==========================================
 # 🚨 SENSOR HEALTH CHECK
@@ -2324,7 +2300,6 @@ def check_sensor_health():
     Returns a dict with health status for each sensor.
     """
     sensor_status = {
-        "sonar": "OK",
         "laser": "OK",
         "mpu6050": "OK",
         "pico_bridge": "OK",
@@ -2374,24 +2349,6 @@ def check_sensor_health():
             has_error = True
     except Exception:
         sensor_status["laser"] = "FAILED"
-        has_error = True
-
-    # ── 3b. Check Sonar (HC-SR04 on Pi GPIO 25/24) ──
-    try:
-        if hasattr(sensor_system, '_sonar_available') and sensor_system._sonar_available:
-            # HC-SR04 GPIO init succeeded — try a quick ping
-            dist = sensor_system.get_sonar_distance_raw()
-            if dist > 0:
-                sensor_status["sonar"] = "OK"
-            else:
-                # Hardware present but reading failed (no echo)
-                sensor_status["sonar"] = "WARNING"
-                has_error = True
-        else:
-            sensor_status["sonar"] = "FAILED"
-            has_error = True
-    except Exception:
-        sensor_status["sonar"] = "FAILED"
         has_error = True
 
     # ── 4. Check MPU6050 Gyroscope (via Pico bridge) ──
@@ -2736,13 +2693,9 @@ def _gamepad_reader_thread():
 
                 # --- Face buttons → Gear (with Select combos) ---
                 elif event.code in ('BTN_SOUTH', 'BTN_A') and event.state == 1:
-                    if _gamepad_select_held:
-                        # Select + A → Toggle Sonar
-                        _gamepad_toggle_sonar()
-                    else:
-                        car_state["gamepad_gear"] = "1"
-                        car_state["gear"] = "1"
-                        print("🎮 [Gamepad] Gear → 1")
+                    car_state["gamepad_gear"] = "1"
+                    car_state["gear"] = "1"
+                    print("🎮 [Gamepad] Gear → 1")
                 elif event.code in ('BTN_EAST', 'BTN_B') and event.state == 1:
                     car_state["gamepad_gear"] = "2"
                     car_state["gear"] = "2"
@@ -2849,9 +2802,6 @@ def _gamepad_toggle_engine():
         car_state["is_braking"] = False
         car_audio.set_engine_running(True)
         print("🎮 [Gamepad] ENGINE: STARTED")
-        # Start a new drive-session log.
-        if not _drive_logger.is_running:
-            _drive_logger.start(source="gamepad")
         # Trigger startup check (same as on_engine_start)
         try:
             _trigger_startup_check_async(
@@ -2924,8 +2874,6 @@ def _gamepad_engine_off():
         pass
     car_audio.set_engine_running(False)
     print("🎮 [Gamepad] SELECT×2 → ENGINE OFF (kill-switch)")
-    # Close the drive-session log.
-    _drive_logger.stop()
     try:
         socketio.emit('gamepad_start_pressed', {'engine_running': False})
     except Exception:
@@ -2984,7 +2932,6 @@ def _gamepad_toggle_autopilot():
         car_state["autonomous_mode"] = True
         car_state["autonomous_state"] = "CRUISING"
         car_state["last_obstacle_side"] = "none"
-        car_state["sonar_enabled"] = True
         try:
             autopilot.start()
         except Exception:
@@ -3098,9 +3045,6 @@ def _gamepad_hot_start():
     # Start engine sounds (ignition + idle loop)
     car_audio.set_engine_running(True)
     print("🎮 [Gamepad] HOT START → ENGINE ON, sounds started, gamepad enabled")
-    # Start a new drive-session log.
-    if not _drive_logger.is_running:
-        _drive_logger.start(source="gamepad_hot_start")
 
     # Run startup check in background
     try:
@@ -3123,36 +3067,6 @@ def _gamepad_hot_start():
         pass
 
 
-# ------------------------------------------------------------------
-# Helper: Select + A → Toggle Sonar sensor
-# ------------------------------------------------------------------
-def _gamepad_toggle_sonar():
-    """Toggle sonar sensor from gamepad Select+A combo.
-
-    Mirrors the on_sonar_toggle socket handler logic.
-    Blocked while autopilot is active for safety.
-    """
-    if car_state.get("autonomous_mode", False):
-        print("🎮 [Gamepad] Select+A → SONAR toggle BLOCKED (autopilot active)")
-        return
-
-    car_state["sonar_enabled"] = not car_state["sonar_enabled"]
-    _sensor_config['sonar_enabled'] = car_state["sonar_enabled"]
-    _save_sensor_config(_sensor_config)
-    state = '✅ ON' if car_state["sonar_enabled"] else '❌ OFF'
-    print(f"🎮 [Gamepad] Select+A → SONAR: {state}")
-
-    try:
-        socketio.emit('gamepad_sensor_toggle', {
-            'sensor': 'sonar',
-            'enabled': car_state["sonar_enabled"],
-        })
-    except Exception:
-        pass
-
-
-# ------------------------------------------------------------------
-# Helper: Select + X → Toggle IR sensor
 # ------------------------------------------------------------------
 # Helper: LT + RT triggers → Toggle autoaccelerate
 # ------------------------------------------------------------------
@@ -3299,12 +3213,9 @@ def physics_loop():
         car_state["right_obstacle"] = False
         
         # --- CHECK LASER SENSOR (Moving-Average Filtered) ---
-        if car_state["sonar_enabled"]:
-            sonar_distance = get_smoothed_laser()
-        else:
-            sonar_distance = 100  # Default safe distance when disabled
+        laser_distance = get_smoothed_laser()
         
-        car_state["sonar_distance"] = round(sonar_distance, 1)
+        car_state["laser_distance"] = round(laser_distance, 1)
         
         # --- VISION ACTIVATION FOR MANUAL MODE ---
         # Activate vision DNN when driving forward in manual mode (only if camera + CV enabled)
@@ -3362,15 +3273,15 @@ def physics_loop():
         # 
         # HOWEVER: Emergency Safety Override - even in autonomous mode, if sensors detect
         # imminent collision, immediately cut power and brake to prevent damage.
-        emergency_stop_distance = 8   # Emergency stop if sonar < 8cm (immediate danger)
-        # Sonar sensor faces FORWARD.  When the car is in Reverse
+        emergency_stop_distance = 8   # Emergency stop if laser < 8cm (immediate danger)
+        # Laser sensor faces FORWARD.  When the car is in Reverse
         # gear it is driving AWAY from whatever the sensor sees, so the
         # emergency override must not fire — otherwise the car can never
         # back away from a front obstacle.
         is_forward_gear = car_state["gear"] != "R"
-        emergency_sonar_override = car_state["sonar_enabled"] and sonar_distance < emergency_stop_distance and is_forward_gear
+        emergency_laser_override = laser_distance < emergency_stop_distance and is_forward_gear
         
-        if emergency_sonar_override:
+        if emergency_laser_override:
             # EMERGENCY OVERRIDE: Immediate stop regardless of mode
             car_state["current_pwm"] = 0
             car_state["is_braking"] = True
@@ -3386,14 +3297,14 @@ def physics_loop():
             # the emergency brake GPIO is applied below by the motor-output
             # section; the module will detect the obstacle on its next tick.
         elif not car_state["autonomous_mode"] and not car_state["hunter_mode"]:
-            # Sonar-only obstacle detection
-            sonar_obstacle_detected = car_state["sonar_enabled"] and sonar_distance < SONAR_STOP_DISTANCE
-            sonar_too_close = car_state["sonar_enabled"] and sonar_distance < SONAR_CRAWL_DISTANCE
+            # Laser-based obstacle detection
+            obstacle_detected = laser_distance < LASER_STOP_DISTANCE
+            too_close = laser_distance < LASER_CRAWL_DISTANCE
             
-            if sonar_obstacle_detected and gas:
+            if obstacle_detected and gas:
                 if obstacle_state == "IDLE":
                     # Trigger: Obstacle detected, enter appropriate avoidance state
-                    if sonar_too_close:
+                    if too_close:
                         obstacle_state = "REVERSING"
                         car_state["obstacle_state"] = "REVERSING"
                     else:
@@ -3416,7 +3327,7 @@ def physics_loop():
                     car_state["steer_angle"] = target_steer_angle
                     steering_timer += 1
                     
-                    if not sonar_obstacle_detected:
+                    if not obstacle_detected:
                         obstacle_state = "IDLE"
                         car_state["obstacle_state"] = "IDLE"
                         car_state["steer_angle"] = user_angle
@@ -3498,18 +3409,18 @@ def physics_loop():
                         target = max_s if (gas and gear != "N") else 0
                         if gas and current < min_s: current = min_s
                     
-                    # --- SONAR-BASED SPEED REDUCTION ---
-                    if car_state["sonar_enabled"] and target > 0:
-                        if sonar_distance < SONAR_STOP_DISTANCE:
+                    # --- LASER-BASED SPEED REDUCTION ---
+                    if target > 0:
+                        if laser_distance < LASER_STOP_DISTANCE:
                             # Emergency stop - too close!
                             target = 0
-                        elif sonar_distance < SONAR_CRAWL_DISTANCE:
+                        elif laser_distance < LASER_CRAWL_DISTANCE:
                             # Very close - crawl speed (5% max)
                             target = min(target, 5)
-                        elif sonar_distance < SONAR_SLOW_DISTANCE:
+                        elif laser_distance < LASER_SLOW_DISTANCE:
                             # Close - very slow movement (15% max)
                             target = min(target, 15)
-                        elif sonar_distance < SONAR_CAUTION_DISTANCE:
+                        elif laser_distance < LASER_CAUTION_DISTANCE:
                             # Getting close - moderate speed (40% max)
                             target = min(target, 40)
                     
@@ -3542,7 +3453,7 @@ def physics_loop():
                 car_state["is_braking"] = False
         
         elif obstacle_state == "STEERING":
-            # Use sonar-reduced speeds during steering
+            # Use laser-reduced speeds during steering
             if car_state["speed_limit_enabled"]:
                 target = car_state["speed_limit"] if gas else 0
             else:
@@ -3551,15 +3462,15 @@ def physics_loop():
                 target = max_s if gas else 0
                 if gas and current < min_s: current = min_s
             
-            # Apply sonar speed reduction even during steering
-            if car_state["sonar_enabled"] and target > 0:
-                if sonar_distance < SONAR_STOP_DISTANCE:
+            # Apply laser speed reduction even during steering
+            if target > 0:
+                if laser_distance < LASER_STOP_DISTANCE:
                     target = 0
-                elif sonar_distance < SONAR_CRAWL_DISTANCE:
+                elif laser_distance < LASER_CRAWL_DISTANCE:
                     target = min(target, 5)
-                elif sonar_distance < SONAR_SLOW_DISTANCE:
+                elif laser_distance < LASER_SLOW_DISTANCE:
                     target = min(target, 15)
-                elif sonar_distance < SONAR_CAUTION_DISTANCE:
+                elif laser_distance < LASER_CAUTION_DISTANCE:
                     target = min(target, 40)
             
             # Hard dynamic voltage cap on any target
@@ -3601,8 +3512,7 @@ def physics_loop():
         # Horn warning: Only during autopilot when obstacle is very close (< 10cm)
         horn_audio = (
             car_state.get("autonomous_mode", False)
-            and car_state["sonar_enabled"]
-            and sonar_distance < 10
+            and laser_distance < 10
         )
         car_audio.update_runtime_state(
             accelerating=accelerating_audio,
@@ -3726,48 +3636,6 @@ def physics_loop():
                 )
         except Exception as e:
             print(f"❌ [Physics] Motor GPIO error: {e}")
-
-        # ── Comprehensive drive telemetry logging ────────────────
-        if _drive_logger.is_running:
-            try:
-                pkt = pico_get_sensor_packet()
-                sync_telem = car_system.get_sync_telemetry()
-                wheels = sync_telem.get('wheels', {})
-                _drive_logger.log_tick({
-                    'laser_front_mm': pkt.laser_mm if pkt else -1,
-                    'sonar_front_cm': round(sonar_distance, 1),
-                    'accel_x': round(pkt.accel_x, 4) if pkt else 0,
-                    'accel_y': round(pkt.accel_y, 4) if pkt else 0,
-                    'accel_z': round(pkt.accel_z, 4) if pkt else 0,
-                    'gyro_x': round(pkt.gyro_x, 2) if pkt else 0,
-                    'gyro_y': round(pkt.gyro_y, 2) if pkt else 0,
-                    'gyro_z': round(pkt.gyro_z, 2) if pkt else 0,
-                    'temp_c': round(pkt.temp_c, 1) if pkt else 0,
-                    'battery_mv': round(pkt.adc_a0, 1) if pkt else 0,
-                    'current_mv': round(pkt.adc_a1, 1) if pkt else 0,
-                    'rpm_rear_left': round(pkt.rpm_rear_left, 1) if pkt else 0,
-                    'rpm_rear_right': round(pkt.rpm_rear_right, 1) if pkt else 0,
-                    'rpm_front_right': round(pkt.rpm_front_right, 1) if pkt else 0,
-                    'cmd_pwm_left': round(left_motor_speed, 1),
-                    'cmd_pwm_right': round(right_motor_speed, 1),
-                    'applied_pwm_fl': round(wheels.get('fl', {}).get('applied_pwm', 0), 1),
-                    'applied_pwm_fr': round(wheels.get('fr', {}).get('applied_pwm', 0), 1),
-                    'applied_pwm_rl': round(wheels.get('rl', {}).get('applied_pwm', 0), 1),
-                    'applied_pwm_rr': round(wheels.get('rr', {}).get('applied_pwm', 0), 1),
-                    'gear': gear,
-                    'throttle_input': round(car_state.get('current_pwm', 0), 1),
-                    'steering_input': round(car_state.get('user_steer_angle', 0), 1),
-                    'is_braking': car_state.get('is_braking', False),
-                    'is_forward': gear != 'R',
-                    'sync_status': sync_telem.get('status', 'OFF'),
-                    'target_rpm_left': round(wheels.get('rl', {}).get('target_rpm', 0), 1),
-                    'target_rpm_right': round(wheels.get('rr', {}).get('target_rpm', 0), 1),
-                    'gyro_heading_deg': car_state.get('current_heading', 0.0),
-                    'gyro_correction_pct': car_state.get('pid_correction', 0.0),
-                    'gyro_active': _heading_locked,
-                })
-            except Exception:
-                pass  # Never let logging crash the drive loop
 
         time.sleep(0.02)  # 20ms loop = 50Hz (2.5x faster reaction than 50ms)
 
@@ -4246,7 +4114,6 @@ def enable_autonomous():
     car_state["autonomous_mode"] = True
     car_state["autonomous_state"] = State.CRUISING.value
     car_state["last_obstacle_side"] = "none"
-    car_state["sonar_enabled"] = True
     autopilot.start()
     print(f"🤖 SMART DRIVER: ENABLED - Laser-scanner autonomous active")
     return "AUTONOMOUS_ENABLED"
@@ -4422,7 +4289,6 @@ def on_connect():
     print(f"✅ [Narration] Sent config sync with {len(cached_models)} cached models (api_key_set={bool(api_key)})")
     # Send persisted sensor toggle states so client syncs immediately
     emit('sensor_config_sync', {
-        'sonar_enabled': car_state['sonar_enabled'],
         'mpu6050_enabled': car_state['mpu6050_enabled'],
     })
     # Send startup check config
@@ -4501,10 +4367,6 @@ def on_engine_start(data=None):
     car_audio.set_engine_running(True)
     print(f"\n⚙️ [UI Control] 🔊 ENGINE: STARTED")
 
-    # Start a new drive-session log whenever the engine is turned on.
-    if not _drive_logger.is_running:
-        _drive_logger.start(source="webui")
-
     # Auto-run startup AI check when engine transitions OFF -> ON.
     started, reason = _trigger_startup_check_async(
         client_id=request.sid,
@@ -4537,8 +4399,6 @@ def on_engine_stop(data=None):
         pass
     car_audio.set_engine_running(False)
     print(f"\n⚙️ [UI Control] 🔊 ENGINE: STOPPED")
-    # Close the drive-session log for this session.
-    _drive_logger.stop()
     emit('engine_response', {'status': 'ok', 'running': False})
 
 
@@ -4695,23 +4555,6 @@ def on_gear_change(data):
         print(f"\n⚠️ [UI Control] ❌ Invalid gear: {gear}")
         emit('gear_response', {'status': 'error', 'message': 'Invalid gear'})
 
-@socketio.on('drive_log_start')
-def on_drive_log_start(data=None):
-    """Start recording comprehensive drive telemetry to CSV."""
-    if not _drive_logger.is_running:
-        _drive_logger.start()
-    emit('drive_log_response', {'status': 'ok', 'recording': True,
-                                'file': _drive_logger.filepath})
-
-@socketio.on('drive_log_stop')
-def on_drive_log_stop(data=None):
-    """Stop recording drive telemetry."""
-    filepath = _drive_logger.filepath
-    ticks = _drive_logger.tick_count
-    _drive_logger.stop()
-    emit('drive_log_response', {'status': 'ok', 'recording': False,
-                                'file': filepath, 'rows': ticks})
-
 @socketio.on('emergency_stop')
 def on_emergency_stop(data):
     """Handle emergency brake toggle - when ON, apply brakes and set gear to Neutral"""
@@ -4799,19 +4642,6 @@ def on_wheel_sync_toggle(data):
         'status': 'ok',
         'wheel_sync_enabled': new_state,
     })
-
-@socketio.on('sonar_toggle')
-def on_sonar_toggle(data):
-    """Handle sonar sensor toggle"""
-    # Block Sonar toggle when in autonomous mode for safety
-    if car_state["autonomous_mode"]:
-        emit('sonar_response', {'status': 'blocked', 'sonar_enabled': car_state["sonar_enabled"], 'message': 'Cannot toggle Sonar sensor in autonomous mode'})
-        return
-    
-    car_state["sonar_enabled"] = not car_state["sonar_enabled"]
-    _sensor_config['sonar_enabled'] = car_state["sonar_enabled"]
-    _save_sensor_config(_sensor_config)
-    emit('sonar_response', {'status': 'ok', 'sonar_enabled': car_state["sonar_enabled"]})
 
 @socketio.on('mpu6050_toggle')
 def on_mpu6050_toggle(data):
@@ -5126,8 +4956,6 @@ def on_autonomous_enable(data):
     # Disable hunter mode if active (mutually exclusive)
     if car_state.get("hunter_mode", False):
         _stop_hunter()
-    # Force sonar enabled in autonomous mode for safety
-    car_state["sonar_enabled"] = True  # keep flag for UI compat (now reads laser)
     autopilot.start()
     print(f"\n⚙️ [UI Control] 🤖 SMART DRIVER: ENABLED - Laser-scanner autonomous active")
     emit('autonomous_response', {'status': 'ok', 'autonomous_enabled': True})
@@ -5642,7 +5470,6 @@ def _trigger_startup_check_async(client_id=None, source="manual", require_enable
                 'critical_ok': status.critical_systems_ready,
                 'all_ok': status.all_systems_ready,
                 'pico_bridge': status.pico_bridge_ok,
-                'sonar': status.sonar_ok,
                 'laser': status.laser_ok,
                 'mpu6050': status.mpu6050_ok,
                 'encoder': status.encoder_ok,
@@ -6041,8 +5868,7 @@ def telemetry_broadcast():
                 "hunter_mode": car_state["hunter_mode"],
                 "autonomous_state": car_state["autonomous_state"],
                 "autonomous_target_speed": car_system._current_speed if car_state["autonomous_mode"] else 0,
-                "sonar_distance": car_state["sonar_distance"],
-                "sonar_enabled": car_state["sonar_enabled"],
+                "sonar_distance": car_state["laser_distance"],
                 "mpu6050_enabled": car_state["mpu6050_enabled"],
                 # 🧭 MPU6050 Accelerometer telemetry
                 "accel_x": accel_x,
@@ -6157,8 +5983,7 @@ def telemetry():
         "autonomous_mode": car_state["autonomous_mode"],
         "autonomous_state": car_state["autonomous_state"],
         "autonomous_target_speed": car_state["autonomous_target_speed"],
-        "sonar_distance": car_state["sonar_distance"],
-        "sonar_enabled": car_state["sonar_enabled"],
+        "sonar_distance": car_state["laser_distance"],
         # 🔋 Battery / power telemetry
         "battery_voltage": car_state.get("battery_voltage", -1),
         "current_amps": car_state.get("current_amps", -1),
@@ -6503,7 +6328,6 @@ if __name__ == "__main__":
     finally:
         # Safety cleanup — car_system.cleanup() stops PWMs + releases GPIO
         _telemetry_postman.stop()
-        _drive_logger.stop()
         follow_target.stop()
         _camera_broadcaster.stop()
         _h264_rtsp_service.stop()

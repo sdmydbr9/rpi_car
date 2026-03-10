@@ -184,7 +184,7 @@ class DistanceSensor:
     """
     Wraps a distance-read callable with timeout protection and median filtering.
 
-    Works with any callable that returns distance in cm (VL53L0X, sonar, etc.).
+    Works with any callable that returns distance in cm (VL53L0X laser, etc.).
     Adds a 0.15 s thread-level timeout as a safety net, plus a 2-sample rolling
     median filter to reject noise spikes.
     """

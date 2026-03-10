@@ -48,7 +48,6 @@ const convertSensorStatus = (
   oldStatus: Record<string, string>
 ): SensorStatus[] => {
   const sensorNameMap: Record<string, string> = {
-    front_sonar: 'Sonar (HC-SR04)',
     laser: 'Laser (VL53L0X)',
     mpu6050: 'MPU6050',
     pico_bridge: 'PICO Bridge',
@@ -95,10 +94,6 @@ export const CockpitController = () => {
   const [serverIp, setServerIp] = useState("");
   const [isEmergencyStop, setIsEmergencyStop] = useState(false);
   const [isAutoMode, setIsAutoMode] = useState(false);
-  const [isSonarEnabled, setIsSonarEnabled] = useState(() => {
-    const saved = localStorage.getItem('sonarEnabled');
-    return saved !== null ? saved === 'true' : true;
-  });
   const [isMPU6050Enabled, setIsMPU6050Enabled] = useState(() => {
     const saved = localStorage.getItem('mpu6050Enabled');
     return saved !== null ? saved === 'true' : true;
@@ -120,11 +115,10 @@ export const CockpitController = () => {
   const [isEngineRunning, setIsEngineRunning] = useState(false);
   // Autonomous telemetry state
   const [autonomousState, setAutonomousState] = useState<string>("CRUISING");
-  const [sonarDistance, setSonarDistance] = useState<number>(100);
+  const [laserDistance, setLaserDistance] = useState<number>(100);
   const [autonomousTargetSpeed, setAutonomousTargetSpeed] = useState<number>(0);
   // Sensor health state
   const [sensors, setSensors] = useState<SensorStatus[]>([
-    { name: 'Sonar (HC-SR04)', status: 'ok' },
     { name: 'Laser (VL53L0X)', status: 'ok' },
     { name: 'MPU6050', status: 'ok' },
     { name: 'PICO Bridge', status: 'ok' },
@@ -461,10 +455,6 @@ export const CockpitController = () => {
       if (data.engine_running !== undefined) {
         setIsEngineRunning(data.engine_running);
       }
-      if (data.sonar_enabled !== undefined) {
-        setIsSonarEnabled(data.sonar_enabled);
-        localStorage.setItem('sonarEnabled', String(data.sonar_enabled));
-      }
       if (data.mpu6050_enabled !== undefined) {
         setIsMPU6050Enabled(data.mpu6050_enabled);
         localStorage.setItem('mpu6050Enabled', String(data.mpu6050_enabled));
@@ -664,12 +654,8 @@ export const CockpitController = () => {
       // Update autonomous telemetry
       if (data.autonomous_mode !== undefined) setIsAutopilotRunning(data.autonomous_mode);
       if (data.autonomous_state) setAutonomousState(data.autonomous_state);
-      if (data.sonar_distance !== undefined) setSonarDistance(data.sonar_distance);
+      if (data.sonar_distance !== undefined) setLaserDistance(data.sonar_distance);
       if (data.autonomous_target_speed !== undefined) setAutonomousTargetSpeed(data.autonomous_target_speed);
-      if (data.sonar_enabled !== undefined) {
-        setIsSonarEnabled(data.sonar_enabled);
-        localStorage.setItem('sonarEnabled', String(data.sonar_enabled));
-      }
       if (data.mpu6050_enabled !== undefined) {
         setIsMPU6050Enabled(data.mpu6050_enabled);
         localStorage.setItem('mpu6050Enabled', String(data.mpu6050_enabled));
@@ -763,10 +749,6 @@ export const CockpitController = () => {
     // Subscribe to gamepad Select+A / Select+X sensor toggle events
     socketClient.onGamepadSensorToggle((data) => {
       console.log('🎮 [Gamepad] Sensor toggle —', data.sensor, ':', data.enabled);
-      if (data.sensor === 'sonar') {
-        setIsSonarEnabled(data.enabled);
-        localStorage.setItem('sonarEnabled', String(data.enabled));
-        }
     });
 
     // Subscribe to gamepad LT+RT autoaccelerate toggle events
@@ -1040,20 +1022,6 @@ export const CockpitController = () => {
     }
   }, [isEmergencyStop, isAutoMode, isConnected]);
 
-  const handleSonarToggle = useCallback(() => {
-    console.log('🎮 SONAR sensor toggle');
-    if (isAutopilotRunning) {
-      console.log('🚫 Sonar sensor cannot be toggled in autonomous mode');
-      return;
-    }
-    setIsSonarEnabled(prev => {
-      const newState = !prev;
-      localStorage.setItem('sonarEnabled', String(newState));
-      return newState;
-    });
-    socketClient.emitSonarToggle();
-  }, [isAutopilotRunning]);
-
   const handleMPU6050Toggle = useCallback(() => {
     console.log('🎮 MPU6050 sensor toggle');
     if (isAutopilotRunning) {
@@ -1142,7 +1110,6 @@ export const CockpitController = () => {
     } else {
       // Check required sensors before enabling autopilot
       const disabledSensors: string[] = [];
-      if (!isSonarEnabled) disabledSensors.push('Laser (VL53L0X)');
       if (!isMPU6050Enabled) disabledSensors.push('MPU6050');
 
       if (disabledSensors.length > 0) {
@@ -1154,7 +1121,7 @@ export const CockpitController = () => {
       }
       socketClient.emitAutopilotEnable();
     }
-  }, [eBrakeActive, isEmergencyStop, isAutopilotRunning, isSonarEnabled, isMPU6050Enabled, isConnected]);
+  }, [eBrakeActive, isEmergencyStop, isAutopilotRunning, isMPU6050Enabled, isConnected]);
 
   const handleEngineStart = useCallback(() => {
     console.log('🔧 Engine START button clicked');
@@ -1430,10 +1397,8 @@ export const CockpitController = () => {
           onImageAnalysisToggle={handleImageAnalysisToggle}
           ttsUnlocked={ttsUnlocked}
           onUnlockAudio={unlockTTS}
-          isSonarEnabled={isSonarEnabled}
           isMPU6050Enabled={isMPU6050Enabled}
           isCameraEnabled={isCameraEnabled}
-          onSonarToggle={isConsoleMode ? noopVoid : handleSonarToggle}
           onMPU6050Toggle={isConsoleMode ? noopVoid : handleMPU6050Toggle}
           onCameraToggle={isConsoleMode ? noopVoid : handleCameraToggle}
           isWheelSyncEnabled={isWheelSyncEnabled}
@@ -1510,7 +1475,7 @@ export const CockpitController = () => {
               <AutopilotTelemetry
                 status={autonomousState as AutopilotStatus}
                 accelerationPercent={autonomousTargetSpeed}
-                distanceToObstacle={sonarDistance}
+                distanceToObstacle={laserDistance}
                 eBrakeActive={eBrakeActive}
                 isRunning={isAutopilotRunning}
                 targetYaw={targetYaw}
@@ -1531,12 +1496,10 @@ export const CockpitController = () => {
                 onGearChange={isConsoleMode ? noopGear : handleGearChange}
                 isEmergencyStop={isEmergencyStop}
                 isAutoMode={isAutoMode}
-                isSonarEnabled={isSonarEnabled}
                 isAutopilotEnabled={isAutopilotEnabled}
                 eBrakeActive={eBrakeActive}
                 onEmergencyStop={isConsoleMode ? noopVoid : handleEmergencyStop}
                 onAutoMode={isConsoleMode ? noopVoid : handleAutoMode}
-                onSonarToggle={isConsoleMode ? noopVoid : handleSonarToggle}
                 onCameraToggle={isConsoleMode ? noopVoid : handleCameraToggle}
                 onTargetOpen={isConsoleMode ? noopVoid : handleTargetOpen}
                 isCameraEnabled={isCameraEnabled}

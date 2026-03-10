@@ -1,11 +1,10 @@
 """
-sensors.py — Laser Scanner (VL53L0X via Pico on Pan/Tilt Gimbal) + Sonar
+sensors.py — Laser Scanner (VL53L0X via Pico on Pan/Tilt Gimbal)
 
 Hardware
 ────────
   VL53L0X          Pico I2C — time-of-flight laser via UART bridge
   Pan/Tilt Gimbal  Pico GP2/GP3 — controlled via UART PT: protocol
-  HC-SR04 Sonar    GPIO 25/24 — stays on Pi (ultrasonic forward)
 
 The VL53L0X laser is mounted on the camera pan/tilt gimbal (Pico servos).
 Scanning sweeps the pan servo via UART commands while tilt stays centred.
@@ -43,9 +42,6 @@ except ImportError:
     print("⚠️  Pico bridge unavailable — laser will return defaults")
 
 # --- PIN CONFIGURATION ---
-# HC-SR04 Ultrasonic Sonar (stays on Pi, faces forward)
-SONAR_TRIG = 25
-SONAR_ECHO = 24
 
 # --- PAN/TILT CONSTANTS ---
 _PAN_CENTER  = 90
@@ -56,7 +52,7 @@ _SETTLE_TIME = 0.05     # 50 ms settle after each pan move
 
 
 class SensorSystem:
-    """Manages the laser scanner (VL53L0X on pan/tilt gimbal via Pico) and sonar."""
+    """Manages the laser scanner (VL53L0X on pan/tilt gimbal via Pico)."""
 
     def __init__(self):
         # 1. GPIO mode
@@ -71,19 +67,7 @@ class SensorSystem:
         # 2. Laser on pan/tilt (controlled via Pico UART, no Pi GPIO needed)
         self._laser_available = _pico_available
 
-        # 3. HC-SR04 Ultrasonic Sonar (stays on Pi, forward-facing)
-        self._sonar_available = False
-        try:
-            GPIO.setup(SONAR_TRIG, GPIO.OUT)
-            GPIO.setup(SONAR_ECHO, GPIO.IN)
-            GPIO.output(SONAR_TRIG, False)
-            time.sleep(0.05)
-            self._sonar_available = True
-            print("📡 Sonar: Connected (HC-SR04, TRIG=GPIO25, ECHO=GPIO24)")
-        except Exception as e:
-            print(f"⚠️  Sonar: Init failed — {e}")
-
-        # 4. Centre the pan/tilt on start-up
+        # 3. Centre the pan/tilt on start-up
         _pico_send_center()
         time.sleep(0.3)
         print("🎯 Laser scanner ready (pan/tilt centred via Pico)")
@@ -151,53 +135,17 @@ class SensorSystem:
         return self.get_forward_distance()
 
     def get_sonar_distance_raw(self):
-        """Read HC-SR04 ultrasonic distance in cm.
-
-        Returns distance in cm, or -1 on timeout/error.
-        """
-        if not self._sonar_available:
-            return -1
-        try:
-            # Trigger pulse
-            GPIO.output(SONAR_TRIG, True)
-            time.sleep(0.00001)
-            GPIO.output(SONAR_TRIG, False)
-
-            # Wait for echo HIGH (with timeout)
-            pulse_start = time.time()
-            timeout = pulse_start + 0.06   # 60 ms ≈ ~10 m max
-            while GPIO.input(SONAR_ECHO) == 0:
-                pulse_start = time.time()
-                if pulse_start > timeout:
-                    return -1
-
-            # Wait for echo LOW
-            pulse_end = time.time()
-            timeout = pulse_end + 0.06
-            while GPIO.input(SONAR_ECHO) == 1:
-                pulse_end = time.time()
-                if pulse_end > timeout:
-                    return -1
-
-            duration = pulse_end - pulse_start
-            distance = round(duration * 17150, 1)
-
-            # Sanity: ignore readings > 400 cm (HC-SR04 max)
-            if distance > 400:
-                return -1
-
-            return distance
-        except Exception:
-            return -1
+        """Alias → get_forward_distance() for backward compat. Sonar hardware removed."""
+        return self.get_forward_distance()
 
     # Backward-compat aliases
     def get_front_sonar_distance(self):
-        """Alias → get_sonar_distance_raw() for backward compatibility."""
-        return self.get_sonar_distance_raw()
+        """Alias → get_forward_distance() for backward compatibility."""
+        return self.get_forward_distance()
 
     def get_rear_sonar_distance(self):
-        """Alias → get_sonar_distance_raw() for backward compatibility."""
-        return self.get_sonar_distance_raw()
+        """Alias → get_forward_distance() for backward compatibility."""
+        return self.get_forward_distance()
 
     # ──────────────────────────────────────────────────
     #  Full sweep scan (-30° to +30° in STEP increments)

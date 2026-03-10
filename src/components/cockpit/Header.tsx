@@ -40,10 +40,8 @@ interface HeaderProps {
   ttsUnlocked?: boolean;
   onUnlockAudio?: () => void;
   // Sensor toggles
-  isSonarEnabled?: boolean;
   isMPU6050Enabled?: boolean;
   isCameraEnabled?: boolean;
-  onSonarToggle?: () => void;
   onMPU6050Toggle?: () => void;
   onCameraToggle?: () => void;
   isAutopilotRunning?: boolean;
@@ -73,10 +71,8 @@ export const Header = ({
   onImageAnalysisToggle,
   ttsUnlocked = false,
   onUnlockAudio,
-  isSonarEnabled,
   isMPU6050Enabled,
   isCameraEnabled,
-  onSonarToggle,
   onMPU6050Toggle,
   onCameraToggle,
   isAutopilotRunning,
@@ -193,7 +189,7 @@ export const Header = ({
               </span>
             </button>
           )}
-          <SettingsDialog tuning={tuning} onTuningChange={onTuningChange} backendDefaults={backendDefaults} cameraSpecs={cameraSpecs} narrationConfig={narrationConfig} imageAnalysisEnabled={imageAnalysisEnabled} onImageAnalysisToggle={onImageAnalysisToggle} isSonarEnabled={isSonarEnabled} isMPU6050Enabled={isMPU6050Enabled} isCameraEnabled={isCameraEnabled} onSonarToggle={onSonarToggle} onMPU6050Toggle={onMPU6050Toggle} onCameraToggle={onCameraToggle} isAutopilotRunning={isAutopilotRunning} onResetDriver={onResetDriver} />
+          <SettingsDialog tuning={tuning} onTuningChange={onTuningChange} backendDefaults={backendDefaults} cameraSpecs={cameraSpecs} narrationConfig={narrationConfig} imageAnalysisEnabled={imageAnalysisEnabled} onImageAnalysisToggle={onImageAnalysisToggle} isMPU6050Enabled={isMPU6050Enabled} isCameraEnabled={isCameraEnabled} onMPU6050Toggle={onMPU6050Toggle} onCameraToggle={onCameraToggle} isAutopilotRunning={isAutopilotRunning} onResetDriver={onResetDriver} />
         </div>
       </header>
       <AlertDialog open={pendingNetworkMode !== null} onOpenChange={(open) => !open && setPendingNetworkMode(null)}>

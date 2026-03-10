@@ -51,7 +51,7 @@
           "unit": "amp", "min": 0, "max": 8
         }
       },
-      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "gridPos": { "h": 4, "w": 3, "x": 4, "y": 1 },
       "id": 2,
       "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] } },
       "title": "⚡ Current Draw",
@@ -73,7 +73,7 @@
           "unit": "velocityms", "min": 0, "max": 2
         }
       },
-      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "gridPos": { "h": 4, "w": 3, "x": 7, "y": 1 },
       "id": 3,
       "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] } },
       "title": "🏎️  Speed (m/s)",
@@ -94,7 +94,7 @@
           "unit": "celsius", "min": 20, "max": 90
         }
       },
-      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "gridPos": { "h": 4, "w": 3, "x": 10, "y": 1 },
       "id": 4,
       "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] } },
       "title": "🌡️  CPU Temp",
@@ -109,19 +109,42 @@
           "color": { "mode": "thresholds" },
           "thresholds": { "mode": "absolute", "steps": [
             { "color": "red", "value": null },
-            { "color": "orange", "value": 20 },
-            { "color": "yellow", "value": 40 },
-            { "color": "green", "value": 80 }
+            { "color": "orange", "value": 200 },
+            { "color": "yellow", "value": 500 },
+            { "color": "green", "value": 1000 }
           ]},
-          "unit": "lengthcm", "min": 0, "max": 400
+          "unit": "lengthmm", "min": 0, "max": 4000
         }
       },
-      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "gridPos": { "h": 4, "w": 4, "x": 13, "y": 1 },
       "id": 5,
       "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] } },
-      "title": "📡 Sonar Distance",
+      "title": "🔴 Laser Distance",
       "type": "stat",
-      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"sonar_dist_cm\") FROM \"rpicar_sensors\" WHERE $timeFilter", "refId": "A", "resultFormat": "time_series" }]
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"laser_mm\") FROM \"rpicar_sensors\" WHERE $timeFilter", "refId": "A", "resultFormat": "time_series" }]
+    },
+
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "green", "value": 1 }
+          ]},
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "OFF", "color": "red" }, "1": { "text": "ON", "color": "green" } } }
+          ],
+          "unit": "none", "min": 0, "max": 1
+        }
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 17, "y": 1 },
+      "id": 18,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "title": "🔑 Engine",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"engine_running\") FROM \"rpicar_drive\" WHERE $timeFilter", "refId": "A", "resultFormat": "time_series" }]
     },
 
     {
@@ -153,7 +176,7 @@
         "defaults": { "custom": { "lineWidth": 2, "fillOpacity": 10 }, "unit": "volt", "color": { "mode": "fixed", "fixedColor": "green" } },
         "overrides": [{ "matcher": { "id": "byName", "options": "current_amps" }, "properties": [{ "id": "unit", "value": "amp" }, { "id": "custom.axisPlacement", "value": "right" }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] }]
       },
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 6 },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 6 },
       "id": 7,
       "options": { "legend": { "calcs": ["last", "min", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "title": "🔋 Power — Battery Voltage & Current",
@@ -167,10 +190,36 @@
     {
       "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
       "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 2, "fillOpacity": 30, "spanNulls": true, "stacking": { "mode": "none" }, "drawStyle": "line", "lineInterpolation": "stepAfter" },
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "green", "value": 1 }
+          ]},
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "OFF", "color": "red" }, "1": { "text": "ON", "color": "green" } } }
+          ],
+          "unit": "none", "min": 0, "max": 1
+        }
+      },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 6 },
+      "id": 19,
+      "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
+      "title": "🔑 Engine On / Off History",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"engine_running\") FROM \"rpicar_drive\" WHERE $timeFilter GROUP BY time($__interval) fill(previous)", "refId": "A", "alias": "engine_running", "resultFormat": "time_series" }
+      ]
+    },
+
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
+      "fieldConfig": {
         "defaults": { "custom": { "lineWidth": 2, "fillOpacity": 10 }, "unit": "percent", "color": { "mode": "fixed", "fixedColor": "blue" } },
         "overrides": [{ "matcher": { "id": "byName", "options": "steer_angle" }, "properties": [{ "id": "unit", "value": "degree" }, { "id": "custom.axisPlacement", "value": "right" }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "cyan" } }] }]
       },
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 6 },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 6 },
       "id": 8,
       "options": { "legend": { "calcs": ["last", "min", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "title": "🎮 Throttle PWM % & Steering Angle °",

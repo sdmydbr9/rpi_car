@@ -1,6 +1,3 @@
 {
-  "ir_enabled": false,
-  "sonar_enabled": false,
-  "mpu6050_enabled": true,
-  "rear_sonar_enabled": true
+  "mpu6050_enabled": true
 }

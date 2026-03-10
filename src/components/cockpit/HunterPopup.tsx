@@ -13,7 +13,7 @@ interface HunterStatus {
   bbox_area: number;
   sensors: {
     front_laser: number;
-    sonar: number;
+    laser_alt: number;
     accel: number;
     gyro: number;
   };
@@ -446,7 +446,7 @@ export const HunterPopup = ({ isOpen, onClose, serverBaseUrl, whepUrl, hunterAct
               </span>
             </div>
             <span className="racing-text text-[9px] text-muted-foreground">
-              F:{s?.front_laser ?? "--"} S:{s?.sonar ?? "--"}{" "}
+              F:{s?.front_laser ?? "--"} L2:{s?.laser_alt ?? "--"}{" "}
               G:{(s?.accel ?? 0).toFixed(1)} | {status?.avoid ?? "--"}
             </span>
           </div>

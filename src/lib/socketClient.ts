@@ -33,7 +33,6 @@ export interface TelemetryData {
   autonomous_state?: string;
   autonomous_target_speed?: number;
   sonar_distance?: number;
-  sonar_enabled?: boolean;
   mpu6050_enabled?: boolean;
   // MPU6050 Gyro telemetry
   gyro_z?: number;
@@ -374,7 +373,6 @@ export function onCameraResponse(callback: (data: CameraResponse) => void): void
 // ==========================================
 
 export interface SensorConfig {
-  sonar_enabled: boolean;
   mpu6050_enabled: boolean;
 }
 
@@ -653,7 +651,6 @@ export interface StartupCheckResult {
   critical_ok?: boolean;
   all_ok?: boolean;
   pico_bridge?: boolean;
-  sonar?: boolean;
   laser?: boolean;
   mpu6050?: boolean;
   encoder?: boolean;
@@ -1007,18 +1004,6 @@ export function emitAutoAccelDisable(): void {
 }
 
 /**
- * Toggle SONAR sensor control
- */
-export function emitSonarToggle(): void {
-  if (socket && socket.connected) {
-    console.log(`[UI Control] 🎮 SONAR: TOGGLED`);
-    socket.emit('sonar_toggle', {});
-  } else {
-    console.warn(`[UI Control] ⚠️ Cannot emit sonar toggle - socket not connected`, { socket: !!socket, connected: socket?.connected });
-  }
-}
-
-/**
  * Toggle MPU6050 gyroscope sensor control
  */
 export function emitMPU6050Toggle(): void {
@@ -1223,7 +1208,7 @@ export function onGamepadHotStart(callback: (data: { engine_running: boolean; ga
 let gamepadSensorToggleCallback: ((data: { sensor: string; enabled: boolean }) => void) | null = null;
 
 /**
- * Subscribe to gamepad sensor toggle events (Select+A = sonar, Select+X = IR)
+ * Subscribe to gamepad sensor toggle events
  */
 export function onGamepadSensorToggle(callback: (data: { sensor: string; enabled: boolean }) => void): void {
   gamepadSensorToggleCallback = callback;
@@ -1254,7 +1239,6 @@ export default {
   emitEmergencyStopRelease,
   emitAutoAccelEnable,
   emitAutoAccelDisable,
-  emitSonarToggle,
   emitMPU6050Toggle,
   emitCameraToggle,
   emitVisionToggle,

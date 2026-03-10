@@ -79,10 +79,7 @@ export const GamepadControlsDialog = ({
           </Section>
 
           {/* Sensor Combos */}
-          <Section title="SENSOR TOGGLES (Select held)">
-            <Row label="Select + A" desc="Toggle Sonar sensor" />
-            <Row label="Select + X" desc="Toggle IR sensor" />
-          </Section>
+
         </div>
       </DialogContent>
     </Dialog>

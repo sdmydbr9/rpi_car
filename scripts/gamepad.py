@@ -16,7 +16,6 @@ from pico_sensor_reader import (
     get_rpm, get_gyro_z, get_sensor_packet
 )
 import atexit
-from drive_logger import DriveLogger
 
 # =================================================================
 # ⚙️ HARDWARE CONFIGURATION
@@ -62,13 +61,8 @@ try:
 except Exception as e:
     print(f"⚠️  Wheel sync init error: {e}")
 
-# Drive telemetry logger (atexit registered inside DriveLogger.start())
-drive_logger = DriveLogger(source="gamepad")
-drive_logger.start()
-
 # Extra safety: ensure logger stops on any signal-based exit
 def _gamepad_cleanup():
-    drive_logger.stop()
     try:
         car_system.stop()
     except Exception:
@@ -201,46 +195,6 @@ def motor_driver_loop():
         
         drive_like_a_car(smoothed_throttle, smoothed_steering, gz)
 
-        # ── Comprehensive drive telemetry logging ────────────
-        if drive_logger.is_running:
-            try:
-                pkt = get_sensor_packet()
-                sync_telem = car_system.get_sync_telemetry()
-                wheels = sync_telem.get('wheels', {})
-                gear_map = {"1": "1", "2": "2", "3": "3", "SPORT 🚀": "S"}
-                drive_logger.log_tick({
-                    'laser_front_mm': pkt.laser_mm if pkt else -1,
-                    'sonar_front_cm': -1,  # No sonar in standalone gamepad mode
-                    'accel_x': round(pkt.accel_x, 4) if pkt else 0,
-                    'accel_y': round(pkt.accel_y, 4) if pkt else 0,
-                    'accel_z': round(pkt.accel_z, 4) if pkt else 0,
-                    'gyro_x': round(pkt.gyro_x, 2) if pkt else 0,
-                    'gyro_y': round(pkt.gyro_y, 2) if pkt else 0,
-                    'gyro_z': round(pkt.gyro_z, 2) if pkt else 0,
-                    'temp_c': round(pkt.temp_c, 1) if pkt else 0,
-                    'battery_mv': round(pkt.adc_a0, 1) if pkt else 0,
-                    'current_mv': round(pkt.adc_a1, 1) if pkt else 0,
-                    'rpm_rear_left': round(pkt.rpm_rear_left, 1) if pkt else 0,
-                    'rpm_rear_right': round(pkt.rpm_rear_right, 1) if pkt else 0,
-                    'rpm_front_right': round(pkt.rpm_front_right, 1) if pkt else 0,
-                    'cmd_pwm_left': round(curr_L, 1),
-                    'cmd_pwm_right': round(curr_R, 1),
-                    'applied_pwm_fl': round(wheels.get('fl', {}).get('applied_pwm', 0), 1),
-                    'applied_pwm_fr': round(wheels.get('fr', {}).get('applied_pwm', 0), 1),
-                    'applied_pwm_rl': round(wheels.get('rl', {}).get('applied_pwm', 0), 1),
-                    'applied_pwm_rr': round(wheels.get('rr', {}).get('applied_pwm', 0), 1),
-                    'gear': gear_map.get(current_gear, "1"),
-                    'throttle_input': round(smoothed_throttle, 1),
-                    'steering_input': round(smoothed_steering, 1),
-                    'is_braking': False,
-                    'is_forward': True,
-                    'sync_status': sync_telem.get('status', 'OFF'),
-                    'target_rpm_left': round(wheels.get('rl', {}).get('target_rpm', 0), 1),
-                    'target_rpm_right': round(wheels.get('rr', {}).get('target_rpm', 0), 1),
-                })
-            except Exception:
-                pass  # Never crash the drive loop for logging
-
         time.sleep(0.02) 
 
 t = threading.Thread(target=motor_driver_loop, daemon=True)
@@ -277,7 +231,6 @@ def main(stdscr):
         stdscr.addstr(8, 0, f"SYNC:   {sync_status} | RL:{rl_rpm:.0f} RR:{rr_rpm:.0f} RPM")
 
         stdscr.addstr(10, 0, f"STATUS: {status_msg}")
-        stdscr.addstr(11, 0, f"LOG:    {drive_logger.tick_count} rows → {drive_logger.filepath or 'N/A'}")
         
         if running:
             stdscr.addstr(13, 0, "● ON AIR (LIVE)", curses.A_REVERSE)
@@ -295,7 +248,6 @@ def main(stdscr):
 
     # Cleanup
     running = False
-    drive_logger.stop()
     time.sleep(0.2)
     car_system.stop()
     car_system.cleanup()
