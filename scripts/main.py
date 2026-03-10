@@ -2070,8 +2070,8 @@ car_state = {
     "encoder_speed_mpm": 0.0,            # Speed in meters per minute
     "encoder_available": False,          # True if encoder GPIO setup succeeded
     # 🔋 Battery / Current (from Pico ADC)
-    "battery_voltage": -1,                   # Battery voltage in V (from ADS1115 A0)
-    "current_amps": -1,                      # Current draw in A (from ADS1115 A1)
+    "battery_voltage": -1.0,                 # Battery voltage in V (from ADS1115 A0)
+    "current_amps": -1.0,                    # Current draw in A (from ADS1115 A1)
     # ⚡ Dynamic power limiter telemetry
     "effective_max_duty": MAX_PWM_DUTY,       # Current dynamic duty cap (%)
     "l298n_voltage_drop": 1.5,               # Estimated L298N driver drop (V)
@@ -5935,20 +5935,41 @@ def encoder_and_power_thread():
                 k: round(v, 1) for k, v in rpm_dict.items()
             }
 
+            # --- Pico sensor data (accel, laser, temp) for Grafana telemetry ---
+            pico_pkt = pico_get_sensor_packet()
+            if pico_pkt:
+                car_state["accel_x"] = pico_pkt.accel_x
+                car_state["accel_y"] = pico_pkt.accel_y
+                car_state["accel_z"] = pico_pkt.accel_z
+                car_state["laser_mm"] = pico_pkt.laser_mm if pico_pkt.laser_mm > 0 else 0
+                car_state["imu_temp_c"] = round(pico_pkt.temp_c, 1)
+
             # --- Battery / Current from Pico ADC (every ~1s) ---
             power_counter += 1
             if power_counter >= 5:
                 power_counter = 0
                 try:
                     batt_v = pico_get_battery_voltage()
-                    car_state["battery_voltage"] = round(batt_v, 2) if batt_v >= 0 else -1
-                except Exception:
-                    car_state["battery_voltage"] = -1
+                    car_state["battery_voltage"] = round(batt_v, 2) if batt_v >= 0 else -1.0
+                except Exception as e:
+                    logging.warning("[Encoder/Power] battery_voltage read failed: %s", e)
+                    car_state["battery_voltage"] = -1.0
                 try:
                     curr_a = pico_get_current_sense()
-                    car_state["current_amps"] = round(curr_a, 2) if curr_a >= 0 else -1
-                except Exception:
-                    car_state["current_amps"] = -1
+                    car_state["current_amps"] = round(curr_a, 2) if curr_a >= 0 else -1.0
+                except Exception as e:
+                    logging.warning("[Encoder/Power] current_amps read failed: %s", e)
+                    car_state["current_amps"] = -1.0
+                # Debug: log power telemetry values reaching car_state
+                if car_state["battery_voltage"] == -1 or car_state["current_amps"] == -1:
+                    pkt = pico_get_sensor_packet()
+                    logging.warning(
+                        "[Encoder/Power] Power sensors returning -1: batt_v=%s, curr_a=%s, "
+                        "raw_adc_a0=%s, raw_adc_a1=%s, pico_connected=%s",
+                        car_state["battery_voltage"], car_state["current_amps"],
+                        pkt.adc_a0 if pkt else "NO_PKT", pkt.adc_a1 if pkt else "NO_PKT",
+                        pico_get_sensor_packet() is not None,
+                    )
 
                 # --- Update dynamic power limiter with fresh sensor data ---
                 bv = car_state["battery_voltage"]

@@ -228,17 +228,22 @@ class TelemetryPostman:
 
         # ── 2. power ─────────────────────────────────────────────────────
         # -1 is the sentinel for "sensor not connected" — omit those fields
+        # NOTE: all numeric fields must be float() to avoid InfluxDB type
+        # conflicts (the schema was once seeded with integer variants).
         batt_v = cs.get("battery_voltage", -1)
         curr_a = cs.get("current_amps", -1)
         power_fields: Dict[str, Any] = {
-            "effective_max_duty" : cs.get("effective_max_duty", 0.0),
-            "l298n_voltage_drop" : cs.get("l298n_voltage_drop", 0.0),
-            "effective_motor_v"  : cs.get("effective_motor_voltage", 0.0),
+            "effective_max_duty" : float(cs.get("effective_max_duty", 0.0)),
+            "l298n_voltage_drop" : float(cs.get("l298n_voltage_drop", 0.0)),
+            "effective_motor_v"  : float(cs.get("effective_motor_voltage", 0.0)),
         }
         if batt_v >= 0:
-            power_fields["battery_voltage"] = batt_v
+            power_fields["battery_voltage"] = float(batt_v)
         if curr_a >= 0:
-            power_fields["current_amps"] = curr_a
+            power_fields["current_amps"] = float(curr_a)
+        if batt_v < 0 or curr_a < 0:
+            log.debug("[Postman] power fields SKIPPED: battery_voltage=%s (inc=%s), "
+                      "current_amps=%s (inc=%s)", batt_v, batt_v >= 0, curr_a, curr_a >= 0)
         line = _build_line("power", {"host": HOST_TAG}, power_fields, ts)
         if line:
             lines.append(line)
