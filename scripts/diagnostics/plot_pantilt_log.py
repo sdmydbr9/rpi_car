@@ -18,7 +18,7 @@ matplotlib.use("Agg")  # headless-safe; switch to "TkAgg" if you want interactiv
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LOG_DIR = os.path.join(PROJECT_ROOT, "rover_logs")
 
 
