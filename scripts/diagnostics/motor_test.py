@@ -14,9 +14,9 @@ import time
 import curses
 import datetime
 
-# Ensure the script's own directory is on sys.path so that
-# pico_sensor_reader.py is importable regardless of the working directory.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add core/ to path for bare-name imports of core modules (motor, pico_sensor_reader, etc.)
+_diag_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_diag_dir, '..', 'core'))
 
 # Try real GPIO first.
 try:

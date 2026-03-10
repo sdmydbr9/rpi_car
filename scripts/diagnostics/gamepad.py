@@ -1,8 +1,13 @@
+import os
+import sys
+
+# Add core/ to path for bare-name imports of core modules
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'core'))
+
 import RPi.GPIO as GPIO
 import time
 import curses
 import threading
-import os
 import math
 from datetime import datetime
 from inputs import get_gamepad

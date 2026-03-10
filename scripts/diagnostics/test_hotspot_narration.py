@@ -4,9 +4,16 @@
 Tests: Local LLM + Mimic3 TTS chain for hotspot mode
 """
 
+import os
+import sys
+
+# Add core/ and scripts/ to path for bare-name imports
+_diag_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_diag_dir, '..', 'core'))
+sys.path.insert(0, os.path.join(_diag_dir, '..'))
+
 import requests
 import subprocess
-import sys
 import json
 import base64
 

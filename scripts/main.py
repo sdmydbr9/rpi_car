@@ -1,4 +1,11 @@
 import os
+import sys
+
+# Add core/ subpackage to import path so bare-name imports work
+# (e.g. "from motor import CarSystem" finds core/motor.py)
+_scripts_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_scripts_dir, 'core'))
+
 import logging
 # Prefer PulseAudio by default for Shairport Sync mixing, but allow
 # systemd/service mode to override via CAR_AUDIO_DRIVER (e.g. "alsa").

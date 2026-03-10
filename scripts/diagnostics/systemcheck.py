@@ -1,5 +1,10 @@
-import time
+import os
 import sys
+import time
+
+# Add core/ to path for bare-name imports of core modules
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'core'))
+
 import RPi.GPIO as GPIO
 # Import the class we defined in sensors.py
 from sensors import SensorSystem

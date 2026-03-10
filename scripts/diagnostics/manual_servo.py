@@ -3,9 +3,14 @@
 Replaces the old GPIO 20 PWM servo test. Now sends PT:<pan>,<tilt>
 commands over UART to the Pico, which drives the camera pan/tilt gimbal.
 """
+import os
 import sys
 import tty
 import termios
+
+# Add core/ to path for bare-name imports of core modules
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'core'))
+
 from pico_sensor_reader import init_pico_reader, send_pan_tilt, send_center
 
 # State

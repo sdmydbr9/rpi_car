@@ -16,6 +16,9 @@ import tempfile
 import time
 from pathlib import Path
 
+# Add core/ to path for bare-name imports of core modules
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'core'))
+
 import requests
 from narration import DEFAULT_PROMPT, capture_frame_as_jpeg, describe_image
 from kokoro_client import get_kokoro_client
