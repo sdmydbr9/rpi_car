@@ -26,6 +26,11 @@ class SensorPacket:
     gyro_z: float
     temp_c: float
 
+    # HMC5883L magnetometer (Gauss)
+    mag_x: float
+    mag_y: float
+    mag_z: float
+
     # VL53L0X laser (mm)
     laser_mm: int
 
@@ -116,6 +121,9 @@ class PicoSensorReader:
                             gyro_y=raw['gyro']['y'],
                             gyro_z=raw['gyro']['z'],
                             temp_c=raw.get('temp_c', 0.0),
+                            mag_x=raw.get('mag', {}).get('x', 0.0),
+                            mag_y=raw.get('mag', {}).get('y', 0.0),
+                            mag_z=raw.get('mag', {}).get('z', 0.0),
                             laser_mm=raw.get('laser_mm', -1),
                             adc_a0=raw.get('adc', {}).get('A0', -1),
                             adc_a1=raw.get('adc', {}).get('A1', -1),
@@ -242,6 +250,14 @@ def get_laser_distance_cm():
     mm = get_laser_distance_mm()
     return round(mm / 10.0, 1) if mm > 0 else -1
 
+def get_magnetometer():
+    """Return (mag_x, mag_y, mag_z) in Gauss from QMC5883L."""
+    packet = get_sensor_packet()
+    if packet:
+        return packet.mag_x, packet.mag_y, packet.mag_z
+    return 0.0, 0.0, 0.0
+
+
 def send_pan_tilt(pan, tilt):
     """Send pan/tilt servo command to Pico via UART.
     pan/tilt in degrees (60-120, center=90)."""
@@ -265,6 +281,11 @@ def get_rpm():
             'front_right': packet.rpm_front_right
         }
     return {'rear_right': 0.0, 'rear_left': 0.0, 'front_right': 0.0}
+
+def is_pico_fresh():
+    """Return True if the Pico sensor data was received recently (within 3 s)."""
+    global _global_reader
+    return bool(_global_reader and _global_reader.is_fresh())
 
 def get_diagnostics():
     """Return connection diagnostics dict for debugging UI."""
@@ -335,7 +356,8 @@ if __name__ == "__main__":
                 print(f"[Frame {packet.frame:05d}] V:{volts:5.2f}V | I:{amps:5.2f}A | "
                       f"Laser:{packet.laser_mm:4}mm | "
                       f"RPM RR:{packet.rpm_rear_right:5.1f} RL:{packet.rpm_rear_left:5.1f} FR:{packet.rpm_front_right:5.1f} | "
-                      f"Acc:({packet.accel_x:5.2f}, {packet.accel_y:5.2f}, {packet.accel_z:5.2f})")
+                      f"Acc:({packet.accel_x:5.2f}, {packet.accel_y:5.2f}, {packet.accel_z:5.2f}) | "
+                      f"Mag:({packet.mag_x:6.3f}, {packet.mag_y:6.3f}, {packet.mag_z:6.3f})G")
             else:
                 print("⏳ Waiting for data...")
 

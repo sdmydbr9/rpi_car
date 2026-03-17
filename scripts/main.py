@@ -756,6 +756,7 @@ def _start_integrated_camera(resolution_str, framerate):
         cam_cfg = picam2.create_video_configuration(
             main={"size": size, "format": "BGR888"},
             controls=_camera_controls_for_fps(fps),
+            transform=_libcamera_Transform(hflip=True, vflip=True),
         )
         picam2.configure(cam_cfg)
         picam2.start()
@@ -1095,6 +1096,8 @@ class MediaMtxService:
             f"    rpiCameraFPS: {fps}\n"
             f"    rpiCameraBitrate: {bitrate}\n"
             "    rpiCameraIDRPeriod: 30\n"
+            "    rpiCameraVFlip: true\n"
+            "    rpiCameraHFlip: true\n"
         )
 
     def _build_hunter_config_text(self):
@@ -1306,6 +1309,7 @@ _h264_rtsp_service = H264RtspService()
 
 try:
     from picamera2 import Picamera2
+    from libcamera import Transform as _libcamera_Transform
     picam2 = Picamera2()
     _init_resolution = _parse_resolution(CAMERA_DEFAULT_RESOLUTION) or (640, 480)
     _init_fps = _sanitize_camera_framerate(CAMERA_FRAMERATE, 30)
@@ -3855,14 +3859,17 @@ def index():
 # API endpoint for getting server IP (used by mobile/remote clients)
 @app.route("/api/server-ip")
 def api_server_ip():
-    """Return the server's network IP address for remote connections"""
+    """Return the server's network IP address and current car status for remote connections"""
     ip = get_local_ip()
     hotspot_active = get_hotspot_status()
     return jsonify({
         "ip": ip, 
         "port": 5000,
         "hotspot_active": hotspot_active,
-        "transport": "hotspot" if hotspot_active else "wifi"
+        "transport": "hotspot" if hotspot_active else "wifi",
+        "engine_running": car_state.get("engine_running", False),
+        "gamepad_connected": car_state.get("gamepad_connected", False),
+        "gamepad_enabled": car_state.get("gamepad_enabled", False),
     })
 
 @app.route("/api/now-playing")

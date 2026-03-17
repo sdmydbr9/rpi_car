@@ -188,6 +188,43 @@ else:
     print("⚠️  VL53L0X not responding (continuing without laser)")
 
 # =====================================================
+# QMC5883L MAGNETOMETER (I2C 0x0D)
+# OSR=512, RNG=8G (3000 LSB/Gauss), ODR=200Hz, Continuous
+# =====================================================
+QMC_ADDR = 0x0D
+qmc_ok = False
+
+def qmc_init():
+    """Initialize QMC5883L in continuous measurement mode."""
+    try:
+        # Soft reset
+        i2c.writeto_mem(QMC_ADDR, 0x0B, b'\x01')
+        time.sleep_ms(10)
+        # Control register 1: OSR=512, RNG=8G, ODR=200Hz, Continuous mode
+        i2c.writeto_mem(QMC_ADDR, 0x09, b'\x1D')
+        time.sleep_ms(100)
+        print(f"✅ QMC5883L magnetometer initialized (I2C 0x{QMC_ADDR:02x})")
+        return True
+    except OSError as e:
+        print(f"⚠️  QMC5883L not found at 0x{QMC_ADDR:02x}: {e}")
+        return False
+
+def qmc_read():
+    """
+    Read magnetometer axes. Returns (x, y, z) in Gauss.
+    Registers 0x00-0x05: X_L, X_H, Y_L, Y_H, Z_L, Z_H (little-endian).
+    Scale: 3000 LSB/Gauss at RNG=8G.
+    """
+    try:
+        data = i2c.readfrom_mem(QMC_ADDR, 0x00, 6)
+        x, y, z = struct.unpack('<hhh', data)
+        return round(x / 3000.0, 4), round(y / 3000.0, 4), round(z / 3000.0, 4)
+    except OSError:
+        return None, None, None
+
+qmc_ok = qmc_init()
+
+# =====================================================
 # ADS1115 (I2C 4-channel 16-bit ADC)
 # =====================================================
 ADS_ADDR = 0x48  # Change this if your ADS1115 uses a different address
@@ -360,6 +397,13 @@ while True:
         # --- VL53L0X: Distance ---
         laser_mm = vl53_single_measure() if vl53_ok else -1
         
+        # --- QMC5883L: Magnetometer (Gauss) ---
+        if qmc_ok:
+            mx, my, mz = qmc_read()
+            mag_data = {"x": mx, "y": my, "z": mz} if mx is not None else {"x": 0.0, "y": 0.0, "z": 0.0}
+        else:
+            mag_data = {"x": 0.0, "y": 0.0, "z": 0.0}
+
         # --- ADS1115: 4-channel ADC (voltage in mV) ---
         ads_channels = {}
         if ads_ok:
@@ -416,6 +460,7 @@ while True:
             "accel": accel,
             "gyro": gyro,
             "temp_c": round(temp_c, 1),
+            "mag": mag_data,
             "laser_mm": laser_mm,
             "adc": ads_channels,  # New: 4-channel ADC readings
             "rpm": {

@@ -356,26 +356,65 @@ export const CockpitController = () => {
         // Standard hotspot IP as fallback
         candidates.push({ baseUrl: 'http://192.168.4.1:5000', label: 'hotspot' });
 
-        const probeEndpoint = async (c: ProbeCandidate): Promise<{ ip: string; source: string }> => {
+        interface ProbeResult {
+          ip: string;
+          source: string;
+          engine_running: boolean;
+          gamepad_connected: boolean;
+          gamepad_enabled: boolean;
+        }
+
+        const probeEndpoint = async (c: ProbeCandidate): Promise<ProbeResult> => {
           const resp = await fetch(`${c.baseUrl}/api/server-ip`, { signal: AbortSignal.timeout(3000) });
           if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
           const data = await resp.json();
           return {
             ip: (data.ip as string) ?? new URL(c.baseUrl).hostname,
             source: `${c.label} (${data.transport ?? 'unknown'})`,
+            engine_running: !!data.engine_running,
+            gamepad_connected: !!data.gamepad_connected,
+            gamepad_enabled: !!data.gamepad_enabled,
           };
         };
 
         console.log(`🔍 [Discovery] Probing ${candidates.length} endpoint(s) in parallel...`);
         const probes = candidates.map(c => probeEndpoint(c));
 
-        let serverEndpoint: { ip: string; source: string } | null = null;
+        let serverEndpoint: ProbeResult | null = null;
         try {
           serverEndpoint = await Promise.any(probes);
           console.log(`✅ [Discovery] Server found at ${serverEndpoint.ip} (via ${serverEndpoint.source})`);
         } catch {
           console.error('❌ [Discovery] All endpoint probes failed — no server reachable');
           return;
+        }
+
+        // --- Phase 1.5: auto-detect input mode based on car/gamepad state ---
+        const { engine_running, gamepad_connected, gamepad_enabled } = serverEndpoint;
+        console.log(`🎮 [Discovery] Car status — engine: ${engine_running}, gamepad: ${gamepad_connected}, gamepad_enabled: ${gamepad_enabled}`);
+
+        if (engine_running && (gamepad_enabled || gamepad_connected)) {
+          // Car already started via gamepad — go straight to view-only console mode
+          console.log('🎮 [Auto-Mode] Car running with gamepad → console (view-only) mode');
+          if (!localStorage.getItem('driverData')) {
+            const viewerData = { name: 'VIEWER', age: 0 };
+            localStorage.setItem('driverData', JSON.stringify(viewerData));
+            setDriverName('VIEWER');
+            setDriverAge(0);
+          }
+          setShowOnboarding(false);
+          setInputMode('console');
+          localStorage.setItem('inputMode', 'console');
+        } else if (gamepad_connected && !engine_running) {
+          // Gamepad connected but car not started — always show controller selection
+          console.log('🎮 [Auto-Mode] Gamepad connected, car not started → show controller selection');
+          localStorage.removeItem('inputMode');
+          setInputMode(null);
+        } else if (!gamepad_connected) {
+          // No gamepad — default to web-controlled device mode
+          console.log('🎮 [Auto-Mode] No gamepad → device (web control) mode');
+          setInputMode('device');
+          localStorage.setItem('inputMode', 'device');
         }
 
         // --- Phase 2: connect socket once to the discovered endpoint ---

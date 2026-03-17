@@ -666,18 +666,36 @@ class CarSystem:
         Compute per-wheel speeds from a base speed + steering angle,
         then write to motors.
 
-        Any steering input beyond the 2° deadband: inner = 0, outer = max.
-        """
-        left_speed = speed
-        right_speed = speed
-        max_duty = self.power_limiter.max_safe_duty
+        Proportional differential steering:
+          |angle| ≤ DEADBAND        both wheels at speed (straight)
+          DEADBAND < |angle| < 45°  inner wheel reduced proportionally,
+                                    outer wheel boosted proportionally
+          |angle| ≥ 45°             inner = 0, outer = max (full pivot)
 
-        if angle < -2:     # turning LEFT  → left = 0, right = max
-            left_speed = 0
-            right_speed = max(speed, max_duty * 0.8)
-        elif angle > 2:    # turning RIGHT → right = 0, left = max
-            right_speed = 0
-            left_speed = max(speed, max_duty * 0.8)
+        This replaces the old binary (> 2° → instant inner=0) behaviour
+        which caused line-follower overshoot/diverge on every correction.
+        """
+        max_duty  = self.power_limiter.max_safe_duty
+        DEADBAND  = 2.0
+        MAX_ANGLE = 45.0
+        abs_angle = abs(angle)
+
+        if abs_angle <= DEADBAND:
+            left_speed  = float(speed)
+            right_speed = float(speed)
+        else:
+            # t: 0 at deadband edge → 1 at MAX_ANGLE
+            t = min(1.0, (abs_angle - DEADBAND) / (MAX_ANGLE - DEADBAND))
+            max_outer = max(float(speed), max_duty * 0.8)
+            inner = float(speed) * (1.0 - t)                # 0 when t=1
+            outer = float(speed) + t * (max_outer - float(speed))  # max_outer when t=1
+            outer = min(outer, max_duty)
+            if angle < 0:   # turning LEFT
+                left_speed  = inner
+                right_speed = outer
+            else:           # turning RIGHT
+                right_speed = inner
+                left_speed  = outer
 
         self._set_raw_motors(left_speed, right_speed, forward, forward)
 

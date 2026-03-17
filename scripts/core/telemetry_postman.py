@@ -62,7 +62,7 @@ GRAFANA_HOST = "192.168.29.105"
 TELEGRAF_PORT = 8186                # Telegraf [[inputs.influxdb_listener]] port
 INFLUX_DB     = "car_telemetry"     # passed as ?db= (Telegraf maps it to the bucket)
 SEND_INTERVAL = 0.5                 # seconds — 2 Hz
-HTTP_TIMEOUT  = 1.0                 # seconds — never block the postman long
+HTTP_TIMEOUT  = 3.0                 # seconds — allow for GIL contention in main.py
 HOST_TAG      = "rpi_car"
 
 log = logging.getLogger("TelemetryPostman")
@@ -209,10 +209,10 @@ class TelemetryPostman:
             "drive",
             {"host": HOST_TAG, "gear": gear, "direction": direction},
             {
-                "speed_mpm"         : cs.get("encoder_speed_mpm") or 0.0,
-                "current_pwm"       : cs.get("current_pwm", 0.0),
-                "steer_angle"       : cs.get("steer_angle", 0),
-                "rpm"               : cs.get("encoder_rpm") or 0.0,
+                "speed_mpm"         : float(cs.get("encoder_speed_mpm") or 0),
+                "current_pwm"       : float(cs.get("current_pwm", 0)),
+                "steer_angle"       : int(cs.get("steer_angle", 0)),
+                "rpm"               : float(cs.get("encoder_rpm") or 0),
                 "encoder_available" : cs.get("encoder_available", False),
                 "gas_pressed"       : cs.get("gas_pressed", False),
                 "brake_pressed"     : cs.get("brake_pressed", False),
@@ -264,14 +264,14 @@ class TelemetryPostman:
             "sensors",
             {"host": HOST_TAG},
             {
-                "sonar_dist_cm" : sonar_dist if sonar_dist is not None else -1.0,
-                "laser_mm"      : laser_mm,
-                "accel_x"       : accel_x,
-                "accel_y"       : accel_y,
-                "accel_z"       : accel_z,
-                "gyro_z"        : gyro_z,
-                "imu_temp_c"    : imu_temp if imu_temp else 0.0,
-                "pid_correction": cs.get("pid_correction", 0.0),
+                "sonar_dist_cm" : int(sonar_dist) if sonar_dist is not None else -1,
+                "laser_mm"      : int(laser_mm),
+                "accel_x"       : float(accel_x),
+                "accel_y"       : float(accel_y),
+                "accel_z"       : float(accel_z),
+                "gyro_z"        : float(gyro_z),
+                "imu_temp_c"    : float(imu_temp if imu_temp else 0.0),
+                "pid_correction": float(cs.get("pid_correction", 0.0)),
                 "left_obstacle" : cs.get("left_obstacle", False),
                 "right_obstacle": cs.get("right_obstacle", False),
             },

@@ -33,9 +33,10 @@
       "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
       "id": 1,
       "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "noValue": "--",
       "title": "🔋 Battery Voltage",
       "type": "stat",
-      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"battery_voltage\") FROM \"rpicar_power\" WHERE $timeFilter", "refId": "A", "resultFormat": "time_series" }]
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"battery_voltage\") FROM \"rpicar_power\" WHERE time > now() - 10s", "refId": "A", "resultFormat": "time_series" }]
     },
 
     {
@@ -54,9 +55,10 @@
       "gridPos": { "h": 4, "w": 3, "x": 4, "y": 1 },
       "id": 2,
       "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "noValue": "--",
       "title": "⚡ Current Draw",
       "type": "stat",
-      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"current_amps\") FROM \"rpicar_power\" WHERE $timeFilter", "refId": "A", "resultFormat": "time_series" }]
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"current_amps\") FROM \"rpicar_power\" WHERE time > now() - 10s", "refId": "A", "resultFormat": "time_series" }]
     },
 
     {
@@ -76,9 +78,10 @@
       "gridPos": { "h": 4, "w": 3, "x": 7, "y": 1 },
       "id": 3,
       "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "noValue": "--",
       "title": "🏎️  Speed (m/s)",
       "type": "stat",
-      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"speed_mpm\") FROM \"rpicar_drive\" WHERE $timeFilter", "refId": "A", "resultFormat": "time_series" }]
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"speed_mpm\") FROM \"rpicar_drive\" WHERE time > now() - 10s", "refId": "A", "resultFormat": "time_series" }]
     },
 
     {
@@ -97,9 +100,10 @@
       "gridPos": { "h": 4, "w": 3, "x": 10, "y": 1 },
       "id": 4,
       "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "noValue": "--",
       "title": "🌡️  CPU Temp",
       "type": "stat",
-      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"cpu_temp_c\") FROM \"rpicar_system\" WHERE $timeFilter", "refId": "A", "resultFormat": "time_series" }]
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"cpu_temp_c\") FROM \"rpicar_system\" WHERE time > now() - 10s", "refId": "A", "resultFormat": "time_series" }]
     },
 
     {
@@ -119,9 +123,10 @@
       "gridPos": { "h": 4, "w": 4, "x": 13, "y": 1 },
       "id": 5,
       "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "noValue": "--",
       "title": "🔴 Laser Distance",
       "type": "stat",
-      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"laser_mm\") FROM \"rpicar_sensors\" WHERE $timeFilter", "refId": "A", "resultFormat": "time_series" }]
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"laser_mm\") FROM \"rpicar_sensors\" WHERE time > now() - 10s", "refId": "A", "resultFormat": "time_series" }]
     },
 
     {
@@ -142,9 +147,10 @@
       "gridPos": { "h": 4, "w": 3, "x": 17, "y": 1 },
       "id": 18,
       "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "noValue": "--",
       "title": "🔑 Engine",
       "type": "stat",
-      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"engine_running\") FROM \"rpicar_drive\" WHERE $timeFilter", "refId": "A", "resultFormat": "time_series" }]
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"engine_running\") FROM \"rpicar_drive\" WHERE time > now() - 10s", "refId": "A", "resultFormat": "time_series" }]
     },
 
     {
@@ -163,9 +169,10 @@
       "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
       "id": 6,
       "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "noValue": "--",
       "title": "🎮 Throttle PWM",
       "type": "stat",
-      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"current_pwm\") FROM \"rpicar_drive\" WHERE $timeFilter", "refId": "A", "resultFormat": "time_series" }]
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"current_pwm\") FROM \"rpicar_drive\" WHERE time > now() - 10s", "refId": "A", "resultFormat": "time_series" }]
     },
 
     { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 }, "id": 101, "title": "🔌  Power & Drive", "type": "row" },
@@ -428,10 +435,10 @@
       }
     ]
   },
-  "time": { "from": "now-10m", "to": "now" },
+  "time": { "from": "now-5m", "to": "now" },
   "timepicker": {},
   "timezone": "browser",
   "title": "🚗 RPi Car — Real-Time Telemetry",
   "uid": "rpicar-telemetry-v2",
-  "version": 1
+  "version": 2
 }
