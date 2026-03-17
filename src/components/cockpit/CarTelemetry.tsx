@@ -5,7 +5,7 @@ import { ServiceLight, type SensorStatus } from "./ServiceLight";
 import { Speedometer, type SpeedUnit } from "./Speedometer";
 import { Gauge } from "./Gauge";
 import { BatteryGauge } from "./BatteryGauge";
-import { AccelerometerHUD } from "./AccelerometerHUD";
+import { CompassRose } from "./CompassRose";
 
 interface CarTelemetryProps {
   steeringAngle: number;
@@ -26,9 +26,9 @@ interface CarTelemetryProps {
   isEngineRunning?: boolean;
   sensors?: SensorStatus[];
   requiresService?: boolean;
-  accelX?: number;
-  accelY?: number;
-  accelZ?: number;
+  compassHeading?: number;
+  compassTargetHeading?: number;
+  pidCorrection?: number;
   wheelSync?: {
     status: string;
     active_ticks: number;
@@ -63,9 +63,9 @@ export const CarTelemetry = ({
   isEngineRunning = false,
   sensors = [],
   requiresService = false,
-  accelX = 0,
-  accelY = 0,
-  accelZ = 0,
+  compassHeading = 0,
+  compassTargetHeading = 0,
+  pidCorrection = 0,
   wheelSync = null,
 }: CarTelemetryProps) => {
   const [launchActive, setLaunchActive] = useState(false);
@@ -85,9 +85,9 @@ export const CarTelemetry = ({
 
   return (
     <div className="flex flex-col items-center justify-center h-full p-0.5 overflow-auto gap-1" data-scrollable="true" style={{ touchAction: 'pan-y' }}>
-      {/* HUD Row: MPU6050 Accelerometer */}
+      {/* HUD Row: Compass Rose */}
       <div className="w-full flex justify-center mb-0.5">
-        <AccelerometerHUD x={accelX} y={accelY} z={accelZ} />
+        <CompassRose heading={compassHeading} targetHeading={compassTargetHeading} pidCorrection={pidCorrection} />
       </div>
       {/* First Row: Temperature, CPU, GPU, Battery Gauges - Smaller */}
       <div className="flex gap-1 justify-center flex-wrap items-end">

@@ -173,10 +173,9 @@ export const CockpitController = () => {
   const [pidCorrection, setPidCorrection] = useState(0);
   const [gyroAvailable, setGyroAvailable] = useState(false);
   const [gyroCalibrated, setGyroCalibrated] = useState(false);
-  // MPU6050 Accelerometer
-  const [accelX, setAccelX] = useState(0);
-  const [accelY, setAccelY] = useState(0);
-  const [accelZ, setAccelZ] = useState(0);
+  // Compass heading
+  const [compassHeading, setCompassHeading] = useState(0);
+  const [compassTargetHeading, setCompassTargetHeading] = useState(0);
   // Slalom autopilot telemetry
   const [targetYaw, setTargetYaw] = useState(0);
   const [currentHeading, setCurrentHeading] = useState(0);
@@ -720,9 +719,8 @@ export const CockpitController = () => {
       if (data.pid_correction !== undefined) setPidCorrection(data.pid_correction);
       if (data.gyro_available !== undefined) setGyroAvailable(data.gyro_available);
       if (data.gyro_calibrated !== undefined) setGyroCalibrated(data.gyro_calibrated);
-      if (data.accel_x !== undefined) setAccelX(data.accel_x);
-      if (data.accel_y !== undefined) setAccelY(data.accel_y);
-      if (data.accel_z !== undefined) setAccelZ(data.accel_z);
+      if (data.compass_heading !== undefined) setCompassHeading(data.compass_heading);
+      if (data.compass_target_heading !== undefined) setCompassTargetHeading(data.compass_target_heading);
       // Update slalom autopilot telemetry
       if (data.target_yaw !== undefined) setTargetYaw(data.target_yaw);
       if (data.current_heading !== undefined) setCurrentHeading(data.current_heading);
@@ -1501,9 +1499,9 @@ export const CockpitController = () => {
               isEngineRunning={isEngineRunning}
               sensors={sensors}
               requiresService={requiresService}
-              accelX={accelX}
-              accelY={accelY}
-              accelZ={accelZ}
+              compassHeading={compassHeading}
+              compassTargetHeading={compassTargetHeading}
+              pidCorrection={pidCorrection}
               wheelSync={wheelSyncData}
             />
           </div>

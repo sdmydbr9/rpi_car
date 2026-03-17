@@ -1,6 +1,21 @@
 import os
 import sys
 
+# ==========================================
+# 🐛 DEBUG MODE — parse --debug=true early
+# ==========================================
+# Accept:  --debug=true | --debug=1 | --debug  (any casing)
+def _parse_debug_flag(argv=sys.argv[1:]) -> bool:
+    for arg in argv:
+        arg_lower = arg.lower()
+        if arg_lower in ("--debug", "--debug=true", "--debug=1", "--debug=yes"):
+            return True
+        if arg_lower.startswith("--debug="):
+            return False
+    return False
+
+DEBUG_MODE: bool = _parse_debug_flag()
+
 # Add core/ subpackage to import path so bare-name imports work
 # (e.g. "from motor import CarSystem" finds core/motor.py)
 _scripts_dir = os.path.dirname(os.path.abspath(__file__))
@@ -95,6 +110,143 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIST_DIR = os.path.join(PROJECT_ROOT, "dist")
 SOUNDS_DIR = os.path.join(PROJECT_ROOT, "sounds")
 
+# ==========================================
+# 🐛 DEBUG LOGGER
+# ==========================================
+# When started with --debug=true, a dedicated rotating-file logger writes
+# a compact CSV row every physics tick (20 ms) containing every available
+# sensor value.  The log lands in:
+#   <PROJECT_ROOT>/rover_logs/debug_YYYYMMDD_HHMMSS.csv
+#
+# The logger is initialised here (so it is available everywhere) but only
+# activates when DEBUG_MODE is True.
+
+import csv
+import datetime
+
+_debug_logger      = None   # csv.writer instance, None when debug is off
+_debug_log_file_fh = None   # underlying file handle (kept for flush/close)
+_DEBUG_LOG_FIELDS = [
+    # --- time ---
+    "timestamp",
+    # --- drive state ---
+    "gear", "gas_pressed", "brake_pressed", "current_pwm", "is_braking",
+    "steer_angle", "user_steer_angle", "obstacle_state",
+    # --- speed encoders (RPM from Pico) ---
+    "rpm_rear_right", "rpm_rear_left", "rpm_front_right",
+    # --- MPU6500 accelerometer ---
+    "accel_x", "accel_y", "accel_z",
+    # --- MPU6500 gyroscope ---
+    "gyro_x", "gyro_y", "gyro_z",
+    # --- temperature ---
+    "temp_c",
+    # --- magnetometer ---
+    "mag_x", "mag_y", "mag_z",
+    # --- compass / PID ---
+    "compass_heading", "compass_target_heading", "pid_correction",
+    "heading_error_deg", "steer_heading_delta_deg", "course_correction_active",
+    # --- laser ---
+    "laser_distance_cm", "laser_raw_mm",
+    # --- battery / power ---
+    "battery_voltage", "current_amps",
+    "power_limiter_max_duty", "power_limiter_l298n_drop",
+    # --- motor duty cycles ---
+    "duty_fl", "duty_fr", "duty_rl", "duty_rr",
+    # --- autonomous state ---
+    "autonomous_mode", "autonomous_state", "hunter_mode",
+    "emergency_brake_active",
+    # --- wheel sync ---
+    "sync_status",
+]
+
+def _init_debug_logger():
+    """Create the CSV debug log file and return the writer.  Called once at startup."""
+    global _debug_logger, _debug_log_file_fh
+    if not DEBUG_MODE:
+        return
+    log_dir = os.path.join(PROJECT_ROOT, "rover_logs")
+    os.makedirs(log_dir, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = os.path.join(log_dir, f"debug_{ts}.csv")
+    try:
+        _debug_log_file_fh = open(log_path, "w", newline="", buffering=1)  # line-buffered
+        _debug_logger = csv.writer(_debug_log_file_fh)
+        _debug_logger.writerow(_DEBUG_LOG_FIELDS)
+        print(f"🐛 [Debug] Logging to {log_path}")
+    except Exception as e:
+        print(f"⚠️  [Debug] Could not open debug log: {e}")
+        _debug_logger = None
+
+def _write_debug_row():
+    """Write one CSV row with the current sensor snapshot.  Called from physics_loop at ~50 Hz."""
+    if _debug_logger is None:
+        return
+    try:
+        pkt = pico_get_sensor_packet()
+        pl  = car_system.power_limiter
+
+        row = [
+            # timestamp
+            datetime.datetime.now().isoformat(timespec="milliseconds"),
+            # drive state
+            car_state.get("gear", "?"),
+            int(car_state.get("gas_pressed", False)),
+            int(car_state.get("brake_pressed", False)),
+            round(float(car_state.get("current_pwm", 0.0) or 0.0), 2),
+            int(car_state.get("is_braking", False)),
+            round(float(car_state.get("steer_angle", 0) or 0), 1),
+            round(float(car_state.get("user_steer_angle", 0) or 0), 1),
+            car_state.get("obstacle_state", "IDLE"),
+            # encoders
+            round(pkt.rpm_rear_right,  1) if pkt else 0.0,
+            round(pkt.rpm_rear_left,   1) if pkt else 0.0,
+            round(pkt.rpm_front_right, 1) if pkt else 0.0,
+            # accelerometer
+            round(pkt.accel_x, 4) if pkt else 0.0,
+            round(pkt.accel_y, 4) if pkt else 0.0,
+            round(pkt.accel_z, 4) if pkt else 0.0,
+            # gyroscope
+            round(pkt.gyro_x, 3) if pkt else 0.0,
+            round(pkt.gyro_y, 3) if pkt else 0.0,
+            round(pkt.gyro_z, 3) if pkt else 0.0,
+            # temperature
+            round(pkt.temp_c, 2) if pkt else 0.0,
+            # magnetometer
+            round(pkt.mag_x, 4) if pkt else 0.0,
+            round(pkt.mag_y, 4) if pkt else 0.0,
+            round(pkt.mag_z, 4) if pkt else 0.0,
+            # compass / PID
+            round(float(car_state.get("compass_heading",        0.0) or 0.0), 2),
+            round(float(car_state.get("compass_target_heading", 0.0) or 0.0), 2),
+            round(float(car_state.get("pid_correction",         0.0) or 0.0), 3),
+            round(float(car_state.get("heading_error",          0.0) or 0.0), 2),
+            round(float(car_state.get("steer_heading_delta",    0.0) or 0.0), 1),
+            int(car_state.get("course_correction_active", False)),
+            # laser
+            round(float(car_state.get("laser_distance", 0.0) or 0.0), 1),
+            pkt.laser_mm if pkt else -1,
+            # battery / power
+            round(float(car_state.get("battery_voltage", -1.0) or -1.0), 3),
+            round(float(car_state.get("current_amps",     0.0) or  0.0), 3),
+            round(pl.max_safe_duty,  2),
+            round(pl.l298n_drop,     2),
+            # motor duty cycles (applied)
+            round(car_system._applied_duty_fl, 2),
+            round(car_system._applied_duty_fr, 2),
+            round(car_system._applied_duty_rl, 2),
+            round(car_system._applied_duty_rr, 2),
+            # autonomous state
+            int(car_state.get("autonomous_mode",      False)),
+            car_state.get("autonomous_state",         "IDLE"),
+            int(car_state.get("hunter_mode",          False)),
+            int(car_state.get("emergency_brake_active", False)),
+            # wheel sync
+            car_system.get_sync_telemetry().get("status", "OFF"),
+        ]
+        _debug_logger.writerow(row)
+    except Exception:
+        pass  # Never let debug logging crash the physics loop
+
 # --- MOTOR PINS (BCM Numbering) — Dual L298N, 4WD ---
 # Managed by CarSystem in motor.py — listed here for wiring reference only.
 # Driver 1 (Front): FL_IN1=17, FL_IN2=27, FL_ENA=12, FR_IN3=23, FR_IN4=22, FR_ENB=13
@@ -140,19 +292,66 @@ MIN_REVERSE_POWER = 15         # Minimum power needed to move motors (adjust if 
 # whichever side is pulling off course, keeping the car on track.
 #
 # Hardware note: the metal RL gearbox is physically capped at ~163 RPM even
-# at 100 % duty.  Reducing left_motor_speed only affects actual wheel speed
-# once the PID target drops below that ~163 RPM ceiling.  At high throttle
-# (gear S) both sides already target 500 RPM, so the left-only correction
-# approach was slow to react.  The correction now operates on BOTH sides:
-#   • Drifting right → reduce left  AND  increase right (half each)
-#   • Drifting left  → reduce right AND  increase left  (half each)
-# This gives the PID headroom on the right (RR plastic, naturally runs at
-# moderate duty) to act immediately, while the left reduction takes effect
-# as heading error grows large enough to push RL below its physical ceiling.
-STRAIGHT_KP = 1.2             # % speed correction per degree of heading error
-STRAIGHT_MAX_CORR = 25.0      # Maximum per-side speed change (%) per tick
-STRAIGHT_STEER_DEADBAND = 3.0 # User steering below this (°) enables gyro correction
-STRAIGHT_SPEED_THRESHOLD = 5.0 # Minimum current_pwm (%) to activate gyro correction
+# Heading error is converted to a steering correction angle (like test_drive.py)
+# and applied via a proportional differential — the inner wheel is slowed
+# proportionally while the outer maintains speed.  This is identical to
+# MotorDriver.forward_steer() and is far more reliable than raw PWM biasing,
+# especially at high throttle where the metal RL gearbox is already at its
+# physical ceiling (~163 RPM) and a small PWM delta has no effect.
+#
+# Sign convention (CW-positive compass, matches test_drive.py HEADING_SIGN=-1):
+#   error > 0 → heading rose → drifted RIGHT → steer_corr < 0 → slow LEFT wheel
+#   error < 0 → heading fell → drifted LEFT  → steer_corr > 0 → slow RIGHT wheel
+STRAIGHT_KP = 1.2             # Proportional gain — ° heading error → ° steer correction
+STRAIGHT_KI = 0.05            # Integral gain — removes persistent drift bias
+STRAIGHT_KD = 0.08            # Derivative gain — damps overshoot via gyro_z
+STRAIGHT_I_MAX = 15.0         # Anti-windup clamp on integral term
+STRAIGHT_MAX_CORR = 25.0      # Maximum steering correction angle (°) for course hold
+STRAIGHT_STEER_DEADBAND = 3.0 # User steering below this (°) enables compass correction
+STRAIGHT_SPEED_THRESHOLD = 5.0 # Minimum current_pwm (%) to activate compass correction
+
+# --- COMPASS CALIBRATION (loaded from diagnostics/compass_cal.json) ---
+_CAL_FILE = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'diagnostics', 'compass_cal.json')
+)
+_MAG_OFFSET_X = 0.0
+_MAG_OFFSET_Y = 0.0
+_MAG_SCALE_X  = 1.0
+_MAG_SCALE_Y  = 1.0
+
+def _load_compass_cal():
+    global _MAG_OFFSET_X, _MAG_OFFSET_Y, _MAG_SCALE_X, _MAG_SCALE_Y
+    if not os.path.exists(_CAL_FILE):
+        print(f"⚠️  No compass_cal.json found at {_CAL_FILE} — heading correction uses raw values")
+        return False
+    try:
+        with open(_CAL_FILE) as f:
+            d = json.load(f)
+        _MAG_OFFSET_X = float(d['offset_x'])
+        _MAG_OFFSET_Y = float(d['offset_y'])
+        _MAG_SCALE_X  = float(d['scale_x'])
+        _MAG_SCALE_Y  = float(d['scale_y'])
+        print(f"✅ Compass cal loaded  offset=({_MAG_OFFSET_X:.2f}, {_MAG_OFFSET_Y:.2f})  "
+              f"scale=({_MAG_SCALE_X:.4f}, {_MAG_SCALE_Y:.4f})")
+        return True
+    except Exception as e:
+        print(f"⚠️  Failed to load compass_cal.json: {e}")
+        return False
+
+_load_compass_cal()
+
+def _compute_compass_heading(pkt) -> float:
+    """Return a calibrated CW compass bearing (0-360°) from a SensorPacket."""
+    cx = (pkt.mag_x - _MAG_OFFSET_X) * _MAG_SCALE_X
+    cy = (pkt.mag_y - _MAG_OFFSET_Y) * _MAG_SCALE_Y
+    return (-math.degrees(math.atan2(cy, cx)) + 90.0) % 360.0
+
+def _heading_error(current: float, target: float) -> float:
+    """Shortest-path signed difference current-target (−180 to +180)."""
+    diff = current - target
+    while diff >  180.0: diff -= 360.0
+    while diff < -180.0: diff += 360.0
+    return diff
 
 # --- CAMERA SETTINGS ---
 # Legacy resolution names mapped to WxH for backward compatibility
@@ -2055,6 +2254,12 @@ car_state = {
     "pid_correction": 0.0,             # Current PID heading correction
     "gyro_available": False,           # MPU6050 hardware detected
     "gyro_calibrated": False,          # Gyro has been calibrated
+    # 🧭 Compass telemetry
+    "compass_heading": 0.0,            # Calibrated CW bearing from magnetometer (°)
+    "compass_target_heading": 0.0,     # Locked target heading for straight drive (°)
+    "heading_error": 0.0,              # Current heading error (°): compass − target
+    "steer_heading_delta": 0.0,        # Heading change produced by last steering event (°)
+    "course_correction_active": False, # True when compass PID correction is actively running
     # 🔄 Speed Encoder (Rear-Right Wheel)
     "encoder_rpm": 0.0,                  # Real RPM from encoder
     "encoder_speed_mpm": 0.0,            # Speed in meters per minute
@@ -3213,11 +3418,20 @@ def physics_loop():
     steering_timer = 0       # Timer for steering duration
     target_steer_angle = 0   # Target angle during steering phase
     was_autonomous = False   # Track autonomous → manual transition
+    _avoidance_saved_gear = None  # Gear saved when obstacle avoidance commandeers it
 
-    # Gyro heading-lock state (resets on any steering input or stop)
-    _heading_locked = False       # True once we have a valid reference heading of 0
-    _integrated_heading = 0.0     # Cumulative yaw angle (°), reset when steering starts
-    _heading_last_time = time.time()  # Last integration timestamp
+    # Compass heading-lock state
+    _compass_locked   = False      # True once we have a locked target heading
+    _compass_target   = 0.0        # Target CW bearing (°) locked when going straight
+    _compass_integral = 0.0        # PID integral accumulator
+    _compass_last_time = time.time()
+    # Keep legacy gyro state so autopilot telemetry still works
+    _heading_locked = False
+    _integrated_heading = 0.0
+    _heading_last_time = time.time()
+    # Steering-to-heading tracking
+    _steer_was_active = False   # True while |user_steer_angle| > deadband
+    _pre_steer_target = 0.0     # Target heading at the start of the current steering event
     
     while True:
         car_state["left_obstacle"] = False
@@ -3308,52 +3522,21 @@ def physics_loop():
             # the emergency brake GPIO is applied below by the motor-output
             # section; the module will detect the obstacle on its next tick.
         elif not car_state["autonomous_mode"] and not car_state["hunter_mode"]:
-            # Laser-based obstacle detection
-            obstacle_detected = laser_distance < LASER_STOP_DISTANCE
-            too_close = laser_distance < LASER_CRAWL_DISTANCE
-            
-            if obstacle_detected and gas:
-                if obstacle_state == "IDLE":
-                    # Trigger: Obstacle detected, enter appropriate avoidance state
-                    if too_close:
-                        obstacle_state = "REVERSING"
-                        car_state["obstacle_state"] = "REVERSING"
-                    else:
-                        obstacle_state = "STEERING"
-                        car_state["obstacle_state"] = "STEERING"
-                        target_steer_angle = 60
-                
-                elif obstacle_state == "REVERSING":
-                    car_state["steer_angle"] = 0
-                    steering_timer += 1
-                    
-                    if steering_timer > 25:
-                        steering_timer = 0
-                        target_steer_angle = 60
-                        print("🔄 REVERSE COMPLETE - NOW STEERING RIGHT")
-                        obstacle_state = "STEERING"
-                        car_state["obstacle_state"] = "STEERING"
-                
-                elif obstacle_state == "STEERING":
-                    car_state["steer_angle"] = target_steer_angle
-                    steering_timer += 1
-                    
-                    if not obstacle_detected:
-                        obstacle_state = "IDLE"
-                        car_state["obstacle_state"] = "IDLE"
-                        car_state["steer_angle"] = user_angle
-                        print("✅ OBSTACLE CLEARED - RESUMING NORMAL CONTROL")
-                    elif steering_timer > 100:
-                        obstacle_state = "REVERSING"
-                        car_state["obstacle_state"] = "REVERSING"
-                        steering_timer = 0
-                        print("⏰ STEERING TIMEOUT - TRYING REVERSE")
-            else:
-                # No obstacles detected
-                if obstacle_state != "IDLE":
-                    obstacle_state = "IDLE"
-                    car_state["obstacle_state"] = "IDLE"
-                car_state["steer_angle"] = user_angle
+            # MANUAL MODE — user has full control.
+            # Obstacle avoidance FSM is intentionally disabled: the driver
+            # decides when to brake, steer, or reverse.  The only automatic
+            # intervention is the emergency laser stop at < 8 cm (handled above
+            # by emergency_laser_override) which protects hardware.
+            #
+            # Clear any leftover avoidance state from a previous session.
+            if obstacle_state != "IDLE":
+                if _avoidance_saved_gear is not None:
+                    car_state["gear"] = _avoidance_saved_gear
+                    _avoidance_saved_gear = None
+                obstacle_state = "IDLE"
+                car_state["obstacle_state"] = "IDLE"
+            # Pass steering straight through.
+            car_state["steer_angle"] = user_angle
         else:
             # Autonomous/Hunter mode active — AutoPilot or Hunter drives motors directly
             # via CarSystem; physics_loop only reads sensors for telemetry.
@@ -3420,21 +3603,10 @@ def physics_loop():
                         target = max_s if (gas and gear != "N") else 0
                         if gas and current < min_s: current = min_s
                     
-                    # --- LASER-BASED SPEED REDUCTION ---
-                    if target > 0:
-                        if laser_distance < LASER_STOP_DISTANCE:
-                            # Emergency stop - too close!
-                            target = 0
-                        elif laser_distance < LASER_CRAWL_DISTANCE:
-                            # Very close - crawl speed (5% max)
-                            target = min(target, 5)
-                        elif laser_distance < LASER_SLOW_DISTANCE:
-                            # Close - very slow movement (15% max)
-                            target = min(target, 15)
-                        elif laser_distance < LASER_CAUTION_DISTANCE:
-                            # Getting close - moderate speed (40% max)
-                            target = min(target, 40)
-                    
+                    # NOTE: Laser-based speed reduction is intentionally disabled
+                    # in manual mode.  The driver has full throttle control.
+                    # The only protection is the 8-cm emergency stop above.
+
                     # Hard dynamic voltage cap on any target
                     target = min(target, car_system.power_limiter.max_safe_duty)
                     
@@ -3445,59 +3617,11 @@ def physics_loop():
                     
                     car_state["current_pwm"] = current
         
-        # --- OBSTACLE AVOIDANCE PHYSICS ---
-        elif obstacle_state == "REVERSING":
-            # Brake-before-reverse: ensure the car is stopped before reversing.
-            # The physics loop's braking logic will have ramped current
-            # toward 0.  Only engage reverse once speed is low enough.
-            if current > MIN_SPEED_FOR_GEAR_CHANGE:
-                # Still decelerating — apply brakes, don't reverse yet
-                current -= BRAKE_DECEL_RATE
-                current = max(0, current)
-                car_state["current_pwm"] = current
-                car_state["is_braking"] = current < 1.0
-            else:
-                # Stopped — safe to reverse with configurable power
-                current = REVERSE_POWER
-                car_state["current_pwm"] = current
-                car_state["gear"] = "R"  # Force reverse gear
-                car_state["is_braking"] = False
-        
-        elif obstacle_state == "STEERING":
-            # Use laser-reduced speeds during steering
-            if car_state["speed_limit_enabled"]:
-                target = car_state["speed_limit"] if gas else 0
-            else:
-                ranges = car_system.power_limiter.gear_duty_ranges()
-                min_s, max_s = ranges.get(gear, (0, 40))
-                target = max_s if gas else 0
-                if gas and current < min_s: current = min_s
-            
-            # Apply laser speed reduction even during steering
-            if target > 0:
-                if laser_distance < LASER_STOP_DISTANCE:
-                    target = 0
-                elif laser_distance < LASER_CRAWL_DISTANCE:
-                    target = min(target, 5)
-                elif laser_distance < LASER_SLOW_DISTANCE:
-                    target = min(target, 15)
-                elif laser_distance < LASER_CAUTION_DISTANCE:
-                    target = min(target, 40)
-            
-            # Hard dynamic voltage cap on any target
-            target = min(target, car_system.power_limiter.max_safe_duty)
-            
-            # Smooth Ramping
-            if current < target: current += ACCEL_RATE
-            elif current > target: current -= COAST_RATE
-            current = max(0, current)
-            
-            car_state["current_pwm"] = current
+        # (Obstacle avoidance REVERSING/STEERING physics blocks removed.
+        # Manual mode gives the driver full control; the FSM no longer runs.
+        # obstacle_state is always IDLE in manual mode.)
 
-        # Re-read gear — obstacle avoidance (REVERSING) may have
-        # changed car_state["gear"] to "R" after we read it at the
-        # top of this iteration.  Using the stale value would apply
-        # the wrong direction for one full 20 ms frame.
+        # Re-read gear in case something else changed it this tick.
         gear = car_state["gear"]
 
         # --- AUDIO STATE ---
@@ -3566,21 +3690,22 @@ def physics_loop():
             right_motor_speed = 0
             left_motor_speed = current
 
-        # --- 3b. GYRO HEADING CORRECTION (straight-line course lock) ---
-        # Integrates MPU6500 gyro_z into a heading angle and applies a
-        # proportional speed bias to whichever side is pulling off course.
+        # --- 3b. COMPASS HEADING CORRECTION (magnetometer-based course lock) ---
+        # When driving straight forward (|user_angle| < deadband):
+        #   • Locks the current compass bearing as the target on first active tick.
+        #   • Runs a PID loop (KP + KI + KD via gyro_z) to keep the car on heading.
+        #   • Applies a symmetric speed bias: drifted right → left gains, right loses.
+        # When the user steers:
+        #   • Compass correction is suspended; differential mixer steers normally.
+        #   • On next straight tick the new post-turn bearing is locked as target.
         #
-        # Sign convention (MPU6500/MPU6050, standard RHR orientation):
-        #   Positive gyro_z = CCW from above = left yaw
-        #   Negative gyro_z = CW  from above = right yaw  ← common drift direction
-        # Therefore: heading goes negative when car drifts right.
-        #   heading_error = -heading → positive when drifted right
-        #   Positive correction → slow LEFT side → right runs free → car turns left ✓
-        #
-        # Activates only when: going straight (|user_angle| < deadband), forward gear,
-        # gas held, not braking, obstacle FSM idle.
-        # Resets heading reference whenever steering input or obstacle avoidance begins.
-        _gyro_active = (
+        # Sign convention (CW-positive compass):
+        #   error = current - target
+        #   error > 0 → heading rose → car drifted RIGHT → correct LEFT
+        #     • slow left, speed up right (same as original gyro block)
+        #   error < 0 → heading dropped → car drifted LEFT → correct RIGHT
+        #     • slow right, speed up left
+        _compass_active = (
             abs(user_angle) < STRAIGHT_STEER_DEADBAND
             and obstacle_state == "IDLE"
             and gas
@@ -3590,40 +3715,82 @@ def physics_loop():
             and current >= STRAIGHT_SPEED_THRESHOLD
             and car_state.get("mpu6050_enabled", True)
         )
-        if _gyro_active:
+        if _compass_active:
             try:
                 pkt = pico_get_sensor_packet()
-                raw_gz = pkt.gyro_z if pkt else 0.0
-                if abs(raw_gz) >= 500.0:
-                    raw_gz = 0.0  # discard clearly bogus sensor value
-                now_h = time.time()
-                dt_h = min(now_h - _heading_last_time, 0.1)  # cap dt to avoid jumps
-                _heading_last_time = now_h
-                if not _heading_locked:
-                    _integrated_heading = 0.0
-                    _heading_locked = True
-                _integrated_heading += raw_gz * dt_h
-                _integrated_heading *= 0.998  # gentle decay — suppresses static gyro bias
-                heading_error = -_integrated_heading  # positive when drifted right
-                corr = max(-STRAIGHT_MAX_CORR,
-                           min(STRAIGHT_MAX_CORR, STRAIGHT_KP * heading_error))
-                half = corr / 2.0
-                if corr > 1.0:        # drifted right — slow left AND speed up right
-                    left_motor_speed  = max(0.0, left_motor_speed - half)
-                    right_motor_speed = min(100.0, right_motor_speed + half)
-                elif corr < -1.0:     # drifted left  — slow right AND speed up left
-                    right_motor_speed = max(0.0, right_motor_speed + half)  # half < 0
-                    left_motor_speed  = min(100.0, left_motor_speed - half)  # -half > 0
-                car_state["pid_correction"] = round(corr, 2)
-                car_state["current_heading"] = round(_integrated_heading, 2)
+                if pkt:
+                    chdg = _compute_compass_heading(pkt)
+                    car_state["compass_heading"] = round(chdg, 1)
+                    now_c = time.time()
+                    dt_c = min(now_c - _compass_last_time, 0.1)
+                    _compass_last_time = now_c
+                    if not _compass_locked:
+                        _compass_target = chdg
+                        _compass_locked = True
+                        _compass_integral = 0.0
+                        car_state["compass_target_heading"] = round(_compass_target, 1)
+                        # Log heading update when returning from a steering event
+                        if _steer_was_active:
+                            delta = _heading_error(_compass_target, _pre_steer_target)
+                            car_state["steer_heading_delta"] = round(delta, 1)
+                            print(f"🧭 [Heading] Steering → new target: "
+                                  f"{_pre_steer_target:.1f}° → {_compass_target:.1f}° "
+                                  f"(Δ{delta:+.1f}°) — course correction engaged")
+                            _steer_was_active = False
+                    err = _heading_error(chdg, _compass_target)
+                    _compass_integral = max(
+                        -STRAIGHT_I_MAX,
+                        min(STRAIGHT_I_MAX, _compass_integral + err * dt_c)
+                    )
+                    raw_gz = pkt.gyro_z if abs(pkt.gyro_z) < 500.0 else 0.0
+                    corr = STRAIGHT_KP * err + STRAIGHT_KI * _compass_integral - STRAIGHT_KD * raw_gz
+                    corr = max(-STRAIGHT_MAX_CORR, min(STRAIGHT_MAX_CORR, corr))
+                    # Convert PID output → steering angle (identical to test_drive.py):
+                    #   corr > 0 → drifted right → steer LEFT  → negative angle → slow left
+                    #   corr < 0 → drifted left  → steer RIGHT → positive angle → slow right
+                    steer_corr = -corr
+                    if abs(steer_corr) > 2.0:
+                        turn_factor = abs(steer_corr) / 90.0
+                        inner_speed = current * max(0.1, 1.0 - turn_factor * 0.9)
+                        if steer_corr < 0:   # steer LEFT  → slow left wheel
+                            left_motor_speed  = max(0.0, inner_speed)
+                            right_motor_speed = min(100.0, current)
+                        else:                # steer RIGHT → slow right wheel
+                            right_motor_speed = max(0.0, inner_speed)
+                            left_motor_speed  = min(100.0, current)
+                    car_state["pid_correction"]         = round(corr, 2)
+                    car_state["heading_error"]           = round(err, 2)
+                    car_state["current_heading"]         = round(chdg, 2)
+                    car_state["gyro_z"]                  = round(raw_gz, 2)
+                    car_state["course_correction_active"] = True
             except Exception:
-                _heading_locked = False
+                _compass_locked = False
         else:
-            # Steering started, obstacle FSM active, or car stopped — reset reference
-            _heading_locked = False
-            _integrated_heading = 0.0
-            _heading_last_time = time.time()
-            car_state["pid_correction"] = 0.0
+            # Steering or stopped — update compass reading and re-arm lock for next straight
+            try:
+                pkt = pico_get_sensor_packet()
+                if pkt:
+                    chdg = _compute_compass_heading(pkt)
+                    car_state["compass_heading"] = round(chdg, 1)
+                    # Detect start of steering: save old target so delta can be logged on re-lock
+                    if abs(user_angle) >= STRAIGHT_STEER_DEADBAND and not _steer_was_active:
+                        _pre_steer_target = _compass_target
+                        _steer_was_active = True
+                        print(f"🎡 [Heading] Steering started — current target: {_compass_target:.1f}°")
+                    # Unlock compass so it re-locks to new bearing when steering stops
+                    if _compass_locked and abs(user_angle) >= STRAIGHT_STEER_DEADBAND:
+                        _compass_locked = False  # will re-lock with new bearing when straight
+                        _compass_integral = 0.0
+            except Exception:
+                pass
+            if not gas or car_state["is_braking"]:
+                _compass_locked = False
+                _compass_integral = 0.0
+                _steer_was_active = False
+            _compass_last_time = time.time()
+            car_state["pid_correction"]         = 0.0
+            car_state["heading_error"]           = 0.0
+            car_state["course_correction_active"] = False
 
         # --- 4. APPLY TO MOTORS ---
         # Use car_system methods (which go through motor.py's GPIO
@@ -3639,14 +3806,15 @@ def physics_loop():
                 car_system.brake()
             else:
                 is_forward = (gear != "R")
-                if obstacle_state == "REVERSING":
-                    print(f"🔧 REVERSE MOTORS: L={int(left_motor_speed)}% R={int(right_motor_speed)}%")
                 car_system._set_raw_motors(
                     left_motor_speed, right_motor_speed,
                     is_forward, is_forward
                 )
         except Exception as e:
             print(f"❌ [Physics] Motor GPIO error: {e}")
+
+        # --- 5. DEBUG LOGGING ---
+        _write_debug_row()
 
         time.sleep(0.02)  # 20ms loop = 50Hz (2.5x faster reaction than 50ms)
 
@@ -3724,6 +3892,28 @@ def drive_autonomous():
                 pass
 
         time.sleep(0.05)  # 20 Hz
+
+# Initialise debug CSV logger (no-op when DEBUG_MODE is False)
+_init_debug_logger()
+
+# ==========================================
+# 🐛 DEBUG PLOT SERVER (port 5001)
+# ==========================================
+# When started with --debug=true, launch an interactive Plotly/Dash
+# telemetry viewer on port 5001.  It auto-discovers all CSV logs in
+# rover_logs/ and allows time-range filtering with live refresh.
+if DEBUG_MODE:
+    try:
+        import sys as _sys
+        _diag_dir = os.path.join(_scripts_dir, 'diagnostics')
+        if _diag_dir not in _sys.path:
+            _sys.path.insert(0, _diag_dir)
+        from debug_plot_server import start_debug_plot_server
+        # Pass the path of the CSV being written so Follow-Live starts on it immediately
+        _plot_log_path = _debug_log_file_fh.name if _debug_log_file_fh is not None else None
+        start_debug_plot_server(port=5001, log_path=_plot_log_path)
+    except Exception as _dps_err:
+        print(f"⚠️  [DebugPlots] Failed to start debug plot server: {_dps_err}")
 
 # Start the Engine (Thread)
 engine_thread = threading.Thread(target=physics_loop, daemon=True)
@@ -5893,6 +6083,12 @@ def telemetry_broadcast():
                 "pid_correction": car_state["pid_correction"],
                 "gyro_available": car_state["gyro_available"],
                 "gyro_calibrated": car_state["gyro_calibrated"],
+                # 🧭 Compass telemetry
+                "compass_heading": car_state.get("compass_heading", 0.0),
+                "compass_target_heading": car_state.get("compass_target_heading", 0.0),
+                "heading_error": car_state.get("heading_error", 0.0),
+                "steer_heading_delta": car_state.get("steer_heading_delta", 0.0),
+                "course_correction_active": car_state.get("course_correction_active", False),
                 # 🧭 Slalom yaw-tracking telemetry
                 "target_yaw": car_state.get("target_yaw", 0.0),
                 "current_heading": car_state.get("current_heading", 0.0),
@@ -6350,3 +6546,11 @@ if __name__ == "__main__":
         narration_engine.stop()
         autopilot.stop()
         car_system.cleanup()
+        # Flush & close debug log if active
+        if _debug_log_file_fh is not None:
+            try:
+                _debug_log_file_fh.flush()
+                _debug_log_file_fh.close()
+                print("🐛 [Debug] Log file closed.")
+            except Exception:
+                pass

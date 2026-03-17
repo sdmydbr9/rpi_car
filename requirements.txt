@@ -14,3 +14,5 @@ mpu6050-raspberrypi>=1.2
 adafruit-circuitpython-vl53l0x
 pygame>=2.0.0
 pydub>=0.25.1
+dash>=2.16.0
+plotly>=5.20.0

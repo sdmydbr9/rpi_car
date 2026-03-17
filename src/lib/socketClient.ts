@@ -84,6 +84,9 @@ export interface TelemetryData {
   gamepad_connected?: boolean;
   gamepad_enabled?: boolean;
   gamepad_gear?: string;
+  // Compass / magnetometer heading
+  compass_heading?: number;
+  compass_target_heading?: number;
   // Wheel Speed Sync telemetry
   wheel_sync?: {
     status: string;
