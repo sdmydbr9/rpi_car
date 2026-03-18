@@ -111,21 +111,14 @@ DIST_DIR = os.path.join(PROJECT_ROOT, "dist")
 SOUNDS_DIR = os.path.join(PROJECT_ROOT, "sounds")
 
 # ==========================================
-# 🐛 DEBUG LOGGER
+# 🐛 DEBUG RING BUFFER
 # ==========================================
-# When started with --debug=true, a dedicated rotating-file logger writes
-# a compact CSV row every physics tick (20 ms) containing every available
-# sensor value.  The log lands in:
-#   <PROJECT_ROOT>/rover_logs/debug_YYYYMMDD_HHMMSS.csv
-#
-# The logger is initialised here (so it is available everywhere) but only
-# activates when DEBUG_MODE is True.
+# When started with --debug=true data is pushed into an in-memory ring
+# buffer (no CSV is written) and streamed live to the interactive Dash
+# dashboard running on port 5001.
 
-import csv
 import datetime
 
-_debug_logger      = None   # csv.writer instance, None when debug is off
-_debug_log_file_fh = None   # underlying file handle (kept for flush/close)
 _DEBUG_LOG_FIELDS = [
     # --- time ---
     "timestamp",
@@ -159,27 +152,12 @@ _DEBUG_LOG_FIELDS = [
     "sync_status",
 ]
 
-def _init_debug_logger():
-    """Create the CSV debug log file and return the writer.  Called once at startup."""
-    global _debug_logger, _debug_log_file_fh
-    if not DEBUG_MODE:
-        return
-    log_dir = os.path.join(PROJECT_ROOT, "rover_logs")
-    os.makedirs(log_dir, exist_ok=True)
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = os.path.join(log_dir, f"debug_{ts}.csv")
-    try:
-        _debug_log_file_fh = open(log_path, "w", newline="", buffering=1)  # line-buffered
-        _debug_logger = csv.writer(_debug_log_file_fh)
-        _debug_logger.writerow(_DEBUG_LOG_FIELDS)
-        print(f"🐛 [Debug] Logging to {log_path}")
-    except Exception as e:
-        print(f"⚠️  [Debug] Could not open debug log: {e}")
-        _debug_logger = None
+# Filled in after debug_plot_server is imported (see the DEBUG_MODE block below).
+_debug_push_row  = None   # callable: push_row(row) from debug_plot_server
 
 def _write_debug_row():
-    """Write one CSV row with the current sensor snapshot.  Called from physics_loop at ~50 Hz."""
-    if _debug_logger is None:
+    """Push one snapshot row into the in-memory ring buffer.  Called from physics_loop at ~50 Hz."""
+    if _debug_push_row is None:
         return
     try:
         pkt = pico_get_sensor_packet()
@@ -243,7 +221,7 @@ def _write_debug_row():
             # wheel sync
             car_system.get_sync_telemetry().get("status", "OFF"),
         ]
-        _debug_logger.writerow(row)
+        _debug_push_row(row)
     except Exception:
         pass  # Never let debug logging crash the physics loop
 
@@ -3893,25 +3871,29 @@ def drive_autonomous():
 
         time.sleep(0.05)  # 20 Hz
 
-# Initialise debug CSV logger (no-op when DEBUG_MODE is False)
-_init_debug_logger()
-
 # ==========================================
 # 🐛 DEBUG PLOT SERVER (port 5001)
 # ==========================================
 # When started with --debug=true, launch an interactive Plotly/Dash
-# telemetry viewer on port 5001.  It auto-discovers all CSV logs in
-# rover_logs/ and allows time-range filtering with live refresh.
+# telemetry dashboard on port 5001.  Data is streamed from the physics
+# loop into an in-memory ring buffer — no CSV files are written.
 if DEBUG_MODE:
     try:
         import sys as _sys
         _diag_dir = os.path.join(_scripts_dir, 'diagnostics')
         if _diag_dir not in _sys.path:
             _sys.path.insert(0, _diag_dir)
-        from debug_plot_server import start_debug_plot_server
-        # Pass the path of the CSV being written so Follow-Live starts on it immediately
-        _plot_log_path = _debug_log_file_fh.name if _debug_log_file_fh is not None else None
-        start_debug_plot_server(port=5001, log_path=_plot_log_path)
+        from debug_plot_server import (
+            start_debug_plot_server,
+            push_row  as _debug_push_row_fn,
+            set_fields as _debug_set_fields_fn,
+        )
+        # Register the push callable so _write_debug_row() can call it
+        _debug_push_row = _debug_push_row_fn
+        # Tell the buffer what column names to expect
+        _debug_set_fields_fn(_DEBUG_LOG_FIELDS)
+        start_debug_plot_server(port=5001)
+        print("🐛 [DebugPlots] Interactive plot dashboard: http://0.0.0.0:5001")
     except Exception as _dps_err:
         print(f"⚠️  [DebugPlots] Failed to start debug plot server: {_dps_err}")
 
@@ -6546,11 +6528,4 @@ if __name__ == "__main__":
         narration_engine.stop()
         autopilot.stop()
         car_system.cleanup()
-        # Flush & close debug log if active
-        if _debug_log_file_fh is not None:
-            try:
-                _debug_log_file_fh.flush()
-                _debug_log_file_fh.close()
-                print("🐛 [Debug] Log file closed.")
-            except Exception:
-                pass
+        print("🐛 [Debug] Session data cleared from memory.")
