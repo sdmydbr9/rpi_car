@@ -7,8 +7,8 @@
  */
 
 export interface DebugSample {
-  // time
-  timestamp: string;
+  // time — Unix epoch milliseconds (timezone-free)
+  timestamp: number;
   // drive state
   gear: string;
   gas_pressed: number;
@@ -137,7 +137,7 @@ export function buildMockDebugData(seconds = 30): DebugSample[] {
     const err = heading - target;
 
     samples.push({
-      timestamp: new Date(base + i * 1000).toISOString(),
+      timestamp: base + i * 1000,   // epoch ms — matches server format
       gear: isMoving ? "D" : "P",
       gas_pressed: isMoving ? 1 : 0,
       brake_pressed: state === "STOP" ? 1 : 0,

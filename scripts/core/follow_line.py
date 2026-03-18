@@ -20,7 +20,7 @@ Web UI:  http://<pi-ip>:<port>
 """
 
 # ── stdlib ──────────────────────────────────────────────
-import sys, os, time, threading, signal, argparse, io, logging
+import sys, os, time, threading, signal, argparse, io, logging, math
 from collections import deque
 from datetime import datetime
 
@@ -56,7 +56,14 @@ import numpy as np
 from flask import Flask, Response, jsonify, request
 
 # ── project hardware ───────────────────────────────────
-from pico_sensor_reader import init_pico_reader, send_pan_tilt, get_gyro_z, get_rpm, is_pico_fresh
+from pico_sensor_reader import (
+    init_pico_reader,
+    send_pan_tilt,
+    get_gyro_z,
+    get_rpm,
+    get_magnetometer,
+    is_pico_fresh,
+)
 from motor import CarSystem
 
 # ── camera (Picamera2 on RPi, fallback to OpenCV) ─────
@@ -84,18 +91,19 @@ LINE_CONFIRM_FRAMES = 5      # consecutive detections before "ready"
 CONTRAST_THRESH    = 25       # per-channel local-contrast threshold
 
 # Driving
-DEFAULT_SPEED  = 50           # base PWM %  (lower = more time to correct)
-STEERING_KP    = 0.25         # reduced from 0.45 — was causing violent oscillation
-STEERING_KI    = 0.005        # integral: accumulates to fix persistent drift
-STEERING_KD    = 0.12         # derivative: dampens oscillation
-MAX_STEER      = 45           # clamp
-INTEGRAL_MAX   = 15.0         # tightened from 25.0 — limits windup on line-loss
-# Tank-turn (unicycle) mixer: inner wheel transitions slow → stop → reverse
-# as |steer| grows.  No STEER_DIFFERENTIAL constant is needed — the
-# unicycle model naturally keeps the outer wheel at ~speed while the
-# inner side goes negative (all 4 wheels engaged in a genuine pivot)
-# once |steer_frac| > 0.5.  See _loop for the mixer implementation.
+DEFAULT_SPEED  = 38           # base PWM %
+STEERING_KP    = 0.16
+STEERING_KI    = 0.020
+STEERING_KD    = 0.035
+MAX_STEER      = 35           # clamp
+INTEGRAL_MAX   = 10.0
 LINE_LOST_TIMEOUT = 0.5       # seconds with no line → stop
+CENTER_DEADBAND_PX = 12
+ERROR_FILTER_ALPHA = 0.22
+LOOKAHEAD_FILTER_ALPHA = 0.18
+STEER_SLEW_RATE = 180.0       # deg/sec max steering change
+MAX_DIFF_FRAC = 0.65          # max left/right speed difference
+PIVOT_THRESHOLD = 0.92        # only allow reverse near absolute max steer
 
 # Static motor trim — compensates for different-motor torque imbalance.
 # Negative = nudge left (counteract right-drift).  Tune with --bias.
@@ -108,10 +116,20 @@ DEFAULT_MOTOR_BIAS = 0.0
 # Physical test confirmed: Left/CCW = +gz, Right/CW = -gz (standard RHR).
 #   gz > 0 (yawing left):  slow left + speed right  → resists leftward spin
 #   gz < 0 (yawing right): speed left + slow right  → resists rightward spin
-GYRO_KP       = 0.30    # per-side PWM % per °/s  (e.g. 30°/s → ±9% each)
-GYRO_MAX_CORR = 10.0    # per-side PWM clamp (%)
-GYRO_DEADZONE = 3.5     # °/s — still noise floor is ±2.47 °/s
-GYRO_FADE_PX  = 80      # pixel error at which gyro contribution → 0 (soft fade)
+GYRO_KP         = 0.18  # per-side PWM % per °/s
+GYRO_MAX_CORR   = 6.0   # per-side PWM clamp (%)
+GYRO_DEADZONE   = 4.0   # °/s
+GYRO_FADE_STEER = 20.0  # fade gyro damping as steering angle grows
+
+# Magnetometer-assisted heading hold.
+# Vision remains primary; fused heading only helps stabilise straight travel
+# and carry through brief weak/noisy detections without fighting real turns.
+MAG_HEADING_KP        = 0.10   # per-side PWM % per degree of heading error
+MAG_HEADING_MAX_CORR  = 5.0    # per-side PWM clamp (%)
+MAG_BLEND_ALPHA       = 0.98   # complementary filter gyro weight
+MAG_LOCK_CENTER_PX    = 18     # capture target heading only when line is well centred
+MAG_FADE_PX           = 65     # fade heading assist out during larger visual turns
+MAG_MIN_FIELD         = 1e-3   # ignore near-zero field vectors
 
 # Encoder differential correction (LM393) — per-side PWM speed bias.
 # Mirrors main.py: apply half the correction to each side instead of
@@ -126,10 +144,27 @@ ENCODER_MAX_CORR    = 12.0  # clamp per-side PWM correction (%)
 ENCODER_MIN_RPM     = 3.0   # both sides must exceed this before correction fires
 ENCODER_SUPPRESS_PX = 50    # suppress encoder corr. during hard vision turns
 
+# Rover geometry and motion model.
+# This rover is skid-steer, so encoder-derived yaw rate depends primarily on
+# left/right track width rather than steering-linkage geometry.
+WHEEL_DIAMETER_M     = 0.065
+WHEEL_CIRCUMFERENCE_M = math.pi * WHEEL_DIAMETER_M
+ROVER_TRACK_WIDTH_M  = 0.14
+
 # Line lock — spatial + colour gate applied once a line is confirmed.
 # Prevents the rover jumping to a different nearby line mid-follow.
 LOCK_SPATIAL_MARGIN = 120   # px: contour centroid must be within this of the locked cx
 LOCK_COLOUR_TOL     = 40    # 0-255: mean BGR of locked contour must stay within this
+LOCK_TEMPLATE_MIN_SCORE = 2.2
+LOCK_TEMPLATE_STRICT_SCORE = 2.8
+LOCK_HUE_TOL = 22.0
+LOCK_SAT_TOL = 70.0
+LOCK_VAL_TOL = 90.0
+LOCK_THICKNESS_FRAC = 0.75
+LOCK_ROW_HIT_FRAC = 0.70
+LOCK_ELONGATION_FRAC = 0.90
+LOCK_BLEND_ALPHA = 0.18
+MEMORY_BLEND_ALPHA = 0.08
 
 # Path trail drawn on annotated frame (rolling centroid history)
 PATH_HISTORY_LEN = 60       # how many centroid samples to keep (~1.5 s at 40 fps)
@@ -142,13 +177,42 @@ FIXED_PAN = PAN_CENTER
 
 # Curve lookahead — blends near centroid error with far spine error so the rover
 # begins turning before the centroid itself drifts, giving smooth curve tracking.
-LOOKAHEAD_WEIGHT = 0.50   # 0 = pure centroid, 1 = pure far-spine lookahead
-LOOKAHEAD_ROWS   = 4      # how many far spine points to average for lookahead
+LOOKAHEAD_WEIGHT = 0.28   # 0 = pure centroid, 1 = pure far-spine lookahead
+LOOKAHEAD_ROWS   = 3      # how many far spine points to average for lookahead
 
 # Curve-adaptive speed: reduce drive speed proportionally when cornering hard.
 # At |steer|=MAX_STEER the speed is multiplied by CURVE_SPEED_MIN_FRAC.
 # e.g. base_speed=20, MIN_FRAC=0.50  →  speed on tightest curve = 10 %
-CURVE_SPEED_MIN_FRAC = 0.50
+CURVE_SPEED_MIN_FRAC = 0.35
+
+# Curve estimation from the extracted line spine.
+CURVE_FIT_MIN_POINTS   = 4
+CURVE_NEAR_FRAC        = 0.18
+CURVE_MID_FRAC         = 0.48
+CURVE_FAR_FRAC         = 0.78
+CURVE_MAX_NORM         = 3.5
+PATH_HEADING_STEER_KP  = 0.55
+PATH_CURVATURE_STEER_KP = 7.5
+
+# Path-dynamics fusion: use vision-estimated curve, encoder speed, gyro yaw
+# rate, and fused compass heading together.
+TARGET_YAW_HEADING_GAIN    = 0.60
+TARGET_YAW_CURVATURE_GAIN  = 22.0
+MAX_TARGET_YAW_RATE_DPS    = 75.0
+YAW_RATE_BLEND_MAX         = 0.45
+TARGET_HEADING_BLEND       = 0.22
+
+# Curve recovery: when the line briefly disappears on a bend, keep a cautious
+# turn for a short time and relax the detector just enough to reacquire.
+RECOVERY_RELAX_WINDOW = 0.35
+RECOVERY_STEER_GAIN = 1.15
+RECOVERY_MIN_STEER = 10.0
+RECOVERY_SPEED_MIN_FRAC = 0.28
+RECOVERY_SPEED_MAX_FRAC = 0.52
+RECOVERY_TEMPLATE_MIN_SCORE = 1.6
+RECOVERY_TEMPLATE_STRICT_SCORE = 2.1
+LOCK_STEER_MARGIN_GAIN = 2.4
+RECOVERY_YAW_RATE_STEER_GAIN = 0.35
 
 # Morphology kernel for cleaning up the binary mask
 _MORPH_KERNEL = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
@@ -227,6 +291,8 @@ class LineFollower:
         # we can reject unrelated blobs that wander into the camera view.
         self._locked_cx     = None   # int   — locked centroid-x (pixels)
         self._locked_colour = None   # np.ndarray shape(3,) — mean BGR of locked contour
+        self._locked_signature = None
+        self._line_memory = None
 
         # --- path history (rolling centroid trail) ---
         self._path_history: deque = deque(maxlen=PATH_HISTORY_LEN)
@@ -236,11 +302,33 @@ class LineFollower:
         # --- pan servo state ---
         self._pan_angle       = float(FIXED_PAN)   # fixed pan angle (degrees)
         self._lookahead_error = 0.0                # last lookahead error (for CSV)
+        self._filtered_error = 0.0
+        self._filtered_lookahead = 0.0
+        self._filtered_steer = 0.0
+        self._last_control_ts = time.monotonic()
+        self._last_seen_error = 0.0
+        self._last_seen_lookahead = 0.0
+        self._last_found_ts = 0.0
+        self._curve_heading_deg = 0.0
+        self._curve_curvature = 0.0
+        self._target_yaw_rate_dps = 0.0
+        self._last_target_ts = time.monotonic()
 
         # --- sensor state (gyro + encoders) ---
         self._gyro_z = 0.0          # latest yaw rate (°/s)
+        self._mag_x = 0.0
+        self._mag_y = 0.0
+        self._mag_z = 0.0
+        self._mag_heading = None
+        self._fused_heading = 0.0
+        self._target_heading = None
+        self._heading_correction = 0.0
+        self._last_sensor_ts = time.monotonic()
         self._rpm_left  = 0.0       # latest left-side RPM
         self._rpm_right = 0.0       # latest right-side RPM
+        self._forward_speed_mps = 0.0
+        self._encoder_yaw_rate_dps = 0.0
+        self._fused_yaw_rate_dps = 0.0
         self._last_steer = 0.0      # for telemetry / logging
         self._gyro_correction    = 0.0
         self._encoder_correction = 0.0   # kept for CSV backward-compat; always 0
@@ -259,8 +347,9 @@ class LineFollower:
             f"line_follow_{datetime.now():%Y%m%d_%H%M%S}.csv")
         self._csv_file = open(self._csv_path, "w")
         self._csv_file.write(
-            "time,state,found,cx,error,lookahead_err,vis_steer,gyro_corr,enc_corr,"
-            "motor_bias,total_steer,gyro_z,rpm_l,rpm_r,speed,pan_angle,"
+            "time,state,found,cx,error,lookahead_err,vis_steer,gyro_corr,head_corr,enc_corr,"
+            "motor_bias,total_steer,gyro_z,mag_heading,fused_heading,target_heading,target_yaw_rate,"
+            "yaw_rate,enc_yaw_rate,curve_heading,curve_curvature,speed_mps,rpm_l,rpm_r,speed,pan_angle,"
             "pwm_fl,pwm_fr,pwm_rl,pwm_rr\n")
         log.info("CSV telemetry: %s", self._csv_path)
         self._t0 = time.monotonic()
@@ -279,6 +368,19 @@ class LineFollower:
                 self.state = self.FOLLOWING
                 self._integral = 0.0     # reset PID state
                 self._prev_error = 0.0
+                self._filtered_error = 0.0
+                self._filtered_lookahead = 0.0
+                self._filtered_steer = 0.0
+                self._last_control_ts = time.monotonic()
+                self._last_steer = 0.0
+                self._vision_steer = 0.0
+                self._last_seen_error = 0.0
+                self._last_seen_lookahead = 0.0
+                self._curve_heading_deg = 0.0
+                self._curve_curvature = 0.0
+                self._target_yaw_rate_dps = 0.0
+                self._target_heading = None
+                self._last_target_ts = time.monotonic()
                 log.info("START following (speed=%d%%)", self._base_speed)
 
     def stop_following(self):
@@ -287,9 +389,22 @@ class LineFollower:
             self.state = self.STOPPED
             self._locked_cx     = None   # release line lock
             self._locked_colour = None
+            self._locked_signature = None
             self._path_history.clear()
             self._spine = []
             self._pan_angle = float(FIXED_PAN)
+            self._target_heading = None
+            self._filtered_error = 0.0
+            self._filtered_lookahead = 0.0
+            self._filtered_steer = 0.0
+            self._last_control_ts = time.monotonic()
+            self._last_steer = 0.0
+            self._last_seen_error = 0.0
+            self._last_seen_lookahead = 0.0
+            self._curve_heading_deg = 0.0
+            self._curve_curvature = 0.0
+            self._target_yaw_rate_dps = 0.0
+            self._last_target_ts = time.monotonic()
         self._car.stop()
         log.info("STOP following (user request)")
 
@@ -301,6 +416,15 @@ class LineFollower:
                 "frame_w":     CAMERA_W,
                 "frame_h":     CAMERA_H,
                 "gyro_z":      round(self._gyro_z, 1),
+                "mag_heading": None if self._mag_heading is None else round(self._mag_heading, 1),
+                "fused_heading": round(self._fused_heading, 1),
+                "target_heading": None if self._target_heading is None else round(self._target_heading, 1),
+                "target_yaw_rate": round(self._target_yaw_rate_dps, 1),
+                "yaw_rate": round(self._fused_yaw_rate_dps, 1),
+                "enc_yaw_rate": round(self._encoder_yaw_rate_dps, 1),
+                "speed_mps": round(self._forward_speed_mps, 3),
+                "curve_heading": round(self._curve_heading_deg, 1),
+                "curve_curvature": round(self._curve_curvature, 2),
                 "rpm_l":       round(self._rpm_left, 1),
                 "rpm_r":       round(self._rpm_right, 1),
                 "steer":       round(self._last_steer, 1),
@@ -343,92 +467,264 @@ class LineFollower:
     #  Line detection  (any colour, with line-lock)
     # ─────────────────────────────────────────────────
     def _detect_line(self, frame):
-        """Detect the line in the bottom portion of *frame*.
-
-        When a line is locked (self._locked_cx is set) only contours whose
-        centroid lies within LOCK_SPATIAL_MARGIN pixels of the locked cx AND
-        whose mean BGR colour is within LOCK_COLOUR_TOL of the locked colour
-        are accepted.  This prevents the rover jumping to a different nearby
-        line mid-follow.
-
-        Returns (found, cx, cy_full, mask, contour, mean_colour)
-            found       – bool
-            cx          – centroid-x in full-frame coords
-            cy_full     – centroid-y in full-frame coords
-            mask        – binary mask (ROI-relative)
-            contour     – best valid contour (ROI-relative)
-            mean_colour – np.ndarray shape(3,) mean BGR of the contour region
-        """
         h, w = frame.shape[:2]
         roi_top = int(h * ROI_TOP_FRAC)
         roi = frame[roi_top:, :]
         rh, rw = roi.shape[:2]
 
+        # Optional: ignore telemetry overlay at bottom
+        overlay_h = 24
+
         # Gaussian kernel ≈ 1/6 of ROI width, forced odd
         ksize = max(31, (rw // 6) | 1)
 
-        # Per-channel local contrast
-        channels = cv2.split(roi)
-        diffs = []
-        for ch in channels:
-            bg = cv2.GaussianBlur(ch, (ksize, ksize), 0)
-            diffs.append(cv2.absdiff(ch, bg))
-        diff_max = np.maximum(np.maximum(diffs[0], diffs[1]), diffs[2])
+        # Detect dark or strongly coloured line against local background
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        bg = cv2.GaussianBlur(gray, (ksize, ksize), 0)
+        dark = cv2.subtract(bg, gray)
+
+        bg_bgr = cv2.GaussianBlur(roi, (ksize, ksize), 0)
+        colour_delta = cv2.absdiff(roi, bg_bgr)
+        db, dg, dr = cv2.split(colour_delta)
+        colour_contrast = np.maximum(np.maximum(db, dg), dr)
+
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        sat = cv2.GaussianBlur(hsv[:, :, 1], (5, 5), 0)
+        sat_bg = cv2.GaussianBlur(sat, (ksize, ksize), 0)
+        sat_boost = cv2.subtract(sat, sat_bg)
 
         # Binary mask
-        _, mask = cv2.threshold(diff_max, CONTRAST_THRESH, 255, cv2.THRESH_BINARY)
+        _, dark_mask = cv2.threshold(dark, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        _, colour_mask = cv2.threshold(colour_contrast, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        _, sat_mask = cv2.threshold(sat_boost, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        mask = cv2.bitwise_or(dark_mask, cv2.bitwise_and(colour_mask, sat_mask))
+
+        # Remove bottom overlay region
+        mask[rh-overlay_h:, :] = 0
+
+        # Morphology
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _MORPH_KERNEL)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _MORPH_KERNEL)
 
-        # Contours
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        valid = [c for c in contours if cv2.contourArea(c) > MIN_CONTOUR_AREA]
-        if not valid:
-            return False, 0, 0, mask, None, None
+        recovery_active = (
+            self._following
+            and self._line_lost_since > 0.0
+            and (time.monotonic() - self._line_lost_since) < RECOVERY_RELAX_WINDOW
+        )
+        tracking_locked = self._locked_signature is not None or self._line_memory is not None
+        min_line_height = max(40, int(rh * 0.18))
+        min_line_elongation = 2.2
+        min_spine_hits = max(4, SPINE_ROWS // 3)
+        max_short_side = max(28.0, rw * 0.18)
+        if tracking_locked:
+            min_line_height = min(min_line_height, max(32, int(rh * 0.14)))
+            min_line_elongation = min(min_line_elongation, 1.9)
+            min_spine_hits = min(min_spine_hits, max(3, SPINE_ROWS // 4))
+        if recovery_active and tracking_locked:
+            min_line_height = min(min_line_height, max(24, int(rh * 0.10)))
+            min_line_elongation = min(min_line_elongation, 1.4)
+            min_spine_hits = min(min_spine_hits, max(2, SPINE_ROWS // 5))
+            max_short_side = max(max_short_side, rw * 0.26)
 
-        # ── Line-lock filtering ──
-        # If we have an established lock, reject contours that are spatially
-        # or chromatically too far from the locked line.
+        def _count_row_hits(c_mask):
+            step = max(1, rh // (SPINE_ROWS + 1))
+            hits = 0
+            for i in range(1, SPINE_ROWS + 1):
+                row = rh - i * step
+                if row < 0:
+                    break
+                cols = np.where(c_mask[row, :] > 0)[0]
+                if len(cols) == 0:
+                    for dr in range(1, step // 2 + 3):
+                        found = False
+                        for r2 in (row - dr, row + dr):
+                            if 0 <= r2 < rh:
+                                cols = np.where(c_mask[r2, :] > 0)[0]
+                                if len(cols):
+                                    found = True
+                                    break
+                        if found:
+                            break
+                if len(cols) == 0:
+                    continue
+                hits += 1
+            return hits
+
+        def _line_metrics(c):
+            x, y, ww, hh = cv2.boundingRect(c)
+            rect = cv2.minAreaRect(c)
+            (_, _), (side_a, side_b), _ = rect
+            long_side = max(side_a, side_b)
+            short_side = max(1.0, min(side_a, side_b))
+            elongation = long_side / short_side
+            c_mask = np.zeros((rh, rw), dtype=np.uint8)
+            cv2.drawContours(c_mask, [c], -1, 255, -1)
+            row_hits = _count_row_hits(c_mask)
+            return {
+                "x": x,
+                "y": y,
+                "w": ww,
+                "h": hh,
+                "long_side": long_side,
+                "short_side": short_side,
+                "elongation": elongation,
+                "bottom": y + hh,
+                "row_hits": row_hits,
+            }
+
+        def _passes_line_shape(c):
+            m = _line_metrics(c)
+            if m["h"] < min_line_height:
+                return False
+            if m["long_side"] < min_line_height:
+                return False
+            if m["elongation"] < min_line_elongation:
+                return False
+            if m["short_side"] > max_short_side:
+                return False
+            if m["row_hits"] < min_spine_hits:
+                return False
+            return True
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        def _contour_signature(c, metrics=None):
+            m = metrics if metrics is not None else _line_metrics(c)
+            c_mask = np.zeros((rh, rw), dtype=np.uint8)
+            cv2.drawContours(c_mask, [c], -1, 255, -1)
+            mean_bgr = np.array(cv2.mean(roi, mask=c_mask)[:3], dtype=np.float32)
+            mean_hsv = np.array(cv2.mean(hsv, mask=c_mask)[:3], dtype=np.float32)
+            M_ = cv2.moments(c)
+            if M_["m00"] == 0:
+                cx_ = m["x"] + m["w"] // 2
+                cy_ = m["y"] + m["h"] // 2
+            else:
+                cx_ = int(M_["m10"] / M_["m00"])
+                cy_ = int(M_["m01"] / M_["m00"])
+            return {
+                "bgr": mean_bgr,
+                "hsv": mean_hsv,
+                "short_side": m["short_side"],
+                "row_hits": m["row_hits"],
+                "elongation": m["elongation"],
+                "cx": cx_,
+                "cy": cy_,
+            }
+
+        candidates = []
+        for c in contours:
+            if cv2.contourArea(c) <= MIN_CONTOUR_AREA:
+                continue
+            if not _passes_line_shape(c):
+                continue
+            metrics = _line_metrics(c)
+            signature = _contour_signature(c, metrics)
+            candidates.append({
+                "contour": c,
+                "metrics": metrics,
+                "signature": signature,
+            })
+        if not candidates:
+            return False, 0, 0, mask, None, None, None
+
         locked_cx  = self._locked_cx
         locked_col = self._locked_colour
+        template = self._locked_signature if self._locked_signature is not None else self._line_memory
+        template_min_score = (
+            RECOVERY_TEMPLATE_MIN_SCORE
+            if recovery_active else LOCK_TEMPLATE_MIN_SCORE
+        )
+        template_strict_score = (
+            RECOVERY_TEMPLATE_STRICT_SCORE
+            if recovery_active else LOCK_TEMPLATE_STRICT_SCORE
+        )
+
+        if template is not None:
+            for cand in candidates:
+                cand["template_score"] = self._template_similarity(cand["signature"], template)
+            template_valid = [
+                cand for cand in candidates
+                if cand["template_score"] >= template_min_score
+            ]
+            if template_valid:
+                candidates = template_valid
+            else:
+                return False, 0, 0, mask, None, None, None
+
         if locked_cx is not None and locked_col is not None:
-            def _contour_colour(c):
-                c_mask = np.zeros((rh, rw), dtype=np.uint8)
-                cv2.drawContours(c_mask, [c], -1, 255, -1)
-                return cv2.mean(roi, mask=c_mask)[:3]   # BGR
-
-            def _passes_lock(c):
-                M_ = cv2.moments(c)
-                if M_["m00"] == 0:
-                    return False
-                cx_ = int(M_["m10"] / M_["m00"])
-                if abs(cx_ - locked_cx) > LOCK_SPATIAL_MARGIN:
-                    return False
-                col = np.array(_contour_colour(c))
-                if np.max(np.abs(col - locked_col)) > LOCK_COLOUR_TOL:
-                    return False
-                return True
-
-            locked_valid = [c for c in valid if _passes_lock(c)]
+            spatial_margin = LOCK_SPATIAL_MARGIN + int(
+                min(120.0, abs(self._last_steer) * LOCK_STEER_MARGIN_GAIN)
+            )
+            if recovery_active:
+                spatial_margin += 60
+            locked_valid = []
+            for cand in candidates:
+                cx_ = cand["signature"]["cx"]
+                if abs(cx_ - locked_cx) > spatial_margin:
+                    continue
+                col = cand["signature"]["bgr"]
+                template_score = cand.get("template_score", 0.0)
+                # Allow deliberate colour transitions (for example red → blue
+                # tape on the same path) when the contour still matches the
+                # learned line shape/signature strongly.
+                if (
+                    np.max(np.abs(col - locked_col)) > LOCK_COLOUR_TOL
+                    and (template is None or template_score < template_strict_score)
+                ):
+                    continue
+                if template is not None and template_score < template_strict_score:
+                    continue
+                locked_valid.append(cand)
             if locked_valid:
-                valid = locked_valid
-            # If nothing passes the lock we fall through to largest contour
-            # (graceful degradation — line may have temporarily smeared)
+                candidates = locked_valid
+            elif self._locked_signature is not None:
+                return False, 0, 0, mask, None, None, None
 
-        best = max(valid, key=cv2.contourArea)
+        def _score_candidate(cand):
+            c = cand["contour"]
+            area = cv2.contourArea(c)
+            m = cand["metrics"]
+            x = m["x"]
+            y = m["y"]
+            ww = m["w"]
+            hh = m["h"]
+            if ww <= 0 or hh <= 0:
+                return -1e9
+
+            aspect = hh / ww
+            bottom = m["bottom"]
+            score = area
+            score += 60.0 * min(aspect, 12.0)
+            score += 90.0 * min(m["elongation"], 10.0)
+            score += 80.0 * m["row_hits"]
+            score += 1.5 * bottom
+
+            if bottom >= rh - 8:
+                score += 250.0
+
+            M_ = cv2.moments(c)
+            if M_["m00"] > 0 and locked_cx is not None:
+                cx_ = int(M_["m10"] / M_["m00"])
+                score -= 2.0 * abs(cx_ - locked_cx)
+
+            if template is not None:
+                score += 180.0 * cand.get("template_score", 0.0)
+
+            return score
+
+        best_cand = max(candidates, key=_score_candidate)
+        best = best_cand["contour"]
         M = cv2.moments(best)
         if M["m00"] == 0:
-            return False, 0, 0, mask, best, None
+            return False, 0, 0, mask, best, None, None
 
         cx = int(M["m10"] / M["m00"])
         cy_full = int(M["m01"] / M["m00"]) + roi_top
 
-        # Mean colour of the winning contour
-        c_mask = np.zeros((rh, rw), dtype=np.uint8)
-        cv2.drawContours(c_mask, [best], -1, 255, -1)
-        mean_bgr = np.array(cv2.mean(roi, mask=c_mask)[:3])
+        signature = best_cand["signature"]
+        mean_bgr = signature["bgr"]
 
-        return True, cx, cy_full, mask, best, mean_bgr
+        return True, cx, cy_full, mask, best, mean_bgr, signature
 
     # ─────────────────────────────────────────────────
     #  Spine extraction — traces the line ahead row by row
@@ -491,6 +787,127 @@ class LineFollower:
         far_pts = spine[-LOOKAHEAD_ROWS:]
         la_x = sum(p[0] for p in far_pts) / len(far_pts)
         return la_x - (frame_w // 2)
+
+    def _estimate_curve_geometry(self, spine, frame_w, frame_h):
+        """Estimate line heading and curvature by fitting the extracted spine."""
+        if spine is None or len(spine) < CURVE_FIT_MIN_POINTS:
+            return None
+
+        roi_top = int(frame_h * ROI_TOP_FRAC)
+        roi_h = max(1.0, frame_h - roi_top)
+        mid_x = frame_w / 2.0
+
+        samples = np.array(
+            [(float(frame_h - y), float(x - mid_x)) for x, y in spine],
+            dtype=np.float32,
+        )
+        samples = samples[np.argsort(samples[:, 0])]
+        s = samples[:, 0]
+        x = samples[:, 1]
+
+        if len(s) >= 2:
+            keep = np.concatenate(([True], np.diff(s) > 1.0))
+            s = s[keep]
+            x = x[keep]
+
+        if len(s) < 3 or (s[-1] - s[0]) < max(24.0, roi_h * 0.18):
+            return None
+
+        try:
+            coeffs = np.polyfit(s, x, 2)
+        except np.linalg.LinAlgError:
+            return None
+
+        poly = np.poly1d(coeffs)
+        d1 = np.polyder(poly, 1)
+        d2 = np.polyder(poly, 2)
+
+        s_min = float(s[0])
+        s_max = float(s[-1])
+        s_near = max(s_min, roi_h * CURVE_NEAR_FRAC)
+        s_mid = min(s_max, max(s_near + 8.0, roi_h * CURVE_MID_FRAC))
+        s_far = min(s_max, max(s_mid + 8.0, roi_h * CURVE_FAR_FRAC))
+        if s_far <= s_near + 6.0:
+            return None
+
+        x_mid = float(poly(s_mid))
+        x_far = float(poly(s_far))
+        slope_near = float(d1(s_near))
+        slope_mid = float(d1(s_mid))
+        slope_far = float(d1(s_far))
+
+        heading_near = math.degrees(math.atan(slope_near))
+        heading_mid = math.degrees(math.atan(slope_mid))
+        heading_far = math.degrees(math.atan(slope_far))
+        heading_deg = max(-45.0, min(45.0, 0.65 * heading_mid + 0.35 * heading_far))
+
+        curvature_px = float(d2(s_mid)) / max((1.0 + slope_mid * slope_mid) ** 1.5, 1e-6)
+        curvature_norm = max(
+            -CURVE_MAX_NORM,
+            min(CURVE_MAX_NORM, curvature_px * roi_h),
+        )
+
+        coverage = min(1.0, (s_max - s_min) / max(roi_h * 0.55, 1.0))
+        confidence = min(1.0, len(s) / SPINE_ROWS) * coverage
+
+        return {
+            "lookahead_x": x_far,
+            "mid_x": x_mid,
+            "heading_deg": heading_deg,
+            "delta_heading_deg": heading_far - heading_near,
+            "curvature_norm": curvature_norm,
+            "confidence": confidence,
+        }
+
+    def _update_path_targets(self, curve_geometry, vision_error, lookahead_error):
+        now = time.monotonic()
+        dt = max(1e-3, min(0.1, now - self._last_target_ts))
+        self._last_target_ts = now
+
+        self._curve_heading_deg = 0.0
+        self._curve_curvature = 0.0
+        self._target_yaw_rate_dps = 0.0
+
+        if self._target_heading is None:
+            self._target_heading = self._fused_heading
+
+        if curve_geometry is not None:
+            confidence = curve_geometry.get("confidence", 1.0)
+            self._curve_heading_deg = float(curve_geometry["heading_deg"])
+            self._curve_curvature = float(curve_geometry["curvature_norm"])
+
+            speed_scale = max(
+                0.35,
+                min(1.25, abs(self._forward_speed_mps) / 0.22 if abs(self._forward_speed_mps) > 1e-3 else 0.35),
+            )
+            desired_yaw = confidence * (
+                TARGET_YAW_HEADING_GAIN * self._curve_heading_deg
+                + TARGET_YAW_CURVATURE_GAIN * self._curve_curvature * speed_scale
+            )
+            self._target_yaw_rate_dps = max(
+                -MAX_TARGET_YAW_RATE_DPS,
+                min(MAX_TARGET_YAW_RATE_DPS, desired_yaw),
+            )
+
+            desired_heading = self._wrap_angle_deg(
+                self._fused_heading + confidence * self._curve_heading_deg
+            )
+            self._target_heading = self._blend_angle_deg(
+                self._target_heading, desired_heading, TARGET_HEADING_BLEND
+            )
+            self._target_heading = self._wrap_angle_deg(
+                self._target_heading + self._target_yaw_rate_dps * dt
+            )
+            return
+
+        if (
+            abs(vision_error) <= MAG_LOCK_CENTER_PX
+            and abs(lookahead_error) < 10
+            and abs(self._fused_yaw_rate_dps) < 10
+        ):
+            self._target_heading = self._blend_angle_deg(
+                self._target_heading, self._fused_heading, 0.35
+            )
 
     # ─────────────────────────────────────────────────
     #  Annotate frame for the web stream
@@ -566,12 +983,12 @@ class LineFollower:
         # Sensor telemetry overlay — two lines at bottom
         y1 = h - 28
         y0 = h - 12
-        cv2.putText(out, f"pan={self._pan_angle:.0f}\u00b0  la={self._lookahead_error:+.0f}px",
+        cv2.putText(out, f"pan={self._pan_angle:.0f}\u00b0  la={self._lookahead_error:+.0f}px  curv={self._curve_curvature:+.2f}",
                     (10, y1), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 220, 255), 1)
-        cv2.putText(out, f"gyro={self._gyro_z:+.1f} d/s", (10, y0),
+        cv2.putText(out, f"gyro={self._gyro_z:+.1f} yaw={self._fused_yaw_rate_dps:+.1f} target={self._target_yaw_rate_dps:+.1f}", (10, y0),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
         cv2.putText(out, f"RPM L={self._rpm_left:.0f} R={self._rpm_right:.0f}",
-                    (200, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
+                    (320, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
         cv2.putText(out, f"steer={self._last_steer:+.1f}",
                     (460, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
 
@@ -581,8 +998,25 @@ class LineFollower:
     #  Main processing loop (runs on worker thread)
     # ─────────────────────────────────────────────────
     def _read_sensors(self):
-        """Read MPU gyro, LM393 encoder RPMs, and per-wheel applied PWM."""
+        """Read MPU gyro, magnetometer, LM393 encoder RPMs, and wheel PWM."""
+        now = time.monotonic()
+        dt = min(max(now - self._last_sensor_ts, 0.0), 0.2)
+        self._last_sensor_ts = now
+
         self._gyro_z = get_gyro_z()  # °/s yaw rate
+        self._mag_x, self._mag_y, self._mag_z = get_magnetometer()
+        field_sq = self._mag_x * self._mag_x + self._mag_y * self._mag_y
+        if field_sq > (MAG_MIN_FIELD * MAG_MIN_FIELD):
+            self._mag_heading = math.degrees(math.atan2(self._mag_y, self._mag_x))
+            pred_heading = self._fused_heading + self._gyro_z * dt
+            self._fused_heading = self._wrap_angle_deg(
+                MAG_BLEND_ALPHA * pred_heading
+                + (1.0 - MAG_BLEND_ALPHA) * self._mag_heading
+            )
+        else:
+            self._mag_heading = None
+            self._fused_heading = self._wrap_angle_deg(self._fused_heading + self._gyro_z * dt)
+
         rpm = get_rpm()
         # Left side: only rear_left available (front_left encoder is absent)
         self._rpm_left = rpm.get("rear_left", 0.0)
@@ -596,6 +1030,21 @@ class LineFollower:
         else:
             self._rpm_right = fr
 
+        left_speed_mps = (self._rpm_left / 60.0) * WHEEL_CIRCUMFERENCE_M
+        right_speed_mps = (self._rpm_right / 60.0) * WHEEL_CIRCUMFERENCE_M
+        self._forward_speed_mps = 0.5 * (left_speed_mps + right_speed_mps)
+        self._encoder_yaw_rate_dps = math.degrees(
+            (right_speed_mps - left_speed_mps) / max(ROVER_TRACK_WIDTH_M, 1e-6)
+        )
+        yaw_blend = min(
+            YAW_RATE_BLEND_MAX,
+            max(0.0, abs(self._forward_speed_mps) / 0.45) * YAW_RATE_BLEND_MAX,
+        )
+        self._fused_yaw_rate_dps = (
+            (1.0 - yaw_blend) * self._gyro_z
+            + yaw_blend * self._encoder_yaw_rate_dps
+        )
+
         # Read per-wheel applied PWM from wheel_sync (available after first tick)
         if self._car.wheel_sync is not None:
             telem  = self._car.get_sync_telemetry()
@@ -605,71 +1054,254 @@ class LineFollower:
             self._pwm_rl = wheels.get("rl", {}).get("applied_pwm", 0.0)
             self._pwm_rr = wheels.get("rr", {}).get("applied_pwm", 0.0)
 
-    def _compute_steering(self, vision_error, lookahead_error):
-        """Compute final motor-steering angle (degrees).
+    @staticmethod
+    def _wrap_angle_deg(angle):
+        return (angle + 180.0) % 360.0 - 180.0
 
-        Two vision inputs are blended:
-          1. vision_error    — centroid offset from frame centre (near, immediate)
-          2. lookahead_error — mean offset of far spine points   (far, anticipatory)
+    @classmethod
+    def _blend_angle_deg(cls, base, target, alpha):
+        return cls._wrap_angle_deg(base + alpha * cls._wrap_angle_deg(target - base))
 
-        The blended near+far error feeds the PID.
-        """
-        # ── Blend near-centroid and far-spine errors ──
-        blended = ((1.0 - LOOKAHEAD_WEIGHT) * vision_error
-                   + LOOKAHEAD_WEIGHT * lookahead_error)
-        self._lookahead_error = lookahead_error
+    @staticmethod
+    def _hue_distance(h1, h2):
+        diff = abs(float(h1) - float(h2))
+        return min(diff, 180.0 - diff)
 
-        # ── Vision PID on blended error (with clamping anti-windup) ──
+    @staticmethod
+    def _copy_signature(sig):
+        if sig is None:
+            return None
+        return {
+            "bgr": np.array(sig["bgr"], dtype=np.float32),
+            "hsv": np.array(sig["hsv"], dtype=np.float32),
+            "short_side": float(sig["short_side"]),
+            "row_hits": float(sig["row_hits"]),
+            "elongation": float(sig["elongation"]),
+        }
+
+    def _blend_signature(self, base, new, alpha):
+        if new is None:
+            return self._copy_signature(base)
+        if base is None:
+            return self._copy_signature(new)
+
+        out = self._copy_signature(base)
+        out["bgr"] = (1.0 - alpha) * out["bgr"] + alpha * np.array(new["bgr"], dtype=np.float32)
+
+        base_h = float(out["hsv"][0])
+        new_h = float(new["hsv"][0])
+        h_diff = ((new_h - base_h + 90.0) % 180.0) - 90.0
+        out["hsv"][0] = (base_h + alpha * h_diff) % 180.0
+        out["hsv"][1] = (1.0 - alpha) * out["hsv"][1] + alpha * float(new["hsv"][1])
+        out["hsv"][2] = (1.0 - alpha) * out["hsv"][2] + alpha * float(new["hsv"][2])
+        out["short_side"] = (1.0 - alpha) * out["short_side"] + alpha * float(new["short_side"])
+        out["row_hits"] = (1.0 - alpha) * out["row_hits"] + alpha * float(new["row_hits"])
+        out["elongation"] = (1.0 - alpha) * out["elongation"] + alpha * float(new["elongation"])
+        return out
+
+    def _template_similarity(self, sig, template):
+        if sig is None or template is None:
+            return 0.0
+
+        hue_err = self._hue_distance(sig["hsv"][0], template["hsv"][0])
+        sat_err = abs(float(sig["hsv"][1]) - float(template["hsv"][1]))
+        val_err = abs(float(sig["hsv"][2]) - float(template["hsv"][2]))
+        thick_frac = abs(float(sig["short_side"]) - float(template["short_side"])) / max(1.0, float(template["short_side"]))
+        hit_frac = abs(float(sig["row_hits"]) - float(template["row_hits"])) / max(1.0, float(template["row_hits"]))
+        elong_frac = abs(float(sig["elongation"]) - float(template["elongation"])) / max(1.0, float(template["elongation"]))
+
+        # If the remembered line is clearly saturated (e.g. blue tape), strongly
+        # suppress dull grey/black candidates even if they are line-shaped.
+        if float(template["hsv"][1]) > 45.0 and float(sig["hsv"][1]) < max(18.0, float(template["hsv"][1]) * 0.35):
+            return -1.0
+
+        sat_weight = 0.4 if float(template["hsv"][1]) < 30.0 else 1.0
+        hue_score = max(0.0, 1.0 - hue_err / LOCK_HUE_TOL) * sat_weight
+        sat_score = max(0.0, 1.0 - sat_err / LOCK_SAT_TOL)
+        val_score = max(0.0, 1.0 - val_err / LOCK_VAL_TOL)
+        thick_score = max(0.0, 1.0 - thick_frac / LOCK_THICKNESS_FRAC)
+        hit_score = max(0.0, 1.0 - hit_frac / LOCK_ROW_HIT_FRAC)
+        elong_score = max(0.0, 1.0 - elong_frac / LOCK_ELONGATION_FRAC)
+
+        return (
+            1.8 * hue_score
+            + 1.2 * sat_score
+            + 0.6 * val_score
+            + 1.0 * thick_score
+            + 0.7 * hit_score
+            + 0.5 * elong_score
+        )
+
+    def _compute_steering(self, vision_error, lookahead_error, curve_geometry=None):
+        now = time.monotonic()
+        dt = max(1e-3, min(0.1, now - self._last_control_ts))
+        self._last_control_ts = now
+
+        # Filter inputs
+        self._filtered_error += ERROR_FILTER_ALPHA * (vision_error - self._filtered_error)
+        self._filtered_lookahead += LOOKAHEAD_FILTER_ALPHA * (lookahead_error - self._filtered_lookahead)
+
+        lookahead_weight = LOOKAHEAD_WEIGHT
+        if (
+            abs(self._filtered_error) >= CENTER_DEADBAND_PX
+            and self._filtered_error * self._filtered_lookahead < 0.0
+        ):
+            disagreement = min(
+                1.0,
+                (abs(self._filtered_error) + abs(self._filtered_lookahead))
+                / max(CAMERA_W * 0.35, 1.0),
+            )
+            lookahead_weight *= max(0.2, 1.0 - 0.75 * disagreement)
+            self._integral *= 0.88
+
+        blended = ((1.0 - lookahead_weight) * self._filtered_error
+                   + lookahead_weight * self._filtered_lookahead)
+        self._lookahead_error = self._filtered_lookahead
+
+        geometry_steer = 0.0
+        if curve_geometry is not None:
+            confidence = curve_geometry.get("confidence", 1.0)
+            geometry_steer = confidence * (
+                PATH_HEADING_STEER_KP * float(curve_geometry["heading_deg"])
+                + PATH_CURVATURE_STEER_KP * float(curve_geometry["curvature_norm"])
+            )
+
+        # Time-based PID
         p = STEERING_KP * blended
-        d = STEERING_KD * (blended - self._prev_error)
+
+        deriv = (blended - self._prev_error) / dt
+        d = STEERING_KD * deriv
         self._prev_error = blended
 
-        # Clamping anti-windup: only accumulate the integral when the PID output
-        # is not already saturated, OR when the new error would help unwind it.
-        # This prevents integral windup on sharp curves where steer is clamped for
-        # many frames and then causes a large overshoot when the centroid crosses zero.
-        raw_output = p + self._integral + d + self._motor_bias
-        if abs(raw_output) < MAX_STEER or (raw_output * blended < 0):
-            self._integral += STEERING_KI * blended
-            self._integral = max(-INTEGRAL_MAX, min(INTEGRAL_MAX, self._integral))
-        i = self._integral
+        if abs(vision_error) >= CENTER_DEADBAND_PX and self._last_steer * vision_error < 0.0:
+            self._integral *= 0.72
 
-        vision_steer = p + i + d + self._motor_bias
+        raw_pre_i = p + self._integral + d + geometry_steer + self._motor_bias
+        if abs(raw_pre_i) < MAX_STEER or (raw_pre_i * blended < 0):
+            self._integral += STEERING_KI * blended * dt
+            self._integral = max(-INTEGRAL_MAX, min(INTEGRAL_MAX, self._integral))
+
+        vision_steer = p + self._integral + d + geometry_steer + self._motor_bias
         self._vision_steer = vision_steer
 
-        steer = max(-MAX_STEER, min(MAX_STEER, vision_steer))
-        self._last_steer = steer
-        return steer
+        target_steer = max(-MAX_STEER, min(MAX_STEER, vision_steer))
 
-    def _compute_straight_corrections(self, vision_error, base_l, base_r):
-        """Apply gyro rate-damping bias to per-side PWM.
+        # Slew-rate limit the output
+        max_step = STEER_SLEW_RATE * dt
+        delta = target_steer - self._filtered_steer
+        delta = max(-max_step, min(max_step, delta))
+        self._filtered_steer += delta
 
-        Gyro rate-damping: opposes instantaneous yaw rate directly, fades to
-        zero as |last_steer| grows so intentional curve turns are not fought.
+        self._last_steer = self._filtered_steer
+        return self._filtered_steer
 
-        Per-wheel speed balancing (including RR plastic-gearbox compensation)
-        is now handled entirely by wheel_sync inside _set_raw_motors, which
-        runs a closed-loop PID for each individual wheel using live RPM data.
-        """
+    def _mix_drive_command(self, speed, steer):
+        duty_cap = self._car.power_limiter.max_safe_duty
+        speed = max(0.0, min(duty_cap, float(speed)))
+        steer_frac = max(-1.0, min(1.0, steer / MAX_STEER))
+
+        diff = MAX_DIFF_FRAC * steer_frac
+        left_cmd = speed * (1.0 + diff)
+        right_cmd = speed * (1.0 - diff)
+
+        peak = max(left_cmd, right_cmd, 1.0)
+        scale = min(1.0, duty_cap / peak)
+        left_cmd *= scale
+        right_cmd *= scale
+
+        l_fwd = True
+        r_fwd = True
+        if abs(steer_frac) > PIVOT_THRESHOLD:
+            pivot_frac = (abs(steer_frac) - PIVOT_THRESHOLD) / (1.0 - PIVOT_THRESHOLD)
+            pivot_frac = max(0.0, min(1.0, pivot_frac))
+            if steer_frac > 0:
+                right_cmd *= (1.0 - 2.0 * pivot_frac)
+                if right_cmd < 0:
+                    r_fwd = False
+                    right_cmd = abs(right_cmd)
+            else:
+                left_cmd *= (1.0 - 2.0 * pivot_frac)
+                if left_cmd < 0:
+                    l_fwd = False
+                    left_cmd = abs(left_cmd)
+
+        base_l = min(duty_cap, left_cmd)
+        base_r = min(duty_cap, right_cmd)
+        return base_l, base_r, l_fwd, r_fwd
+
+    def _compute_recovery_command(self):
+        if self._line_lost_since == 0.0:
+            return None
+
+        elapsed = time.monotonic() - self._line_lost_since
+        if elapsed < 0.0 or elapsed >= LINE_LOST_TIMEOUT:
+            return None
+
+        sign_source = self._last_seen_error
+        if abs(sign_source) < CENTER_DEADBAND_PX:
+            sign_source = self._last_seen_lookahead
+        if abs(sign_source) < CENTER_DEADBAND_PX:
+            sign_source = self._last_steer
+        if abs(sign_source) < 1e-3:
+            return None
+
+        steer = self._last_steer * RECOVERY_STEER_GAIN
+        steer += (
+            RECOVERY_YAW_RATE_STEER_GAIN
+            * MAX_STEER
+            * max(-1.0, min(1.0, self._target_yaw_rate_dps / MAX_TARGET_YAW_RATE_DPS))
+        )
+        min_steer = RECOVERY_MIN_STEER
+        if abs(self._last_seen_error) > CAMERA_W * 0.18:
+            min_steer += 4.0
+        if abs(steer) < min_steer:
+            steer = math.copysign(min_steer, sign_source)
+        else:
+            steer = math.copysign(abs(steer), sign_source)
+        steer = max(-MAX_STEER, min(MAX_STEER, steer))
+
+        strength = max(0.0, 1.0 - elapsed / LINE_LOST_TIMEOUT)
+        speed_frac = (
+            RECOVERY_SPEED_MIN_FRAC
+            + (RECOVERY_SPEED_MAX_FRAC - RECOVERY_SPEED_MIN_FRAC) * strength
+        )
+        speed = self._base_speed * speed_frac
+        return (*self._mix_drive_command(speed, steer), steer)
+
+    def _compute_motion_corrections(self, vision_error, base_l, base_r):
+        """Track target yaw rate + fused heading with gyro, encoders, and mag."""
         duty_cap = self._car.power_limiter.max_safe_duty
         left_speed  = float(base_l)
         right_speed = float(base_r)
 
-        # ── Gyro rate-damping ──
         gyro_corr = 0.0
         if self._use_mpu:
-            gz = self._gyro_z
-            if abs(gz) > GYRO_DEADZONE:
-                fade = max(0.0, 1.0 - abs(self._last_steer) / GYRO_FADE_PX)
-                raw  = GYRO_KP * gz * fade
+            rate_error = self._target_yaw_rate_dps - self._fused_yaw_rate_dps
+            if abs(rate_error) > GYRO_DEADZONE:
+                raw = GYRO_KP * rate_error
                 gyro_corr = max(-GYRO_MAX_CORR, min(GYRO_MAX_CORR, raw))
                 half = gyro_corr / 2.0
                 left_speed  = max(0.0, min(duty_cap, left_speed  - half))
                 right_speed = max(0.0, min(duty_cap, right_speed + half))
         self._gyro_correction = round(gyro_corr, 2)
 
-        log.debug("straight: gz=%+.1f gyro=%.2f → L=%.1f R=%.1f  RR_pwm=%.1f",
-                  self._gyro_z, gyro_corr, left_speed, right_speed, self._pwm_rr)
+        heading_corr = 0.0
+        if self._target_heading is not None:
+            heading_error = self._wrap_angle_deg(self._target_heading - self._fused_heading)
+            curve_fade = min(1.0, abs(self._target_yaw_rate_dps) / max(MAX_TARGET_YAW_RATE_DPS * 0.45, 1.0))
+            fade = max(0.25 * curve_fade, max(0.0, 1.0 - abs(vision_error) / MAG_FADE_PX))
+            raw = MAG_HEADING_KP * heading_error * fade
+            heading_corr = max(-MAG_HEADING_MAX_CORR, min(MAG_HEADING_MAX_CORR, raw))
+            half = heading_corr / 2.0
+            left_speed  = max(0.0, min(duty_cap, left_speed  - half))
+            right_speed = max(0.0, min(duty_cap, right_speed + half))
+        self._heading_correction = round(heading_corr, 2)
+
+        log.debug("motion: yaw*=%.1f yaw=%.1f enc=%.1f gyro=%.2f hdg=%.2f fused=%+.1f target=%s → L=%.1f R=%.1f RR_pwm=%.1f",
+                  self._target_yaw_rate_dps, self._fused_yaw_rate_dps, self._encoder_yaw_rate_dps,
+                  gyro_corr, heading_corr, self._fused_heading,
+                  f"{self._target_heading:+.1f}" if self._target_heading is not None else "None",
+                  left_speed, right_speed, self._pwm_rr)
 
         return left_speed, right_speed
 
@@ -699,7 +1331,7 @@ class LineFollower:
             self._read_sensors()
 
             # 2. Detect (line-lock applied internally)
-            found, cx, cy, mask, contour, mean_colour = self._detect_line(frame)
+            found, cx, cy, mask, contour, mean_colour, signature = self._detect_line(frame)
 
             # 3. Update state machine + line-lock
             with self._lock:
@@ -711,29 +1343,41 @@ class LineFollower:
                     self._line_lost_since = 0.0
 
                     if self._confirm_count >= LINE_CONFIRM_FRAMES:
-                        # Establish lock on the first confirmed detection
-                        if self._locked_cx is None:
-                            self._locked_cx     = cx
-                            self._locked_colour = mean_colour
-                            log.info("Line locked at cx=%d colour=%.0f,%.0f,%.0f",
-                                     cx, *(mean_colour if mean_colour is not None
-                                           else (0, 0, 0)))
-                        else:
-                            # Slide the spatial anchor toward current cx so the
-                            # lock keeps up with curves.  Rate 0.15 (~6.5 frame
-                            # time-constant) is faster than the old 0.08 so that
-                            # tight curves don't cause the lock to lag and reject
-                            # the correct contour via LOCK_SPATIAL_MARGIN.
-                            self._locked_cx = int(
-                                0.85 * self._locked_cx + 0.15 * cx)
+                        if self.state != self.STOPPED:
+                            # Establish lock on the first confirmed detection
+                            if self._locked_cx is None:
+                                self._locked_cx     = cx
+                                self._locked_colour = mean_colour
+                                self._locked_signature = self._copy_signature(signature)
+                                self._line_memory = self._blend_signature(
+                                    self._line_memory, signature, MEMORY_BLEND_ALPHA)
+                                log.info("Line locked at cx=%d colour=%.0f,%.0f,%.0f",
+                                         cx, *(mean_colour if mean_colour is not None
+                                               else (0, 0, 0)))
+                            else:
+                                # Slide the spatial anchor toward current cx so the
+                                # lock keeps up with curves.  Rate 0.15 (~6.5 frame
+                                # time-constant) is faster than the old 0.08 so that
+                                # tight curves don't cause the lock to lag and reject
+                                # the correct contour via LOCK_SPATIAL_MARGIN.
+                                self._locked_cx = int(
+                                    0.85 * self._locked_cx + 0.15 * cx)
+                                if mean_colour is not None:
+                                    self._locked_colour = (
+                                        0.85 * self._locked_colour + 0.15 * mean_colour
+                                    )
+                                self._locked_signature = self._blend_signature(
+                                    self._locked_signature, signature, LOCK_BLEND_ALPHA)
+                                self._line_memory = self._blend_signature(
+                                    self._line_memory, signature, MEMORY_BLEND_ALPHA)
 
-                        if self._following:
-                            self.state = self.FOLLOWING
-                        elif self.state not in (self.FOLLOWING, self.STOPPED):
-                            self.state = self.LINE_DETECTED
+                            if self._following:
+                                self.state = self.FOLLOWING
+                            elif self.state not in (self.FOLLOWING, self.STOPPED):
+                                self.state = self.LINE_DETECTED
 
                     # Update path history with each confirmed centroid
-                    if self._confirm_count >= LINE_CONFIRM_FRAMES:
+                    if self._confirm_count >= LINE_CONFIRM_FRAMES and self.state != self.STOPPED:
                         self._path_history.append((cx, cy))
 
                 else:
@@ -746,8 +1390,20 @@ class LineFollower:
                             self.state = self.LINE_LOST
                             self._integral      = 0.0   # reset PID state so windup
                             self._prev_error    = 0.0   # doesn't fire on next detection
+                            self._filtered_error = 0.0
+                            self._filtered_lookahead = 0.0
+                            self._filtered_steer = 0.0
+                            self._last_control_ts = time.monotonic()
+                            self._last_steer = 0.0
+                            self._vision_steer = 0.0
+                            self._curve_heading_deg = 0.0
+                            self._curve_curvature = 0.0
+                            self._target_yaw_rate_dps = 0.0
                             self._locked_cx     = None  # release lock — will re-acquire
                             self._locked_colour = None
+                            self._locked_signature = None
+                            self._target_heading = None
+                            self._last_target_ts = time.monotonic()
                             self._car.brake()
                             log.warning("Line lost for %.1fs — braking", LINE_LOST_TIMEOUT)
                     else:
@@ -759,6 +1415,7 @@ class LineFollower:
             # Extract spine (projected path ahead) for annotation + UI
             roi_top = int(h * ROI_TOP_FRAC)
             spine = self._extract_spine(mask, roi_top) if found else []
+            curve_geometry = self._estimate_curve_geometry(spine, w, h) if found else None
             with self._lock:
                 self._spine = spine
 
@@ -769,44 +1426,55 @@ class LineFollower:
 
             # 4. Motor control (when following and line visible)
             error = cx - (w // 2) if found else 0
-            if self._following and found:
-                # Lookahead error from far spine gives early curve warning
+            if abs(error) < CENTER_DEADBAND_PX:
+                error = 0
+            lookahead_error = 0.0
+            if found:
                 lookahead_error = self._compute_lookahead_error(spine, w)
-                steer = self._compute_steering(error, lookahead_error)
+                if abs(lookahead_error) < CENTER_DEADBAND_PX:
+                    lookahead_error = 0
+                self._last_seen_error = error
+                self._last_seen_lookahead = lookahead_error
+                self._last_found_ts = time.monotonic()
+            if self._following and found:
+                self._update_path_targets(curve_geometry, error, lookahead_error)
+                steer = self._compute_steering(error, lookahead_error, curve_geometry)
                 duty_cap = self._car.power_limiter.max_safe_duty
                 # Curve-adaptive speed: slow down proportionally when cornering hard.
                 # Reduces overshoot momentum and gives the rover more time to turn.
-                curve_factor = max(CURVE_SPEED_MIN_FRAC,
-                                   1.0 - (abs(steer) / MAX_STEER) * (1.0 - CURVE_SPEED_MIN_FRAC))
+                curve_mag = abs(steer) / MAX_STEER
+                curve_factor = max(
+                    CURVE_SPEED_MIN_FRAC,
+                    1.0 - (curve_mag ** 1.5) * (1.0 - CURVE_SPEED_MIN_FRAC)
+                )
                 speed = max(0, min(duty_cap, int(self._base_speed * curve_factor)))
-
-                # Tank-turn unicycle mixer.
-                # steer_frac: -1.0 (hard left) … +1.0 (hard right)
-                # Outer wheel always gets ~speed; inner wheel goes:
-                #   |steer_frac| < 0.5 → slowing down
-                #   |steer_frac| = 0.5 → stopped
-                #   |steer_frac| > 0.5 → reverse  (true 4-wheel tank pivot)
-                steer_frac  = steer / MAX_STEER
-                fwd_comp    = speed * (1.0 - abs(steer_frac))
-                rot_comp    = speed * steer_frac
-                l_raw       = fwd_comp + rot_comp   # steer>0: outer (left stays ≈speed)
-                r_raw       = fwd_comp - rot_comp   # steer>0: inner (right → 0 → -)
-                l_fwd       = l_raw >= 0.0
-                r_fwd       = r_raw >= 0.0
-                base_l      = min(duty_cap, abs(l_raw))
-                base_r      = min(duty_cap, abs(r_raw))
+                base_l, base_r, l_fwd, r_fwd = self._mix_drive_command(speed, steer)
 
                 # Straight-line corrections (gyro + encoder) only apply when
                 # both sides drive forward — skip during pivot turns.
                 if l_fwd and r_fwd:
-                    left_speed, right_speed = self._compute_straight_corrections(
+                    left_speed, right_speed = self._compute_motion_corrections(
                         error, base_l, base_r)
                 else:
                     left_speed, right_speed = base_l, base_r
                 self._car._set_raw_motors(left_speed, right_speed, l_fwd, r_fwd)
             elif self._following and not found:
-                # Coast with last known steering while within timeout
-                pass
+                if self._target_heading is not None:
+                    now = time.monotonic()
+                    dt = max(1e-3, min(0.1, now - self._last_target_ts))
+                    self._last_target_ts = now
+                    self._target_heading = self._wrap_angle_deg(
+                        self._target_heading + self._target_yaw_rate_dps * dt
+                    )
+                recovery = self._compute_recovery_command()
+                if recovery is not None:
+                    left_speed, right_speed, l_fwd, r_fwd, steer = recovery
+                    self._gyro_correction = 0.0
+                    self._heading_correction = 0.0
+                    self._vision_steer = 0.0
+                    self._filtered_steer = steer
+                    self._last_steer = steer
+                    self._car._set_raw_motors(left_speed, right_speed, l_fwd, r_fwd)
 
             # 4b. CSV + debug logging (every iteration while following)
             _log_counter += 1
@@ -816,21 +1484,37 @@ class LineFollower:
                     f"{t:.3f},{cur_state},{int(found)},{cx},{error},"
                     f"{self._lookahead_error:.1f},"
                     f"{self._vision_steer:.2f},{self._gyro_correction:.2f},"
-                    f"{self._encoder_correction:.2f},{self._motor_bias:.2f},"
+                    f"{self._heading_correction:.2f},{self._encoder_correction:.2f},{self._motor_bias:.2f},"
                     f"{self._last_steer:.2f},"
-                    f"{self._gyro_z:.2f},{self._rpm_left:.1f},"
+                    f"{self._gyro_z:.2f},"
+                    f"{self._mag_heading if self._mag_heading is not None else 0.0:.2f},"
+                    f"{self._fused_heading:.2f},"
+                    f"{self._target_heading if self._target_heading is not None else 0.0:.2f},"
+                    f"{self._target_yaw_rate_dps:.2f},"
+                    f"{self._fused_yaw_rate_dps:.2f},"
+                    f"{self._encoder_yaw_rate_dps:.2f},"
+                    f"{self._curve_heading_deg:.2f},"
+                    f"{self._curve_curvature:.3f},"
+                    f"{self._forward_speed_mps:.3f},"
+                    f"{self._rpm_left:.1f},"
                     f"{self._rpm_right:.1f},{self._base_speed},"
                     f"{self._pan_angle:.1f},"
                     f"{self._pwm_fl:.1f},{self._pwm_fr:.1f},"
                     f"{self._pwm_rl:.1f},{self._pwm_rr:.1f}\n")
                 if _log_counter % 8 == 0:   # ~5 Hz
                     log.debug(
-                        "err=%+dpx la=%+.0f steer=%+.1f° (vis=%.1f I=%.1f gyro=%+.1f) "
-                        "gz=%+.1f°/s rpmL=%.0f rpmR=%.0f "
+                        "err=%+dpx la=%+.0f curve=(hdg=%+.1f curv=%+.2f yaw*=%.1f) "
+                        "steer=%+.1f° (vis=%.1f I=%.1f gyro=%+.1f head=%+.1f) "
+                        "gz=%+.1f°/s yaw=%.1f encYaw=%.1f hdg=%+.1f tgt=%s v=%.2f "
+                        "rpmL=%.0f rpmR=%.0f "
                         "PWM FL=%.1f FR=%.1f RL=%.1f RR=%.1f pan=%.0f°",
-                        error, self._lookahead_error, self._last_steer,
-                        self._vision_steer, self._integral, self._gyro_correction,
-                        self._gyro_z, self._rpm_left, self._rpm_right,
+                        error, self._lookahead_error,
+                        self._curve_heading_deg, self._curve_curvature, self._target_yaw_rate_dps,
+                        self._last_steer,
+                        self._vision_steer, self._integral, self._gyro_correction, self._heading_correction,
+                        self._gyro_z, self._fused_yaw_rate_dps, self._encoder_yaw_rate_dps, self._fused_heading,
+                        f"{self._target_heading:+.1f}" if self._target_heading is not None else "None",
+                        self._forward_speed_mps, self._rpm_left, self._rpm_right,
                         self._pwm_fl, self._pwm_fr, self._pwm_rl, self._pwm_rr,
                         self._pan_angle,
                     )

@@ -164,8 +164,8 @@ def _write_debug_row():
         pl  = car_system.power_limiter
 
         row = [
-            # timestamp
-            datetime.datetime.now().isoformat(timespec="milliseconds"),
+            # timestamp — Unix epoch milliseconds (timezone-free, universally comparable)
+            int(time.time() * 1000),
             # drive state
             car_state.get("gear", "?"),
             int(car_state.get("gas_pressed", False)),
