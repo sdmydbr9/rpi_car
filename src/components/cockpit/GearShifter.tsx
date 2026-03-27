@@ -1,0 +1,810 @@
+import { useEffect, useRef, useState } from "react";
+import ColorThief from "colorthief";
+import { Music, OctagonX, Pause, Play, Power, PowerOff, Radio, SkipBack, SkipForward, Volume2 } from "lucide-react";
+
+interface GearShifterProps {
+  currentGear: string;
+  onGearChange: (gear: string) => void;
+  isEmergencyStop: boolean;
+  isAutoMode: boolean;
+  isCameraEnabled: boolean;
+  isAutopilotEnabled: boolean;
+  eBrakeActive: boolean;
+  onEmergencyStop: () => void;
+  onAutoMode: () => void;
+  onCameraToggle: () => void;
+  onTargetOpen: () => void;
+  onAutopilotToggle: () => void;
+  isEnabled?: boolean;
+  isEngineRunning?: boolean;
+  onEngineStart?: () => void;
+  onEngineStop?: () => void;
+  onHorn?: () => void;
+  /** Current motor speed (0-100) — used to block forward↔reverse while moving */
+  speed?: number;
+}
+
+const GEARS = ["4", "3", "2", "1", "N", "R"];
+
+interface NowPlayingState {
+  status: string;
+  volume: string;
+  track: string;
+  artist: string;
+  album: string;
+  image: string;
+  bg_color: string;
+  time_str: string;
+  progress_pct: number;
+}
+
+const DEFAULT_NOW_PLAYING: NowPlayingState = {
+  status: "Waiting for AirPlay...",
+  volume: "--",
+  track: "--",
+  artist: "--",
+  album: "--",
+  image: "",
+  bg_color: "#121212",
+  time_str: "0:00 / 0:00",
+  progress_pct: 0,
+};
+
+const clampProgress = (value: unknown): number => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 0;
+  return Math.max(0, Math.min(100, numeric));
+};
+
+type RGBTuple = [number, number, number];
+
+interface PlayerTheme {
+  border: string;
+  accent: string;
+  title: string;
+  subtitle: string;
+  cardBackground: string;
+  progressTrack: string;
+  progressFill: string;
+  progressGlow: string;
+}
+
+const DEFAULT_PLAYER_THEME: PlayerTheme = {
+  border: "rgba(20, 184, 166, 0.35)",
+  accent: "rgba(20, 184, 166, 0.95)",
+  title: "rgba(240, 252, 255, 0.96)",
+  subtitle: "rgba(188, 214, 222, 0.82)",
+  cardBackground:
+    "linear-gradient(135deg, rgba(14, 23, 33, 0.85) 0%, rgba(4, 11, 18, 0.88) 56%, rgba(1, 7, 12, 0.92) 100%)",
+  progressTrack: "rgba(148, 163, 184, 0.28)",
+  progressFill: "rgba(20, 184, 166, 0.95)",
+  progressGlow: "0 0 8px rgba(20, 184, 166, 0.55)",
+};
+
+const SYSTEM_TEAL: RGBTuple = [20, 184, 166];
+const WHITE_RGB: RGBTuple = [255, 255, 255];
+const BLACK_RGB: RGBTuple = [0, 0, 0];
+
+const clampChannel = (value: number): number => Math.max(0, Math.min(255, Math.round(value)));
+
+const rgbToCss = (color: RGBTuple, alpha = 1): string => {
+  const [r, g, b] = color;
+  return `rgba(${clampChannel(r)}, ${clampChannel(g)}, ${clampChannel(b)}, ${alpha})`;
+};
+
+const mixRgb = (base: RGBTuple, target: RGBTuple, amount: number): RGBTuple => {
+  const mixAmount = Math.max(0, Math.min(1, amount));
+  return [
+    clampChannel(base[0] + (target[0] - base[0]) * mixAmount),
+    clampChannel(base[1] + (target[1] - base[1]) * mixAmount),
+    clampChannel(base[2] + (target[2] - base[2]) * mixAmount),
+  ];
+};
+
+const toLinearChannel = (value: number): number => {
+  const normalized = value / 255;
+  return normalized <= 0.03928 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+};
+
+const contrastRatio = (first: RGBTuple, second: RGBTuple): number => {
+  const firstLuminance =
+    0.2126 * toLinearChannel(first[0]) + 0.7152 * toLinearChannel(first[1]) + 0.0722 * toLinearChannel(first[2]);
+  const secondLuminance =
+    0.2126 * toLinearChannel(second[0]) + 0.7152 * toLinearChannel(second[1]) + 0.0722 * toLinearChannel(second[2]);
+  const lighter = Math.max(firstLuminance, secondLuminance);
+  const darker = Math.min(firstLuminance, secondLuminance);
+  return (lighter + 0.05) / (darker + 0.05);
+};
+
+const ensureContrast = (
+  foreground: RGBTuple,
+  background: RGBTuple,
+  minRatio: number,
+  preferLightTarget: boolean,
+): RGBTuple => {
+  let candidate = foreground;
+  if (contrastRatio(candidate, background) >= minRatio) return candidate;
+
+  const target = preferLightTarget ? WHITE_RGB : BLACK_RGB;
+  for (let step = 0; step < 10; step += 1) {
+    candidate = mixRgb(candidate, target, 0.22);
+    if (contrastRatio(candidate, background) >= minRatio) return candidate;
+  }
+
+  return contrastRatio(WHITE_RGB, background) >= contrastRatio(BLACK_RGB, background) ? WHITE_RGB : BLACK_RGB;
+};
+
+const muteRgb = (color: RGBTuple, amount: number): RGBTuple => {
+  const grayChannel = clampChannel(0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]);
+  const gray: RGBTuple = [grayChannel, grayChannel, grayChannel];
+  return mixRgb(color, gray, amount);
+};
+
+const applySystemTealFilter = (color: RGBTuple): RGBTuple => {
+  const muted = muteRgb(color, 0.56);
+  const tealTinted = mixRgb(muted, SYSTEM_TEAL, 0.34);
+  return mixRgb(tealTinted, [10, 34, 42], 0.1);
+};
+
+const parseHexToRgb = (value: string): RGBTuple | null => {
+  const normalized = value.trim().replace("#", "");
+  if (/^[0-9a-fA-F]{3}$/.test(normalized)) {
+    return [
+      Number.parseInt(`${normalized[0]}${normalized[0]}`, 16),
+      Number.parseInt(`${normalized[1]}${normalized[1]}`, 16),
+      Number.parseInt(`${normalized[2]}${normalized[2]}`, 16),
+    ];
+  }
+  if (/^[0-9a-fA-F]{6}$/.test(normalized)) {
+    return [
+      Number.parseInt(normalized.slice(0, 2), 16),
+      Number.parseInt(normalized.slice(2, 4), 16),
+      Number.parseInt(normalized.slice(4, 6), 16),
+    ];
+  }
+  return null;
+};
+
+const getLuminance = ([r, g, b]: RGBTuple): number => (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+
+const buildPlayerTheme = (dominant: RGBTuple, accentSource: RGBTuple): PlayerTheme => {
+  const filteredDominant = applySystemTealFilter(dominant);
+  const filteredAccentSource = applySystemTealFilter(accentSource);
+  const deepDominant = mixRgb(filteredDominant, [7, 16, 24], 0.52);
+  const softDominant = mixRgb(filteredDominant, [48, 78, 92], 0.43);
+  const baseBackground = mixRgb(deepDominant, BLACK_RGB, 0.2);
+  const preferLightText = getLuminance(baseBackground) < 0.52;
+
+  const titleColor = ensureContrast(preferLightText ? [236, 248, 252] : [10, 34, 44], baseBackground, 6, preferLightText);
+  const subtitleColor = ensureContrast(
+    preferLightText ? mixRgb(titleColor, SYSTEM_TEAL, 0.3) : mixRgb(titleColor, SYSTEM_TEAL, 0.18),
+    baseBackground,
+    4.5,
+    preferLightText,
+  );
+
+  const accentSeed = mixRgb(filteredAccentSource, SYSTEM_TEAL, 0.42);
+  const progressTrackColor = ensureContrast(
+    preferLightText ? mixRgb(baseBackground, [235, 247, 252], 0.3) : mixRgb(baseBackground, BLACK_RGB, 0.26),
+    baseBackground,
+    1.7,
+    preferLightText,
+  );
+  let progressFillColor = ensureContrast(
+    preferLightText ? mixRgb(accentSeed, [220, 255, 248], 0.12) : mixRgb(accentSeed, [4, 90, 84], 0.28),
+    baseBackground,
+    3.5,
+    preferLightText,
+  );
+
+  if (contrastRatio(progressFillColor, progressTrackColor) < 2.4) {
+    progressFillColor = ensureContrast(progressFillColor, progressTrackColor, 2.4, getLuminance(progressTrackColor) < 0.5);
+  }
+
+  const borderColor = ensureContrast(mixRgb(accentSeed, baseBackground, 0.15), baseBackground, 2, preferLightText);
+
+  return {
+    border: rgbToCss(borderColor, 0.62),
+    accent: rgbToCss(progressFillColor, 0.98),
+    title: rgbToCss(titleColor, 0.97),
+    subtitle: rgbToCss(subtitleColor, 0.9),
+    cardBackground: `linear-gradient(135deg, ${rgbToCss(softDominant, 0.86)} 0%, ${rgbToCss(
+      deepDominant,
+      0.91,
+    )} 54%, ${rgbToCss(mixRgb(deepDominant, [0, 0, 0], 0.24), 0.96)} 100%)`,
+    progressTrack: rgbToCss(progressTrackColor, 0.52),
+    progressFill: rgbToCss(progressFillColor, 0.99),
+    progressGlow: `0 0 9px ${rgbToCss(progressFillColor, 0.56)}`,
+  };
+};
+
+export const GearShifter = ({ 
+  currentGear, 
+  onGearChange,
+  isEmergencyStop,
+  isAutoMode,
+  isCameraEnabled,
+  isAutopilotEnabled,
+  eBrakeActive,
+  onEmergencyStop,
+  onAutoMode,
+  onCameraToggle,
+  onTargetOpen,
+  onAutopilotToggle,
+  isEnabled = true,
+  isEngineRunning = false,
+  onEngineStart,
+  onEngineStop,
+  onHorn,
+  speed = 0
+}: GearShifterProps) => {
+  // Forward↔reverse safety: block direction-reversing gear changes while moving
+  const FORWARD_GEARS = new Set(["1", "2", "3", "4"]);
+  const isMoving = speed > 5;
+  const safeGearChange = (gear: string) => {
+    if (!isEnabled || isAutopilotEnabled) return;
+    // Block forward→R or R→forward while car is moving
+    if (isMoving) {
+      const goingToReverse = FORWARD_GEARS.has(currentGear) && gear === "R";
+      const goingToForward = currentGear === "R" && FORWARD_GEARS.has(gear);
+      if (goingToReverse || goingToForward) return; // silently block
+    }
+    onGearChange(gear);
+  };
+  const isGearDisabled = (gear: string) => {
+    if (!isEnabled || isAutopilotEnabled) return true;
+    if (isMoving) {
+      const goingToReverse = FORWARD_GEARS.has(currentGear) && gear === "R";
+      const goingToForward = currentGear === "R" && FORWARD_GEARS.has(gear);
+      if (goingToReverse || goingToForward) return true;
+    }
+    return false;
+  };
+  // Gearbox layout: 2 rows x 3 columns
+  const gearLayout = [
+    ["4", "3", "2"],
+    ["1", "N", "R"]
+  ];
+  const [nowPlaying, setNowPlaying] = useState<NowPlayingState>(DEFAULT_NOW_PLAYING);
+  const [metadataUnavailable, setMetadataUnavailable] = useState(false);
+  const [playerTheme, setPlayerTheme] = useState<PlayerTheme>(DEFAULT_PLAYER_THEME);
+  const nowPlayingPanelRef = useRef<HTMLDivElement | null>(null);
+  const [nowPlayingScale, setNowPlayingScale] = useState(1);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const fetchNowPlaying = async () => {
+      try {
+        const response = await fetch("/api/now-playing", {
+          cache: "no-store",
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json() as Partial<NowPlayingState>;
+        if (!mounted) return;
+        setNowPlaying({
+          status: typeof data.status === "string" ? data.status : DEFAULT_NOW_PLAYING.status,
+          volume: typeof data.volume === "string" ? data.volume : DEFAULT_NOW_PLAYING.volume,
+          track: typeof data.track === "string" ? data.track : DEFAULT_NOW_PLAYING.track,
+          artist: typeof data.artist === "string" ? data.artist : DEFAULT_NOW_PLAYING.artist,
+          album: typeof data.album === "string" ? data.album : DEFAULT_NOW_PLAYING.album,
+          image: typeof data.image === "string" ? data.image : DEFAULT_NOW_PLAYING.image,
+          bg_color: typeof data.bg_color === "string" ? data.bg_color : DEFAULT_NOW_PLAYING.bg_color,
+          time_str: typeof data.time_str === "string" ? data.time_str : DEFAULT_NOW_PLAYING.time_str,
+          progress_pct: clampProgress(data.progress_pct),
+        });
+        setMetadataUnavailable(false);
+      } catch {
+        if (!mounted) return;
+        setMetadataUnavailable(true);
+      }
+    };
+
+    void fetchNowPlaying();
+    const intervalId = window.setInterval(fetchNowPlaying, 1000);
+    return () => {
+      mounted = false;
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  const hasAlbumArt = Boolean(nowPlaying.image);
+  const displayTrack = nowPlaying.track && nowPlaying.track !== "--" ? nowPlaying.track : "No Track";
+  const displayArtist = nowPlaying.artist && nowPlaying.artist !== "--" ? nowPlaying.artist : "Unknown Artist";
+  const displayAlbum = nowPlaying.album && nowPlaying.album !== "--" ? nowPlaying.album : "Unknown Album";
+
+  useEffect(() => {
+    if (!hasAlbumArt) {
+      setPlayerTheme(DEFAULT_PLAYER_THEME);
+      return;
+    }
+
+    let cancelled = false;
+    const applyFallbackTheme = () => {
+      if (cancelled) return;
+      const fallbackRgb = parseHexToRgb(nowPlaying.bg_color);
+      if (!fallbackRgb) {
+        setPlayerTheme(DEFAULT_PLAYER_THEME);
+        return;
+      }
+      setPlayerTheme(buildPlayerTheme(fallbackRgb, mixRgb(fallbackRgb, [20, 184, 166], 0.28)));
+    };
+
+    const colorThief = new ColorThief();
+    const albumImage = new Image();
+    albumImage.crossOrigin = "anonymous";
+    albumImage.referrerPolicy = "no-referrer";
+    albumImage.decoding = "async";
+
+    albumImage.onload = () => {
+      try {
+        const dominant = colorThief.getColor(albumImage, 8) as RGBTuple;
+        const palette = colorThief.getPalette(albumImage, 4, 8) as RGBTuple[];
+        const accent = palette[1] ?? palette[0] ?? dominant;
+        if (!cancelled) {
+          setPlayerTheme(buildPlayerTheme(dominant, accent));
+        }
+      } catch {
+        applyFallbackTheme();
+      }
+    };
+
+    albumImage.onerror = applyFallbackTheme;
+    albumImage.src = nowPlaying.image;
+
+    return () => {
+      cancelled = true;
+      albumImage.src = "";
+    };
+  }, [hasAlbumArt, nowPlaying.bg_color, nowPlaying.image]);
+
+  useEffect(() => {
+    const panel = nowPlayingPanelRef.current;
+    if (!panel || typeof ResizeObserver === "undefined") return;
+
+    const baseWidth = 360;
+    const baseHeight = 160;
+    const minScale = 0.62;
+    const maxScale = 2.2;
+
+    const updateScale = () => {
+      const { width, height } = panel.getBoundingClientRect();
+      if (width <= 0 || height <= 0) return;
+
+      const widthScale = width / baseWidth;
+      const heightScale = height / baseHeight;
+      const nextScale = Math.max(minScale, Math.min(maxScale, Math.min(widthScale, heightScale)));
+
+      setNowPlayingScale((prevScale) => (Math.abs(prevScale - nextScale) > 0.02 ? nextScale : prevScale));
+    };
+
+    updateScale();
+    const resizeObserver = new ResizeObserver(updateScale);
+    resizeObserver.observe(panel);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, []);
+
+  return (
+    <div className="flex flex-col items-center h-full pt-0.5 pb-0.5 px-1 overflow-hidden bg-gradient-to-b from-background to-background/80">
+      {/* LIVE TELEMETRY Header */}
+      <div className="text-[7px] sm:text-[8px] font-bold racing-text text-muted-foreground tracking-wider mb-0.5">
+        LIVE TELEMETRY
+      </div>
+
+      {/* E-STOP and AUTO OFF - Side by Side Round Buttons */}
+      <div className="flex w-full gap-1 mb-0.5 flex-shrink-0">
+        {/* E-STOP Button - Round */}
+        <button
+          onClick={onEmergencyStop}
+          className="flex-1 rounded-full bg-transparent flex items-center justify-center transition-all duration-100 touch-feedback font-bold racing-text"
+          style={{
+            outline: 'none',
+            border: '1px solid rgb(20, 184, 166)'
+          }}
+        >
+          <svg 
+            className="w-[clamp(30px,5.5vw,40px)] h-[clamp(30px,5.5vw,40px)]" 
+            style={{ color: isEmergencyStop ? 'rgb(239, 68, 68)' : 'rgb(107, 114, 128)' }}
+            xmlns="http://www.w3.org/2000/svg" 
+            version="1.1" 
+            viewBox="0 0 100 125"
+          >
+            <path d="M95.1,82.3l-41-3.7c-0.7-0.1-1.4-0.4-1.8-1L46,69.3l9.6-4.9l1.7,2.4c1.5,2.2,4.8,3,7,1.5c0.9-0.6,1.6-1.5,1.9-2.5    c1.4,0.5,3,0.3,4.3-0.6c0.9-0.6,1.5-1.4,1.8-2.4c1.4,0.5,3.1,0.3,4.4-0.6c1.4-0.9,2.1-2.4,2.1-4c1.5,0,2.9-0.6,4-1.9    c1.3-1.7,1.3-4.1,0.1-5.9l7.3-3.7c0.9-0.4,1.1-1.5,0.6-2.3l-0.5-0.8l1.9-1c0.9-0.4,1.1-1.5,0.6-2.3l-1.3-1.9    c-0.5-0.7-1.3-0.9-2.1-0.5L87.1,39L86.5,38c-0.5-0.7-1.3-0.9-2.1-0.5l-4.5,2.3l-2.8-5.5c-1.7-3.2-4.6-5.6-8.1-6.4l-8.7-2.2    l-2.2-3.1l0.7-0.5c1.1-0.8,1.4-2.3,0.6-3.4l-5.1-7.4c-0.8-1.1-2.3-1.4-3.4-0.6L32.4,23.5c-1.1,0.8-1.4,2.3-0.6,3.4l5.1,7.4    c0.8,1.1,2.3,1.4,3.4,0.6l0.7-0.5l2.2,3.2l-0.3,0.8c-1.6,3.6-1.2,7.8,1,11.1c1.3,1.9,2.9,4.1,4.8,6.4l-9.3,4.8l-2.5-3.3    c-0.8-1-2.1-1.3-3.2-0.8L4,71c-0.9,0.4-1.5,1.4-1.5,2.4v13.7c0,1.4,1.2,2.6,2.6,2.6h89.8c1.4,0,2.6-1.2,2.6-2.6V85    C97.5,83.6,96.5,82.5,95.1,82.3z M41.1,28.8c-1.1,0.7-2.5,0.5-3.3-0.6c-0.7-1.1-0.5-2.5,0.6-3.3c1.1-0.7,2.5-0.5,3.3,0.6    C42.4,26.6,42.1,28.1,41.1,28.8z M62.6,65.7c-0.8,0.6-2,0.4-2.6-0.5l-3-4.4c-0.6-0.8-0.4-2,0.5-2.6c0.9-0.6,2-0.4,2.6,0.5l3,4.4    C63.6,63.9,63.4,65.1,62.6,65.7z M68.7,62.6c-0.8,0.6-2,0.4-2.6-0.5l-4.1-6c-0.6-0.9-0.4-2,0.5-2.6c0.9-0.6,2-0.4,2.6,0.5l4.1,6    C69.8,60.8,69.6,62,68.7,62.6z M75,59.6c-0.8,0.6-2,0.4-2.6-0.5l-3.2-4.6c0.7-0.1,1.3-0.3,1.9-0.7l1.5-1l2.9,4.2    C76.1,57.9,75.9,59,75,59.6z M78.2,49l2.2,3.2c0.6,0.8,0.4,2-0.5,2.6c-0.8,0.6-2,0.4-2.6-0.5l-2.2-3.2l2.7-1.8    C78,49.2,78.1,49.1,78.2,49z M46.5,47.6c-1.6-2.4-1.9-5.4-0.7-8.1l0.7-1.6c0.2-0.5,0.2-1.1-0.2-1.5l-2.7-3.9l11.9-8.2L58,28    c0.2,0.3,0.5,0.5,0.9,0.6l9.3,2.3c2.6,0.7,4.9,2.4,6.1,4.8l3.1,6c0.9,1.7,0.3,3.9-1.3,4.9l-6.7,4.4c-0.8,0.5-1.9,0.3-2.5-0.5    c-0.3-0.4-0.4-0.9-0.3-1.4c0.1-0.5,0.4-0.9,0.8-1.2l4.7-3c0.7-0.4,0.9-1.3,0.6-2L71.1,40c-0.4-0.8-1.3-1.1-2.1-0.7    c-0.8,0.4-1.1,1.3-0.7,2.1l0.8,1.6c-6,1-8.7-3.6-8.8-3.9c-0.4-0.7-1.4-1-2.1-0.6L58,38.6c-0.6,0.4-0.9,1.3-0.5,2    c1,1.9,3.6,4.6,7.6,5.4c-0.7,0.6-1.1,1.3-1.4,2.2l-12.1,6.2C49.5,52,47.8,49.6,46.5,47.6z" fill="currentColor"/>
+          </svg>
+        </button>
+
+        {/* AUTO OFF Button - Round */}
+        <button
+          onClick={onAutoMode}
+          disabled={isEmergencyStop || isAutopilotEnabled}
+          className="flex-1 rounded-full bg-transparent flex items-center justify-center transition-all duration-100 touch-feedback font-bold racing-text disabled:opacity-50 disabled:cursor-not-allowed"
+          style={{
+            outline: 'none',
+            border: '1px solid rgb(20, 184, 166)'
+          }}
+        >
+          <svg 
+            className="w-[clamp(30px,5.5vw,40px)] h-[clamp(30px,5.5vw,40px)]" 
+            style={{ color: (isEmergencyStop || isAutopilotEnabled) ? 'rgb(107, 114, 128)' : (isAutoMode ? 'rgb(0, 184, 163)' : 'rgb(107, 114, 128)') }}
+            xmlns="http://www.w3.org/2000/svg" 
+            version="1.0" 
+            viewBox="0 0 29.59 27.84375"
+          >
+            <path d="M25.803 4.589c-0.181,-0.384 -0.392,-0.674 -0.632,-0.877 -0.443,-0.379 -1.027,-0.416 -1.509,-0.101 -1.702,1.106 -3.686,1.906 -5.958,2.394 -0.01,0.094 -0.026,0.187 -0.045,0.28 -0.131,0.68 -0.387,1.347 -0.765,2.003 -0.107,0.184 -0.331,0.24 -0.504,0.125 -0.171,-0.114 -0.222,-0.354 -0.115,-0.538 0.328,-0.566 0.549,-1.139 0.664,-1.717 -0.448,0.082 -0.909,0.151 -1.379,0.21 -0.01,0.067 -0.021,0.131 -0.034,0.197 -0.131,0.681 -0.384,1.347 -0.766,2.003 -0.106,0.184 -0.33,0.24 -0.501,0.125 -0.171,-0.114 -0.224,-0.354 -0.117,-0.538 0.325,-0.563 0.546,-1.131 0.661,-1.704 -0.445,0.043 -0.899,0.074 -1.36,0.099 -0.013,0.098 -0.029,0.197 -0.051,0.296 -0.128,0.68 -0.384,1.346 -0.765,2.002 -0.107,0.184 -0.331,0.24 -0.501,0.126 -0.171,-0.115 -0.224,-0.358 -0.118,-0.539 0.334,-0.576 0.558,-1.157 0.67,-1.747 0.008,-0.037 0.015,-0.074 0.021,-0.109 -0.672,0.019 -1.363,0.016 -2.072,-0.005 -0.203,-0.006 -0.379,0.074 -0.515,0.234 -0.139,0.158 -0.2,0.355 -0.179,0.571 0.086,0.864 0.07,1.632 -0.047,2.307 -0.139,0.797 -0.619,1.408 -1.323,1.69 -0.707,0.286 -1.44,0.163 -2.032,-0.338 -0.163,-0.139 -0.325,-0.28 -0.488,-0.43 -0.149,-0.138 -0.347,-0.168 -0.528,-0.083 -0.179,0.086 -0.291,0.262 -0.299,0.472 -0.072,2.171 0.408,3.862 1.445,5.075 11.254,-3.298 17.635,-7.125 19.142,-11.483l0 0zm-16.296 15.998l19.368 0c0.395,0 0.715,0.344 0.715,0.768l0 0.152c0,0.424 -0.32,0.768 -0.715,0.768l-19.368 0c-0.395,0 -0.715,-0.344 -0.715,-0.768l0 -0.152c0,-0.424 0.32,-0.768 0.715,-0.768l0 0zm15.219 -6.451l3.714 5.624 -2.543 0 -2.846 -4.365 -2.829 2.128 -0.638 -0.979c-0.352,-0.538 -0.229,-1.288 0.272,-1.666l5.51 -4.142c0.501,-0.376 1.197,-0.245 1.549,0.294l0.638 0.978 -2.827 2.128 0 0zm-24.726 -8.432l6.4 -5.704 3.032 3.784c0.307,0.381 0.32,0.901 -0.04,1.221l-5.184 4.622c-0.309,0.274 -0.824,0.28 -1.088,-0.048l-3.12 -3.875 0 0zm9.334 0.123l0.557 0.525c-0.043,0.035 -0.08,0.075 -0.117,0.117 -0.23,0.267 -0.334,0.603 -0.299,0.96 0.069,0.715 0.08,1.459 -0.043,2.166 -0.109,0.624 -0.477,1.096 -1.032,1.317 -0.555,0.224 -1.12,0.131 -1.584,-0.264 -0.16,-0.136 -0.32,-0.277 -0.475,-0.419 -0.285,-0.258 -0.669,-0.32 -1.01,-0.157 -0.107,0.048 -0.2,0.115 -0.28,0.197l-0.32 -0.338 4.603 -4.104 0 0zm-2.387 10.747c11.416,-3.315 17.622,-7.091 19.141,-11.483 0,0 0.158,0.242 0.478,0.725 -0.624,4.664 -6.102,8.981 -17.918,13.622 -0.162,0.064 -0.325,0.047 -0.474,-0.046 -0.15,-0.093 -0.201,-0.253 -0.27,-0.421 -0.685,-1.659 -0.957,-2.398 -0.957,-2.398l0 0.001z" fill="currentColor"/>
+          </svg>
+        </button>
+      </div>
+
+      {/* AUTOPILOT, CAMERA - All in a single horizontal line */}
+      <div className="flex w-full gap-1 mb-0.5 justify-center items-center flex-shrink-0">
+        {/* AUTOPILOT Button */}
+        <button
+          onClick={onAutopilotToggle}
+          disabled={!isEngineRunning || isEmergencyStop || eBrakeActive}
+          className="w-[clamp(34px,6vw,44px)] h-[clamp(34px,6vw,44px)] rounded-full bg-transparent flex items-center justify-center transition-all duration-100 touch-feedback disabled:opacity-50 disabled:cursor-not-allowed"
+          style={{
+            outline: 'none',
+            border: '1px solid rgb(20, 184, 166)'
+          }}
+          title={isAutopilotEnabled ? 'AUTOPILOT: ON' : 'AUTOPILOT: OFF'}
+        >
+          <svg className="w-[clamp(24px,4.8vw,36px)] h-[clamp(24px,4.8vw,36px)]" style={{ color: (!isEngineRunning || isEmergencyStop || eBrakeActive) ? 'rgb(107, 114, 128)' : (isAutopilotEnabled ? 'rgb(20, 184, 166)' : 'rgb(107, 114, 128)') }} viewBox="-5.0 -10.0 110.0 135.0">
+            <path d="m50 81.25c17.234 0 31.25-14.016 31.25-31.25s-14.016-31.25-31.25-31.25-31.25 14.016-31.25 31.25 14.016 31.25 31.25 31.25zm0-59.375c15.516 0 28.125 12.609 28.125 28.125s-12.609 28.125-28.125 28.125-28.125-12.609-28.125-28.125 12.609-28.125 28.125-28.125z" fill="currentColor"/>
+            <path d="m43.672 73.828s0.03125 0.015625 0.046875 0.015625h0.03125s0.09375 0.03125 0.15625 0.03125c1.9531 0.51562 4 0.78125 6.0938 0.78125s4.1406-0.26562 6.0938-0.78125c0.0625 0 0.10938-0.015625 0.15625-0.03125h0.03125s0.03125-0.015625 0.046875-0.015625c9.4062-2.5 16.625-10.438 18.062-20.219 0-0.0625 0.015625-0.10938 0.015625-0.17188 0.17188-1.125 0.25-2.2656 0.25-3.4375 0-2.4688-0.35938-4.875-1.0625-7.125 0-0.09375-0.046875-0.1875-0.078125-0.28125-3.1406-9.9844-12.5-17.25-23.516-17.25s-20.375 7.2656-23.516 17.25c-0.03125 0.09375-0.0625 0.1875-0.078125 0.28125-0.70312 2.25-1.0625 4.6562-1.0625 7.125 0 1.1719 0.078125 2.3125 0.25 3.4375 0 0.0625 0.015625 0.10938 0.015625 0.17188 1.4375 9.7812 8.6562 17.719 18.062 20.219zm1.4219-23.438c1.3281-1.3125 3.0625-2.0312 4.9062-2.0312s3.5781 0.71875 4.9062 2.0312c0.625 0.60938 0.625 1.5938 0.015625 2.2031-0.29688 0.3125-0.70312 0.46875-1.1094 0.46875s-0.79688-0.15625-1.0938-0.45312c-1.4688-1.4531-3.9688-1.4531-5.4375 0-0.60938 0.60938-1.6094 0.60938-2.2031-0.015625-0.60938-0.60938-0.60938-1.5938 0.015625-2.2031zm-1.625-1.5938c-0.60938 0.60938-1.5938 0.59375-2.2031-0.015625s-0.60938-1.5938 0-2.2031c2.3438-2.3281 5.4531-3.6094 8.7344-3.6094s6.3906 1.2812 8.7344 3.6094c0.60938 0.60938 0.60938 1.5938 0 2.2031-0.29688 0.3125-0.70312 0.46875-1.1094 0.46875s-0.79688-0.15625-1.0938-0.45312c-1.75-1.75-4.0781-2.7031-6.5312-2.7031s-4.7812 0.95312-6.5312 2.7031zm5 6.6719c0-0.85938 0.6875-1.5625 1.5469-1.5625h0.015625c0.85938 0 1.5625 0.70312 1.5625 1.5625s-0.70312 1.5625-1.5625 1.5625-1.5625-0.70312-1.5625-1.5625zm8.6875 14.828c-0.0625-0.54688-0.09375-1.0781-0.09375-1.6094 0-7.625 6.2031-13.828 13.828-13.828h0.078125c-1.6562 7.2031-6.9375 13.016-13.812 15.438zm-7.1562-41.828c8.4688 0 15.797 4.9062 19.328 12.031-6.2344-2.0312-12.719-3.0625-19.328-3.0625s-13.094 1.0312-19.328 3.0625c3.5312-7.125 10.859-12.031 19.328-12.031zm-20.891 26.391c7.625 0 13.828 6.2031 13.828 13.828 0 0.53125-0.03125 1.0625-0.09375 1.6094-6.875-2.4219-12.156-8.2344-13.812-15.438z" fill="currentColor"/>
+            <path d="m22.375 22.375c14.375-14.375 37.234-15.172 52.562-2.4375l-2.9375 0.1875c-0.85938 0.046875-1.5156 0.79688-1.4688 1.6562 0.046875 0.82812 0.73438 1.4688 1.5625 1.4688h0.09375l6.6094-0.42188c0.078125 0 0.14062-0.046875 0.21875-0.0625 0.10938-0.015625 0.21875-0.046875 0.32812-0.09375s0.1875-0.125 0.28125-0.1875c0.0625-0.046875 0.125-0.0625 0.1875-0.125 0 0 0-0.03125 0.03125-0.046875 0.078125-0.078125 0.125-0.1875 0.1875-0.28125 0.046875-0.078125 0.10938-0.14062 0.14062-0.23438 0.03125-0.078125 0.03125-0.17188 0.046875-0.26562 0.015625-0.10938 0.046875-0.21875 0.046875-0.34375v-0.046875l-0.42188-6.6094c-0.0625-0.85938-0.78125-1.5156-1.6562-1.4688-0.85938 0.046875-1.5156 0.79688-1.4688 1.6562l0.17188 2.7656c-16.531-13.703-41.203-12.828-56.719 2.6875-10.25 10.25-14.484 24.844-11.328 39.016 0.15625 0.73438 0.8125 1.2188 1.5312 1.2188 0.10938 0 0.23438 0 0.34375-0.03125 0.84375-0.1875 1.375-1.0156 1.1875-1.8594-2.9219-13.125 1-26.625 10.5-36.125z" fill="currentColor"/>
+            <path d="m91.172 40.828c-0.1875-0.84375-1.0156-1.375-1.8594-1.1875s-1.375 1.0156-1.1875 1.8594c2.9219 13.125-1 26.625-10.5 36.125-14.375 14.375-37.234 15.172-52.562 2.4375l2.9375-0.1875c0.85938-0.046875 1.5156-0.79688 1.4688-1.6562s-0.78125-1.5-1.6562-1.4688l-6.6094 0.42188c-0.078125 0-0.14062 0.046875-0.21875 0.0625-0.10938 0.015625-0.21875 0.046875-0.32812 0.09375s-0.1875 0.125-0.28125 0.1875c-0.0625 0.046875-0.125 0.0625-0.1875 0.125 0 0 0-0.03125-0.03125-0.046875-0.078125 0.078125-0.125-0.1875-0.1875-0.28125-0.046875-0.078125-0.10938-0.14062-0.14062-0.23438-0.03125-0.078125-0.03125-0.17188-0.046875-0.26562-0.015625-0.10938-0.046875-0.21875-0.046875-0.34375v0.046875l0.42188 6.6094c0.046875 0.82812 0.73438 1.4688 1.5625 1.4688h0.09375c0.85938-0.046875 1.5156-0.79688 1.4688-1.6562l-0.17188-2.7656c7.7812 6.4531 17.344 9.7031 26.922 9.7031 10.797 0 21.609-4.1094 29.828-12.344 10.25-10.25 14.484-24.844 11.328-39.016z" fill="currentColor"/>
+          </svg>
+        </button>
+
+        {/* CAMERA Button */}
+        <button
+          onClick={onCameraToggle}
+          disabled={!isEngineRunning}
+          className="w-[clamp(34px,6vw,44px)] h-[clamp(34px,6vw,44px)] rounded-full bg-transparent flex items-center justify-center transition-all duration-100 touch-feedback disabled:opacity-50 disabled:cursor-not-allowed"
+          style={{
+            outline: 'none',
+            border: '1px solid rgb(20, 184, 166)'
+          }}
+          title={isCameraEnabled ? 'CAMERA: ON' : 'CAMERA: OFF'}
+        >
+          <svg className="w-[clamp(22px,4.2vw,32px)] h-[clamp(22px,4.2vw,32px)]" style={{ color: !isEngineRunning ? 'rgb(107, 114, 128)' : (isCameraEnabled ? 'rgb(20, 184, 166)' : 'rgb(107, 114, 128)') }} viewBox="0 0 24 24">
+            <path d="M4,4H7L9,2H15L17,4H20A2,2 0 0,1 22,6V18A2,2 0 0,1 20,20H4A2,2 0 0,1 2,18V6A2,2 0 0,1 4,4M12,7A5,5 0 0,0 7,12A5,5 0 0,0 12,17A5,5 0 0,0 17,12A5,5 0 0,0 12,7M12,9A3,3 0 0,1 15,12A3,3 0 0,1 12,15A3,3 0 0,1 9,12A3,3 0 0,1 12,9Z" fill="currentColor"/>
+          </svg>
+        </button>
+
+        {/* TARGET Button */}
+        <button
+          onClick={onTargetOpen}
+          disabled={!isEngineRunning}
+          className="w-[clamp(34px,6vw,44px)] h-[clamp(34px,6vw,44px)] rounded-full bg-transparent flex items-center justify-center transition-all duration-100 touch-feedback disabled:opacity-50 disabled:cursor-not-allowed"
+          style={{
+            outline: 'none',
+            border: '1px solid rgb(20, 184, 166)'
+          }}
+          title="TARGET PURSUIT"
+        >
+          <svg className="w-[clamp(22px,4.2vw,32px)] h-[clamp(22px,4.2vw,32px)]" style={{ color: !isEngineRunning ? 'rgb(107, 114, 128)' : 'rgb(20, 184, 166)' }} viewBox="0 0 24 24">
+            <path d="M12 2C6.49 2 2 6.49 2 12s4.49 10 10 10 10-4.49 10-10S17.51 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm3-8c0 1.66-1.34 3-3 3s-3-1.34-3-3 1.34-3 3-3 3 1.34 3 3zm-3-5c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zm0 8c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zM12 8v2M12 14v2M8 12h2M14 12h2" fill="none" stroke="currentColor" strokeWidth="1.5"/>
+            <circle cx="12" cy="12" r="2" fill="currentColor"/>
+            <circle cx="12" cy="12" r="5" fill="none" stroke="currentColor" strokeWidth="1.2"/>
+            <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="0.8"/>
+            <line x1="12" y1="2" x2="12" y2="6" stroke="currentColor" strokeWidth="1.2"/>
+            <line x1="12" y1="18" x2="12" y2="22" stroke="currentColor" strokeWidth="1.2"/>
+            <line x1="2" y1="12" x2="6" y2="12" stroke="currentColor" strokeWidth="1.2"/>
+            <line x1="18" y1="12" x2="22" y2="12" stroke="currentColor" strokeWidth="1.2"/>
+          </svg>
+        </button>
+      </div>
+
+      {/* Transmission Icon Gearbox */}
+      <div className="relative w-full mb-0.5 min-h-0 flex-[1.3] flex items-center justify-center">
+        {/* Transmission Icon */}
+        <svg 
+          className="w-full h-full max-h-full"
+          style={{ color: 'currentColor' }}
+          xmlns="http://www.w3.org/2000/svg" 
+          version="1.1" 
+          viewBox="-5.0 -10.0 110.0 135.0"
+          preserveAspectRatio="xMidYMid meet"
+        >
+          <g style={{ fill: 'currentColor' }}>
+            <path d="m19.438 22.391c0.53125 0 1.0469-0.046875 1.5625-0.14062 4.3594-0.75 7.6875-4.5469 7.6875-9.1094 0-5.1094-4.1406-9.2656-9.25-9.2656s-9.2656 4.1562-9.2656 9.2656c0 4.5625 3.3438 8.3594 7.7031 9.1094 0.5 0.09375 1.0312 0.14062 1.5625 0.14062z"/>
+            <path d="m28.688 85.406c0-4.5625-3.3281-8.3594-7.6875-9.1094-0.51562-0.09375-1.0312-0.14062-1.5625-0.14062s-1.0625 0.046875-1.5625 0.14062c-4.3594 0.75-7.7031 4.5469-7.7031 9.1094 0 5.1094 4.1562 9.2656 9.2656 9.2656s9.25-4.1562 9.25-9.2656z"/>
+            <path d="m50 76.156c-0.53125 0-1.0469 0.046875-1.5625 0.14062-4.3594 0.75-7.7031 4.5469-7.7031 9.1094 0 5.1094 4.1562 9.2656 9.2656 9.2656s9.2656-4.1562 9.2656-9.2656c0-4.5625-3.3438-8.3594-7.7031-9.1094-0.51562-0.09375-1.0312-0.14062-1.5625-0.14062z"/>
+            <path d="m50 3.875c-5.1094 0-9.2656 4.1562-9.2656 9.2656 0 4.5625 3.3438 8.3594 7.7031 9.1094 0.51562 0.09375 1.0312 0.14062 1.5625 0.14062s1.0469-0.046875 1.5625-0.14062c4.3594-0.75 7.7031-4.5469 7.7031-9.1094 0-5.1094-4.1562-9.2656-9.2656-9.2656z"/>
+            <path d="m80.562 3.875c-5.1094 0-9.25 4.1562-9.25 9.2656 0 4.5625 3.3281 8.3594 7.6875 9.1094 0.51562 0.09375 1.0312 0.14062 1.5625 0.14062s1.0625-0.046875 1.5625-0.14062c4.3594-0.75 7.7031-4.5469 7.7031-9.1094 0-5.1094-4.1562-9.2656-9.2656-9.2656z"/>
+            <path d="m80.566 69.422c0.86328 0 1.5625-0.69922 1.5625-1.5625v-45.609c-0.50781 0.085938-1.0273 0.14062-1.5625 0.14062s-1.0547-0.054687-1.5625-0.14062v26.188h-27.441v-26.188c-0.50781 0.085938-1.0273 0.14062-1.5625 0.14062s-1.0547-0.054687-1.5625-0.14062v26.188h-27.441v-26.188c-0.50781 0.085938-1.0273 0.14062-1.5625 0.14062s-1.0547-0.054687-1.5625-0.14062v54.043c0.50781-0.085938 1.0273-0.14062 1.5625-0.14062s1.0547 0.054687 1.5625 0.14062v-24.73h27.441v24.73c0.50781-0.085938 1.0273-0.14062 1.5625-0.14062s1.0547 0.054687 1.5625 0.14062v-24.73h27.441v16.297c0 0.86328 0.69922 1.5625 1.5625 1.5625z"/>
+            <path d="m82.688 74.695h-8.3672c-0.86328 0-1.5625 0.69922-1.5625 1.5625v18.305c0 0.86328 0.69922 1.5625 1.5625 1.5625 0.86328 0 1.5625-0.69922 1.5625-1.5625v-7.5898h5.125l4.4141 8.3203c0.28125 0.52734 0.82031 0.82812 1.3828 0.82812 0.24609 0 0.49609-0.058594 0.73047-0.18359 0.76172-0.40625 1.0547-1.3516 0.64844-2.1133l-3.7812-7.125c2.2969-0.73047 3.9609-2.8828 3.9609-5.4141v-0.91406c0-3.1328-2.5469-5.6797-5.6797-5.6797z" style={{ fill: currentGear === "R" ? "rgb(20, 184, 166)" : "currentColor", opacity: !isGearDisabled("R") ? 1 : 0.5, transition: "fill 0.2s, opacity 0.2s" }} />
+          </g>
+
+          {/* Invisible click handler for R */}
+          <circle
+            cx="80.6"
+            cy="85.4"
+            r="12.5"
+            fill="transparent"
+            stroke="transparent"
+            style={{ cursor: !isGearDisabled("R") ? 'pointer' : 'not-allowed', opacity: !isGearDisabled("R") ? 1 : 0.5 }}
+            onClick={() => safeGearChange("R")}
+          />
+
+          {/* Interactive Gear Selection Overlays */}
+          {/* 4 - Top Left */}
+          <circle
+            cx="19.4"
+            cy="13.1"
+            r="12.5"
+            fill={currentGear === "4" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.02)"}
+            stroke={currentGear === "4" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.1)"}
+            strokeWidth={currentGear === "4" ? "1" : "0.5"}
+            style={{ cursor: !isGearDisabled("4") ? 'pointer' : 'not-allowed', opacity: !isGearDisabled("4") ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s, strokeWidth 0.2s' }}
+            onClick={() => safeGearChange("4")}
+          />
+          <text
+            x="19.4"
+            y="13.1"
+            textAnchor="middle"
+            dominantBaseline="middle"
+            fontSize="12"
+            fontWeight="bold"
+            fill={currentGear === "4" ? "white" : "rgb(0, 0, 0)"}
+            pointerEvents="none"
+          >
+            4
+          </text>
+
+          {/* 3 - Top Middle */}
+          <circle
+            cx="50"
+            cy="13.1"
+            r="12.5"
+            fill={currentGear === "3" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.02)"}
+            stroke={currentGear === "3" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.1)"}
+            strokeWidth={currentGear === "3" ? "1" : "0.5"}
+            style={{ cursor: !isGearDisabled("3") ? 'pointer' : 'not-allowed', opacity: !isGearDisabled("3") ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s, strokeWidth 0.2s' }}
+            onClick={() => safeGearChange("3")}
+          />
+          <text
+            x="50"
+            y="13.1"
+            textAnchor="middle"
+            dominantBaseline="middle"
+            fontSize="12"
+            fontWeight="bold"
+            fill={currentGear === "3" ? "white" : "rgb(0, 0, 0)"}
+            pointerEvents="none"
+          >
+            3
+          </text>
+
+          {/* 2 - Top Right */}
+          <circle
+            cx="80.6"
+            cy="13.1"
+            r="12.5"
+            fill={currentGear === "2" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.02)"}
+            stroke={currentGear === "2" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.1)"}
+            strokeWidth={currentGear === "2" ? "1" : "0.5"}
+            style={{ cursor: !isGearDisabled("2") ? 'pointer' : 'not-allowed', opacity: !isGearDisabled("2") ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s, strokeWidth 0.2s' }}
+            onClick={() => safeGearChange("2")}
+          />
+          <text
+            x="80.6"
+            y="13.1"
+            textAnchor="middle"
+            dominantBaseline="middle"
+            fontSize="12"
+            fontWeight="bold"
+            fill={currentGear === "2" ? "white" : "rgb(0, 0, 0)"}
+            pointerEvents="none"
+          >
+            2
+          </text>
+
+          {/* 1 - Bottom Left */}
+          <circle
+            cx="19.4"
+            cy="85.4"
+            r="12.5"
+            fill={currentGear === "1" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.02)"}
+            stroke={currentGear === "1" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.1)"}
+            strokeWidth={currentGear === "1" ? "1" : "0.5"}
+            style={{ cursor: !isGearDisabled("1") ? 'pointer' : 'not-allowed', opacity: !isGearDisabled("1") ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s, strokeWidth 0.2s' }}
+            onClick={() => safeGearChange("1")}
+          />
+          <text
+            x="19.4"
+            y="85.4"
+            textAnchor="middle"
+            dominantBaseline="middle"
+            fontSize="12"
+            fontWeight="bold"
+            fill={currentGear === "1" ? "white" : "rgb(0, 0, 0)"}
+            pointerEvents="none"
+          >
+            1
+          </text>
+
+          {/* N - Bottom Middle */}
+          <circle
+            cx="50"
+            cy="85.4"
+            r="12.5"
+            fill={currentGear === "N" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.02)"}
+            stroke={currentGear === "N" ? "rgb(20, 184, 166)" : "rgba(255, 255, 255, 0.1)"}
+            strokeWidth={currentGear === "N" ? "1" : "0.5"}
+            style={{ cursor: !isGearDisabled("N") ? 'pointer' : 'not-allowed', opacity: !isGearDisabled("N") ? 1 : 0.5, transition: 'fill 0.2s, stroke 0.2s, strokeWidth 0.2s' }}
+            onClick={() => safeGearChange("N")}
+          />
+          <text
+            x="50"
+            y="85.4"
+            textAnchor="middle"
+            dominantBaseline="middle"
+            fontSize="12"
+            fontWeight="bold"
+            fill={currentGear === "N" ? "white" : "rgb(0, 0, 0)"}
+            pointerEvents="none"
+          >
+            N
+          </text>
+        </svg>
+      </div>
+
+      {/* NOW PLAYING HUD */}
+      <div className="w-full px-0.5 mb-0.5 min-h-0 flex-[1.2]" ref={nowPlayingPanelRef}>
+        <div
+          className="border rounded-sm backdrop-blur-sm transition-all duration-300 overflow-hidden"
+          style={{
+            padding: `calc(8px * ${nowPlayingScale}) calc(10px * ${nowPlayingScale})`,
+            borderColor: playerTheme.border,
+            background: playerTheme.cardBackground,
+            boxShadow: `inset 0 0 0 1px ${playerTheme.border}, 0 4px 12px rgba(0, 0, 0, 0.28)`,
+          }}
+        >
+          {/* Top row: art + info + controls */}
+          <div className="flex items-center" style={{ gap: `calc(12px * ${nowPlayingScale})` }}>
+            {/* Album art */}
+            <div
+              className="rounded overflow-hidden flex items-center justify-center flex-shrink-0 border bg-black/20"
+              style={{
+                width: `calc(60px * ${nowPlayingScale})`,
+                height: `calc(60px * ${nowPlayingScale})`,
+                borderColor: playerTheme.border,
+              }}
+            >
+              {hasAlbumArt ? (
+                <img src={nowPlaying.image} alt="Album art" className="w-full h-full object-cover" />
+              ) : (
+                <Music
+                  style={{
+                    width: `calc(24px * ${nowPlayingScale})`,
+                    height: `calc(24px * ${nowPlayingScale})`,
+                    color: playerTheme.accent,
+                    filter: `drop-shadow(0 0 4px ${playerTheme.accent})`,
+                  }}
+                />
+              )}
+            </div>
+
+            {/* Track info */}
+            <div className="flex flex-col min-w-0 flex-1 overflow-hidden">
+              <span
+                className="font-bold truncate leading-tight tracking-wide"
+                style={{ color: playerTheme.title, fontSize: `calc(13px * ${nowPlayingScale})` }}
+              >
+                {displayTrack}
+              </span>
+              <span
+                className="truncate leading-tight tracking-wider uppercase"
+                style={{ color: playerTheme.subtitle, fontSize: `calc(10px * ${nowPlayingScale})` }}
+              >
+                {displayArtist}
+              </span>
+            </div>
+
+            {/* Playback controls */}
+            <div className="flex items-center flex-shrink-0" style={{ gap: `calc(6px * ${nowPlayingScale})` }}>
+              <SkipBack
+                style={{
+                  width: `calc(18px * ${nowPlayingScale})`,
+                  height: `calc(18px * ${nowPlayingScale})`,
+                  color: playerTheme.subtitle,
+                }}
+              />
+              <div
+                className="rounded-full border flex items-center justify-center"
+                style={{
+                  width: `calc(32px * ${nowPlayingScale})`,
+                  height: `calc(32px * ${nowPlayingScale})`,
+                  borderColor: playerTheme.accent,
+                }}
+              >
+                <Pause
+                  style={{
+                    width: `calc(16px * ${nowPlayingScale})`,
+                    height: `calc(16px * ${nowPlayingScale})`,
+                    color: playerTheme.accent,
+                  }}
+                />
+              </div>
+              <SkipForward
+                style={{
+                  width: `calc(18px * ${nowPlayingScale})`,
+                  height: `calc(18px * ${nowPlayingScale})`,
+                  color: playerTheme.subtitle,
+                }}
+              />
+            </div>
+          </div>
+
+          {/* Progress bar */}
+          <div className="flex items-center" style={{ marginTop: `calc(6px * ${nowPlayingScale})`, gap: `calc(8px * ${nowPlayingScale})` }}>
+            <div
+              className="flex-1 rounded-full overflow-hidden"
+              style={{ height: `calc(4px * ${nowPlayingScale})`, backgroundColor: playerTheme.progressTrack }}
+            >
+              <div
+                className="h-full rounded-full transition-all duration-150"
+                style={{
+                  width: `${clampProgress(nowPlaying.progress_pct)}%`,
+                  backgroundColor: playerTheme.progressFill,
+                  boxShadow: playerTheme.progressGlow,
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* START, STOP, and HORN Buttons - Always visible, fixed at bottom */}
+      <div className="flex gap-1 w-full mt-auto pt-0.5 flex-shrink-0">
+        {/* START Button - Round */}
+        <button
+          onClick={onEngineStart}
+          disabled={isEngineRunning || isAutopilotEnabled}
+          className="flex-1 rounded-full bg-transparent flex flex-col items-center justify-center py-1 sm:py-1.5 px-1 transition-all duration-100 touch-feedback font-bold racing-text disabled:opacity-50 disabled:cursor-not-allowed"
+          style={{
+            outline: 'none',
+            border: '2px solid rgb(0, 184, 163)'
+          }}
+        >
+          <Power className="w-[10px] h-[10px] sm:w-3 sm:h-3 mb-0.5" style={{ color: (isEngineRunning || isAutopilotEnabled) ? 'rgb(107, 114, 128)' : (isEngineRunning ? 'rgb(0, 184, 163)' : 'rgb(107, 114, 128)') }} />
+          <span className="text-[5px] sm:text-[7px] leading-tight">START</span>
+        </button>
+
+        {/* HORN Button - Round */}
+        <button
+          onClick={onHorn}
+          disabled={!isEngineRunning}
+          className="flex-1 rounded-full bg-transparent flex flex-col items-center justify-center py-1 sm:py-1.5 px-1 transition-all duration-100 touch-feedback font-bold racing-text disabled:opacity-50 disabled:cursor-not-allowed active:scale-95"
+          style={{
+            outline: 'none',
+            border: '2px solid rgb(34, 197, 94)'
+          }}
+          title="Press to honk the horn"
+        >
+          <Volume2 className="w-[10px] h-[10px] sm:w-3 sm:h-3 mb-0.5" style={{ color: !isEngineRunning ? 'rgb(107, 114, 128)' : 'rgb(34, 197, 94)' }} />
+          <span className="text-[5px] sm:text-[7px] leading-tight">HORN</span>
+        </button>
+
+        {/* STOP Button - Round */}
+        <button
+          onClick={onEngineStop}
+          disabled={!isEngineRunning}
+          className="flex-1 rounded-full bg-transparent flex flex-col items-center justify-center py-1 sm:py-1.5 px-1 transition-all duration-100 touch-feedback font-bold racing-text disabled:opacity-50 disabled:cursor-not-allowed"
+          style={{
+            outline: 'none',
+            border: '2px solid rgb(239, 68, 68)'
+          }}
+        >
+          <PowerOff className="w-[10px] h-[10px] sm:w-3 sm:h-3 mb-0.5" style={{ color: !isEngineRunning ? 'rgb(107, 114, 128)' : 'rgb(239, 68, 68)' }} />
+          <span className="text-[5px] sm:text-[7px] leading-tight">STOP</span>
+        </button>
+      </div>
+    </div>
+  );
+};

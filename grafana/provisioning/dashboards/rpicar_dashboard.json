@@ -1,0 +1,444 @@
+{
+  "__inputs": [],
+  "__requires": [
+    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0" },
+    { "type": "datasource", "id": "influxdb", "name": "InfluxDB", "version": "1.0.0" },
+    { "type": "panel", "id": "timeseries", "name": "Time series", "version": "" },
+    { "type": "panel", "id": "stat", "name": "Stat", "version": "" }
+  ],
+  "annotations": { "list": [] },
+  "description": "Real-time telemetry dashboard for the RPi Ackermann rover (InfluxDB 1.x / InfluxQL)",
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "liveNow": true,
+  "panels": [
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "id": 100, "title": "🚗  Live Status", "type": "row" },
+
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "orange", "value": 10.5 },
+            { "color": "yellow", "value": 11.0 },
+            { "color": "green", "value": 11.5 }
+          ]},
+          "unit": "volt", "min": 9, "max": 12.6
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "id": 1,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "noValue": "--",
+      "title": "🔋 Battery Voltage",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"battery_voltage\") FROM \"rpicar_power\" WHERE time > now() - 10s", "refId": "A", "resultFormat": "time_series" }]
+    },
+
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 3.0 },
+            { "color": "red", "value": 5.0 }
+          ]},
+          "unit": "amp", "min": 0, "max": 8
+        }
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 4, "y": 1 },
+      "id": 2,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "noValue": "--",
+      "title": "⚡ Current Draw",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"current_amps\") FROM \"rpicar_power\" WHERE time > now() - 10s", "refId": "A", "resultFormat": "time_series" }]
+    },
+
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "blue", "value": null },
+            { "color": "green", "value": 0.1 },
+            { "color": "yellow", "value": 0.5 },
+            { "color": "orange", "value": 1.0 }
+          ]},
+          "unit": "velocityms", "min": 0, "max": 2
+        }
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 7, "y": 1 },
+      "id": 3,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "noValue": "--",
+      "title": "🏎️  Speed (m/s)",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"speed_mpm\") FROM \"rpicar_drive\" WHERE time > now() - 10s", "refId": "A", "resultFormat": "time_series" }]
+    },
+
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 60 },
+            { "color": "red", "value": 75 }
+          ]},
+          "unit": "celsius", "min": 20, "max": 90
+        }
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 10, "y": 1 },
+      "id": 4,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "noValue": "--",
+      "title": "🌡️  CPU Temp",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"cpu_temp_c\") FROM \"rpicar_system\" WHERE time > now() - 10s", "refId": "A", "resultFormat": "time_series" }]
+    },
+
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "orange", "value": 200 },
+            { "color": "yellow", "value": 500 },
+            { "color": "green", "value": 1000 }
+          ]},
+          "unit": "lengthmm", "min": 0, "max": 4000
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 13, "y": 1 },
+      "id": 5,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "noValue": "--",
+      "title": "🔴 Laser Distance",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"laser_mm\") FROM \"rpicar_sensors\" WHERE time > now() - 10s", "refId": "A", "resultFormat": "time_series" }]
+    },
+
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "green", "value": 1 }
+          ]},
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "OFF", "color": "red" }, "1": { "text": "ON", "color": "green" } } }
+          ],
+          "unit": "none", "min": 0, "max": 1
+        }
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 17, "y": 1 },
+      "id": 18,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "noValue": "--",
+      "title": "🔑 Engine",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"engine_running\") FROM \"rpicar_drive\" WHERE time > now() - 10s", "refId": "A", "resultFormat": "time_series" }]
+    },
+
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 0.5 },
+            { "color": "red", "value": 0.8 }
+          ]},
+          "unit": "percent", "min": 0, "max": 100
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "id": 6,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "noValue": "--",
+      "title": "🎮 Throttle PWM",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"current_pwm\") FROM \"rpicar_drive\" WHERE time > now() - 10s", "refId": "A", "resultFormat": "time_series" }]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 }, "id": 101, "title": "🔌  Power & Drive", "type": "row" },
+
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
+      "fieldConfig": {
+        "defaults": { "custom": { "lineWidth": 2, "fillOpacity": 10 }, "unit": "volt", "color": { "mode": "fixed", "fixedColor": "green" } },
+        "overrides": [{ "matcher": { "id": "byName", "options": "current_amps" }, "properties": [{ "id": "unit", "value": "amp" }, { "id": "custom.axisPlacement", "value": "right" }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] }]
+      },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 6 },
+      "id": 7,
+      "options": { "legend": { "calcs": ["last", "min", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "🔋 Power — Battery Voltage & Current",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"battery_voltage\") FROM \"rpicar_power\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "A", "alias": "battery_voltage", "resultFormat": "time_series" },
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"current_amps\") FROM \"rpicar_power\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "B", "alias": "current_amps", "resultFormat": "time_series" }
+      ]
+    },
+
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 2, "fillOpacity": 30, "spanNulls": true, "stacking": { "mode": "none" }, "drawStyle": "line", "lineInterpolation": "stepAfter" },
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "green", "value": 1 }
+          ]},
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "OFF", "color": "red" }, "1": { "text": "ON", "color": "green" } } }
+          ],
+          "unit": "none", "min": 0, "max": 1
+        }
+      },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 6 },
+      "id": 19,
+      "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
+      "title": "🔑 Engine On / Off History",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT last(\"engine_running\") FROM \"rpicar_drive\" WHERE $timeFilter GROUP BY time($__interval) fill(previous)", "refId": "A", "alias": "engine_running", "resultFormat": "time_series" }
+      ]
+    },
+
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
+      "fieldConfig": {
+        "defaults": { "custom": { "lineWidth": 2, "fillOpacity": 10 }, "unit": "percent", "color": { "mode": "fixed", "fixedColor": "blue" } },
+        "overrides": [{ "matcher": { "id": "byName", "options": "steer_angle" }, "properties": [{ "id": "unit", "value": "degree" }, { "id": "custom.axisPlacement", "value": "right" }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "cyan" } }] }]
+      },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 6 },
+      "id": 8,
+      "options": { "legend": { "calcs": ["last", "min", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "🎮 Throttle PWM % & Steering Angle °",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"current_pwm\") FROM \"rpicar_drive\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "A", "alias": "current_pwm", "resultFormat": "time_series" },
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"steer_angle\") FROM \"rpicar_drive\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "B", "alias": "steer_angle", "resultFormat": "time_series" }
+      ]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 13 }, "id": 102, "title": "🛞  Wheel Telemetry (PID + RPM)", "type": "row" },
+
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
+      "fieldConfig": {
+        "defaults": { "custom": { "lineWidth": 2, "fillOpacity": 8 }, "unit": "rotrpm", "color": { "mode": "palette-classic" } }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "id": 9,
+      "options": { "legend": { "calcs": ["last", "mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "🛞 Wheel Actual RPM (FL / FR / RL / RR)",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"actual_rpm\") FROM \"rpicar_wheel\" WHERE \"name\"='fl' AND $timeFilter GROUP BY time($__interval) fill(null)", "refId": "A", "alias": "FL", "resultFormat": "time_series" },
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"actual_rpm\") FROM \"rpicar_wheel\" WHERE \"name\"='fr' AND $timeFilter GROUP BY time($__interval) fill(null)", "refId": "B", "alias": "FR", "resultFormat": "time_series" },
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"actual_rpm\") FROM \"rpicar_wheel\" WHERE \"name\"='rl' AND $timeFilter GROUP BY time($__interval) fill(null)", "refId": "C", "alias": "RL", "resultFormat": "time_series" },
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"actual_rpm\") FROM \"rpicar_wheel\" WHERE \"name\"='rr' AND $timeFilter GROUP BY time($__interval) fill(null)", "refId": "D", "alias": "RR", "resultFormat": "time_series" }
+      ]
+    },
+
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
+      "fieldConfig": {
+        "defaults": { "custom": { "lineWidth": 2, "fillOpacity": 8 }, "unit": "rotrpm", "color": { "mode": "palette-classic" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "FL target" }, "properties": [{ "id": "custom.lineStyle", "value": { "dash": [5,5], "fill": "dash" } }] },
+          { "matcher": { "id": "byName", "options": "FR target" }, "properties": [{ "id": "custom.lineStyle", "value": { "dash": [5,5], "fill": "dash" } }] },
+          { "matcher": { "id": "byName", "options": "RL target" }, "properties": [{ "id": "custom.lineStyle", "value": { "dash": [5,5], "fill": "dash" } }] },
+          { "matcher": { "id": "byName", "options": "RR target" }, "properties": [{ "id": "custom.lineStyle", "value": { "dash": [5,5], "fill": "dash" } }] }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "id": 10,
+      "options": { "legend": { "calcs": ["last", "mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "🛞 Wheel Applied PWM % (FL / FR / RL / RR)",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"applied_pwm\") FROM \"rpicar_wheel\" WHERE \"name\"='fl' AND $timeFilter GROUP BY time($__interval) fill(null)", "refId": "A", "alias": "FL pwm", "resultFormat": "time_series" },
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"applied_pwm\") FROM \"rpicar_wheel\" WHERE \"name\"='fr' AND $timeFilter GROUP BY time($__interval) fill(null)", "refId": "B", "alias": "FR pwm", "resultFormat": "time_series" },
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"applied_pwm\") FROM \"rpicar_wheel\" WHERE \"name\"='rl' AND $timeFilter GROUP BY time($__interval) fill(null)", "refId": "C", "alias": "RL pwm", "resultFormat": "time_series" },
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"applied_pwm\") FROM \"rpicar_wheel\" WHERE \"name\"='rr' AND $timeFilter GROUP BY time($__interval) fill(null)", "refId": "D", "alias": "RR pwm", "resultFormat": "time_series" }
+      ]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 }, "id": 103, "title": "📐  IMU / Inertial", "type": "row" },
+
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
+      "fieldConfig": {
+        "defaults": { "custom": { "lineWidth": 2, "fillOpacity": 8 }, "unit": "accG", "color": { "mode": "palette-classic" } }
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 23 },
+      "id": 11,
+      "options": { "legend": { "calcs": ["last", "min", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "📐 Accelerometer X / Y / Z (g)",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"accel_x\") FROM \"rpicar_sensors\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "A", "alias": "accel_x", "resultFormat": "time_series" },
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"accel_y\") FROM \"rpicar_sensors\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "B", "alias": "accel_y", "resultFormat": "time_series" },
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"accel_z\") FROM \"rpicar_sensors\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "C", "alias": "accel_z", "resultFormat": "time_series" }
+      ]
+    },
+
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
+      "fieldConfig": {
+        "defaults": { "custom": { "lineWidth": 2, "fillOpacity": 8 }, "unit": "angularvelocityradps", "color": { "mode": "palette-classic" } },
+        "overrides": [{ "matcher": { "id": "byName", "options": "pid_correction" }, "properties": [{ "id": "unit", "value": "percent" }, { "id": "custom.axisPlacement", "value": "right" }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }] }]
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 23 },
+      "id": 12,
+      "options": { "legend": { "calcs": ["last", "min", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "🔄 Gyro Z (°/s) + PID Correction (%)",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"gyro_z\") FROM \"rpicar_sensors\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "A", "alias": "gyro_z", "resultFormat": "time_series" },
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"pid_correction\") FROM \"rpicar_sensors\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "B", "alias": "pid_correction", "resultFormat": "time_series" }
+      ]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 }, "id": 104, "title": "🗺️  Proximity & Autonomous", "type": "row" },
+
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
+      "fieldConfig": {
+        "defaults": { "custom": { "lineWidth": 2, "fillOpacity": 10 }, "unit": "lengthcm", "color": { "mode": "fixed", "fixedColor": "blue" } },
+        "overrides": [{ "matcher": { "id": "byName", "options": "laser_mm" }, "properties": [{ "id": "unit", "value": "lengthmm" }, { "id": "custom.axisPlacement", "value": "right" }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "purple" } }] }]
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 31 },
+      "id": 13,
+      "options": { "legend": { "calcs": ["last", "min", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "📡 Distance — Sonar (cm) & Laser (mm)",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"sonar_dist_cm\") FROM \"rpicar_sensors\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "A", "alias": "sonar_dist_cm", "resultFormat": "time_series" },
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"laser_mm\") FROM \"rpicar_sensors\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "B", "alias": "laser_mm", "resultFormat": "time_series" }
+      ]
+    },
+
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
+      "fieldConfig": {
+        "defaults": { "custom": { "lineWidth": 2, "fillOpacity": 8 }, "unit": "degree", "color": { "mode": "palette-classic" } },
+        "overrides": [{ "matcher": { "id": "byName", "options": "slalom_sign" }, "properties": [{ "id": "unit", "value": "none" }, { "id": "custom.axisPlacement", "value": "right" }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "light-blue" } }] }]
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 31 },
+      "id": 14,
+      "options": { "legend": { "calcs": ["last", "min", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "🗺️  Autonomous — Heading & Target Yaw",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"current_heading\") FROM \"rpicar_autonomy\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "A", "alias": "current_heading", "resultFormat": "time_series" },
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"target_yaw\") FROM \"rpicar_autonomy\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "B", "alias": "target_yaw", "resultFormat": "time_series" },
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"slalom_sign\") FROM \"rpicar_autonomy\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "C", "alias": "slalom_sign", "resultFormat": "time_series" }
+      ]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 38 }, "id": 105, "title": "👁️  Vision & System", "type": "row" },
+
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
+      "fieldConfig": {
+        "defaults": { "custom": { "lineWidth": 2, "fillOpacity": 8 }, "unit": "short", "color": { "mode": "palette-classic" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "vision_fps" }, "properties": [{ "id": "unit", "value": "fps" }, { "id": "custom.axisPlacement", "value": "right" }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
+          { "matcher": { "id": "byName", "options": "camera_fps_actual" }, "properties": [{ "id": "unit", "value": "fps" }, { "id": "custom.axisPlacement", "value": "right" }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "light-green" } }] }
+        ]
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 39 },
+      "id": 15,
+      "options": { "legend": { "calcs": ["last", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "👁️  Vision — Object Detections & FPS",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"detections_count\") FROM \"rpicar_vision\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "A", "alias": "detections_count", "resultFormat": "time_series" },
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"in_path_count\") FROM \"rpicar_vision\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "B", "alias": "in_path_count", "resultFormat": "time_series" },
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"vision_fps\") FROM \"rpicar_vision\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "C", "alias": "vision_fps", "resultFormat": "time_series" },
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"camera_fps_actual\") FROM \"rpicar_vision\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "D", "alias": "camera_fps_actual", "resultFormat": "time_series" }
+      ]
+    },
+
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
+      "fieldConfig": {
+        "defaults": { "custom": { "lineWidth": 2, "fillOpacity": 8 }, "unit": "megahz", "color": { "mode": "palette-classic" } },
+        "overrides": [{ "matcher": { "id": "byName", "options": "cpu_temp_c" }, "properties": [{ "id": "unit", "value": "celsius" }, { "id": "custom.axisPlacement", "value": "right" }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }]
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 39 },
+      "id": 16,
+      "options": { "legend": { "calcs": ["last", "mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "🖥️  System — CPU/GPU Clock (MHz) & Temp (°C)",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"cpu_clock_mhz\") FROM \"rpicar_system\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "A", "alias": "cpu_clock_mhz", "resultFormat": "time_series" },
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"gpu_clock_mhz\") FROM \"rpicar_system\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "B", "alias": "gpu_clock_mhz", "resultFormat": "time_series" },
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"cpu_temp_c\") FROM \"rpicar_system\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "C", "alias": "cpu_temp_c", "resultFormat": "time_series" }
+      ]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 46 }, "id": 106, "title": "🏁  RPM & Speed", "type": "row" },
+
+    {
+      "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" },
+      "fieldConfig": {
+        "defaults": { "custom": { "lineWidth": 2, "fillOpacity": 10 }, "unit": "rotrpm", "color": { "mode": "palette-classic" } },
+        "overrides": [{ "matcher": { "id": "byName", "options": "speed_mpm" }, "properties": [{ "id": "unit", "value": "velocityms" }, { "id": "custom.axisPlacement", "value": "right" }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "light-blue" } }] }]
+      },
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 47 },
+      "id": 17,
+      "options": { "legend": { "calcs": ["last", "mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "🏁 Encoder RPM (left axis) & Speed m/s (right axis)",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"rpm\") FROM \"rpicar_drive\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "A", "alias": "rpm", "resultFormat": "time_series" },
+        { "datasource": { "type": "influxdb", "uid": "influxdb-rpicar" }, "rawQuery": true, "query": "SELECT mean(\"speed_mpm\") FROM \"rpicar_drive\" WHERE $timeFilter GROUP BY time($__interval) fill(null)", "refId": "B", "alias": "speed_mpm", "resultFormat": "time_series" }
+      ]
+    }
+
+  ],
+
+  "refresh": "2s",
+  "schemaVersion": 38,
+  "tags": ["rpicar", "telemetry", "realtime", "influxql"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 2,
+        "includeAll": false,
+        "name": "DS_INFLUXDB",
+        "options": [],
+        "query": "influxdb",
+        "refresh": 1,
+        "type": "datasource",
+        "label": "InfluxDB datasource"
+      }
+    ]
+  },
+  "time": { "from": "now-5m", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "🚗 RPi Car — Real-Time Telemetry",
+  "uid": "rpicar-telemetry-v2",
+  "version": 2
+}

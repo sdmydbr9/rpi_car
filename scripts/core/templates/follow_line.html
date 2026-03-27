@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Line Follower</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#111827;color:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+     display:flex;justify-content:center;padding:12px}
+.wrap{max-width:720px;width:100%}
+h1{text-align:center;font-size:1.4rem;margin-bottom:10px;letter-spacing:.5px}
+.vid{position:relative;background:#000;border-radius:12px;overflow:hidden;width:100%}
+.vid img{width:100%;display:block}
+.vid canvas{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none}
+.bar{display:flex;align-items:center;justify-content:center;gap:8px;
+     margin:14px 0;padding:14px;border-radius:10px;font-weight:600;font-size:1.05rem;
+     transition:background .3s}
+.dot{width:12px;height:12px;border-radius:50%;flex-shrink:0}
+
+.s-search  {background:#292524}.s-search  .dot{background:#f59e0b;animation:pulse 1.2s infinite}
+.s-detect  {background:#14532d}.s-detect  .dot{background:#22c55e}
+.s-follow  {background:#1e3a5f}.s-follow  .dot{background:#3b82f6;animation:pulse .6s infinite}
+.s-lost    {background:#450a0a}.s-lost    .dot{background:#ef4444}
+.s-stopped {background:#1f2937}.s-stopped .dot{background:#6b7280}
+
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+
+.ctrls{display:flex;gap:12px;margin-top:14px}
+.btn{flex:1;padding:16px;border:none;border-radius:10px;font-size:1.15rem;
+     font-weight:700;cursor:pointer;transition:background .2s,transform .1s;
+     letter-spacing:.3px}
+.btn:active{transform:scale(.97)}
+.btn-go{background:#16a34a;color:#fff}
+.btn-go:disabled{background:#374151;color:#6b7280;cursor:not-allowed;transform:none}
+.btn-stop{background:#dc2626;color:#fff}
+.btn-stop:disabled{background:#374151;color:#6b7280;cursor:not-allowed;transform:none}
+.info{text-align:center;margin-top:12px;font-size:.8rem;color:#6b7280}
+.lock-badge{display:inline-block;margin-left:8px;padding:2px 7px;border-radius:6px;
+            font-size:.72rem;font-weight:700;letter-spacing:.4px;vertical-align:middle;
+            background:#0e4429;color:#4ade80;border:1px solid #4ade80}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>&#x1F6E4;&#xFE0F; Line Follower</h1>
+  <div class="vid">
+    <img id="feed" src="/stream" alt="camera">
+    <canvas id="overlay"></canvas>
+  </div>
+
+  <div id="bar" class="bar s-search">
+    <div class="dot"></div>
+    <span id="lbl">Searching for line&hellip;</span>
+    <span id="lockbadge" class="lock-badge" style="display:none">&#x1F512; LOCKED</span>
+  </div>
+
+  <div class="ctrls">
+    <button id="bgo" class="btn btn-go" disabled onclick="go()">&#9654; START</button>
+    <button id="bst" class="btn btn-stop" disabled onclick="st()">&#9632; STOP</button>
+  </div>
+  <p class="info">Camera pointed down &mdash; place a line (any colour) in view</p>
+  <div id="telem" style="margin-top:10px;text-align:center;font-size:.75rem;color:#9ca3af;font-family:monospace"></div>
+</div>
+
+<script>
+const bar       = document.getElementById("bar");
+const lbl       = document.getElementById("lbl");
+const bgo       = document.getElementById("bgo");
+const bst       = document.getElementById("bst");
+const lockbadge = document.getElementById("lockbadge");
+const feed      = document.getElementById("feed");
+const canvas    = document.getElementById("overlay");
+const ctx       = canvas.getContext("2d");
+
+const S = {
+  SEARCHING:     {c:"s-search",  t:"Searching for line\u2026",       go:0, st:0},
+  LINE_DETECTED: {c:"s-detect",  t:"\u2713 Line detected \u2014 Ready!", go:1, st:0},
+  FOLLOWING:     {c:"s-follow",  t:"\u27F6 Following line\u2026",   go:0, st:1},
+  LINE_LOST:     {c:"s-lost",    t:"\u2717 Line lost \u2014 Stopped", go:0, st:0},
+  STOPPED:       {c:"s-stopped", t:"Stopped",                        go:0, st:0},
+};
+
+let scaleX = 1;
+let scaleY = 1;
+let CAM_W = 1280;
+let CAM_H = 720;
+
+function syncCanvasSize() {
+  const rect = feed.getBoundingClientRect();
+  canvas.width = rect.width;
+  canvas.height = rect.height;
+  scaleX = rect.width / CAM_W;
+  scaleY = rect.height / CAM_H;
+}
+
+feed.addEventListener("load", syncCanvasSize);
+window.addEventListener("resize", syncCanvasSize);
+syncCanvasSize();
+
+function px(camX) { return camX * scaleX; }
+function py(camY) { return camY * scaleY; }
+
+function drawOverlay(d) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const trail = d.trail || [];
+  if (trail.length >= 2) {
+    for (let i = 1; i < trail.length; i++) {
+      const t = i / (trail.length - 1);
+      const alpha = (0.25 + 0.65 * t).toFixed(2);
+      ctx.beginPath();
+      ctx.moveTo(px(trail[i - 1][0]), py(trail[i - 1][1]));
+      ctx.lineTo(px(trail[i][0]), py(trail[i][1]));
+      ctx.strokeStyle = `rgba(0,220,220,${alpha})`;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    const last = trail[trail.length - 1];
+    ctx.beginPath();
+    ctx.arc(px(last[0]), py(last[1]), 5, 0, 2 * Math.PI);
+    ctx.fillStyle = "rgba(0,220,220,1)";
+    ctx.fill();
+  }
+
+  const spine = d.spine || [];
+  if (spine.length >= 2) {
+    ctx.beginPath();
+    ctx.moveTo(px(spine[0][0]), py(spine[0][1]));
+    for (let i = 1; i < spine.length; i++) {
+      ctx.lineTo(px(spine[i][0]), py(spine[i][1]));
+    }
+    ctx.strokeStyle = "rgba(0,255,80,0.85)";
+    ctx.lineWidth = 3;
+    ctx.lineJoin = "round";
+    ctx.stroke();
+
+    const tip = spine[spine.length - 1];
+    const prev = spine[spine.length - 2];
+    const ang = Math.atan2(py(tip[1]) - py(prev[1]), px(tip[0]) - px(prev[0]));
+    const hs = 10;
+    ctx.beginPath();
+    ctx.moveTo(px(tip[0]), py(tip[1]));
+    ctx.lineTo(px(tip[0]) - hs * Math.cos(ang - 0.4),
+               py(tip[1]) - hs * Math.sin(ang - 0.4));
+    ctx.lineTo(px(tip[0]) - hs * Math.cos(ang + 0.4),
+               py(tip[1]) - hs * Math.sin(ang + 0.4));
+    ctx.closePath();
+    ctx.fillStyle = "rgba(0,255,80,0.9)";
+    ctx.fill();
+
+    spine.forEach(([sx, sy]) => {
+      ctx.beginPath();
+      ctx.arc(px(sx), py(sy), 3, 0, 2 * Math.PI);
+      ctx.fillStyle = "rgba(0,255,80,0.7)";
+      ctx.fill();
+    });
+  }
+}
+
+function upd(d) {
+  const s = S[d.state] || S.SEARCHING;
+  bar.className = "bar " + s.c;
+  lbl.textContent = s.t;
+  bgo.disabled = !s.go;
+  bst.disabled = !s.st;
+  lockbadge.style.display = d.locked ? "inline-block" : "none";
+  drawOverlay(d);
+}
+
+function go() { fetch("/api/start", {method: "POST"}); }
+function st() { fetch("/api/stop", {method: "POST"}); }
+
+const telem = document.getElementById("telem");
+setInterval(() => {
+  fetch("/api/status").then((r) => r.json()).then((d) => {
+    if (d.frame_w && d.frame_h) {
+      CAM_W = d.frame_w;
+      CAM_H = d.frame_h;
+    }
+    upd(d);
+    telem.textContent =
+      `mode=${d.detection_mode || "full"}  ` +
+      `gyro=${(d.gyro_z || 0).toFixed(1)}\u00b0/s  ` +
+      `bias=${(d.gyro_bias || 0).toFixed(2)}  ` +
+      `RPM L=${(d.rpm_l || 0).toFixed(0)} R=${(d.rpm_r || 0).toFixed(0)}  ` +
+      `target L=${(d.target_rpm_l || 0).toFixed(0)} R=${(d.target_rpm_r || 0).toFixed(0)}  ` +
+      `steer=${(d.steer || 0).toFixed(1)}\u00b0  ` +
+      `pan=${(d.pan_angle || 0).toFixed(1)}\u00b0  ` +
+      `la=${(d.lookahead || 0).toFixed(0)}px  ` +
+      `recov=${d.recovery_phase || "idle"}  ` +
+      `trail=${(d.trail || []).length}pts  spine=${(d.spine || []).length}pts`;
+  }).catch(() => {});
+}, 200);
+</script>
+</body>
+</html>

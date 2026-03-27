@@ -1,0 +1,1696 @@
+<?xml version="1.0"?>
+<!--
+  URDF for the current Raspberry Pi rover build.
+
+  Chassis: Hiwonder Ackermann Metal Chassis
+           (anodized aluminium frame, 2WD rear encoder-geared motors,
+            LD-1501MG high-precision Ackermann front steering servo,
+            solid rubber tyres ×4)
+
+  Notes
+  - Updated to match the Hiwonder Ackermann metal chassis layout.
+  - The old rear HC-SR04 sonar has been removed from the model because the
+    live system now aliases "sonar" calls to the forward VL53L0X laser.
+  - Added explicit frames / visuals for the active hardware stack:
+      * Pi camera on pan/tilt gimbal
+      * VL53L0X forward ToF laser
+      * MPU6500 IMU
+      * QMC5883L magnetometer on the elevated left mast
+      * ADS1115 power monitor (battery + current telemetry)
+      * LM393 wheel encoders on RL / RR / FR wheels
+-->
+
+<robot name="rpi_rc_car">
+
+  <!-- ===== MATERIALS ===== -->
+  <material name="anodized_metal">
+    <color rgba="0.22 0.22 0.24 1.0"/>
+  </material>
+  <material name="metal_standoff">
+    <color rgba="0.70 0.70 0.72 1.0"/>
+  </material>
+  <material name="tire_rubber">
+    <color rgba="0.12 0.12 0.12 1.0"/>
+  </material>
+  <material name="wheel_hub_red">
+    <color rgba="0.72 0.12 0.12 1.0"/>
+  </material>
+  <material name="pcb_green">
+    <color rgba="0.15 0.45 0.16 1.0"/>
+  </material>
+  <material name="pcb_blue">
+    <color rgba="0.11 0.46 0.83 1.0"/>
+  </material>
+  <material name="pcb_black">
+    <color rgba="0.08 0.08 0.08 1.0"/>
+  </material>
+  <material name="sensor_red">
+    <color rgba="0.88 0.18 0.16 1.0"/>
+  </material>
+  <material name="sensor_cyan">
+    <color rgba="0.18 0.72 0.80 1.0"/>
+  </material>
+  <material name="heatsink_silver">
+    <color rgba="0.75 0.75 0.75 1.0"/>
+  </material>
+  <material name="metal_light">
+    <color rgba="0.86 0.86 0.88 1.0"/>
+  </material>
+  <material name="connector_white">
+    <color rgba="0.94 0.94 0.90 1.0"/>
+  </material>
+  <material name="header_black">
+    <color rgba="0.18 0.16 0.14 1.0"/>
+  </material>
+  <material name="fan_clear">
+    <color rgba="0.86 0.92 0.96 0.45"/>
+  </material>
+  <material name="rgb_ring">
+    <color rgba="0.18 0.72 0.95 0.65"/>
+  </material>
+  <material name="copper_pin">
+    <color rgba="0.72 0.47 0.24 1.0"/>
+  </material>
+  <material name="battery_green">
+    <color rgba="0.24 0.80 0.25 1.0"/>
+  </material>
+  <material name="bumper_red">
+    <color rgba="0.82 0.10 0.08 1.0"/>
+  </material>
+  <material name="bumper_black">
+    <color rgba="0.10 0.10 0.10 1.0"/>
+  </material>
+  <material name="metal_dark">
+    <color rgba="0.25 0.25 0.25 1.0"/>
+  </material>
+
+  <!-- ===== BASE FRAMES ===== -->
+  <link name="base_footprint">
+    <inertial>
+      <mass value="0.0001"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
+    </inertial>
+  </link>
+
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0.0375" rpy="0 0 0"/>
+  </joint>
+
+  <link name="base_link">
+    <inertial>
+      <mass value="3.5"/>
+      <origin xyz="0 0 0.045"/>
+      <inertia ixx="0.045" ixy="0" ixz="0" iyy="0.065" iyz="0" izz="0.090"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0.045" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.295 0.172 0.090"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ===== MAIN CHASSIS / ANODIZED METAL PLATES (Hiwonder Ackermann) ===== -->
+  <link name="lower_deck">
+    <inertial>
+      <mass value="0.28"/>
+      <origin xyz="0 0 0.0015"/>
+      <inertia ixx="0.0015" ixy="0" ixz="0" iyy="0.0030" iyz="0" izz="0.0040"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0.0015" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.295 0.148 0.003"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0 0.0015" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.295 0.148 0.003"/>
+      </geometry>
+      <material name="anodized_metal"/>
+    </visual>
+  </link>
+
+  <joint name="lower_deck_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="lower_deck"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <link name="upper_deck">
+    <inertial>
+      <mass value="0.16"/>
+      <origin xyz="0 0 0.0015"/>
+      <inertia ixx="0.0006" ixy="0" ixz="0" iyy="0.0012" iyz="0" izz="0.0016"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0.0015" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.245 0.130 0.003"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0 0.0015" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.245 0.130 0.003"/>
+      </geometry>
+      <material name="anodized_metal"/>
+    </visual>
+  </link>
+
+  <joint name="upper_deck_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="upper_deck"/>
+    <origin xyz="-0.010 0 0.043" rpy="0 0 0"/>
+  </joint>
+
+  <link name="deck_standoffs">
+    <inertial>
+      <mass value="0.08"/>
+      <origin xyz="0 0 0.020"/>
+      <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.095 0.050 0.020" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.003" length="0.040"/>
+      </geometry>
+      <material name="metal_standoff"/>
+    </visual>
+    <visual>
+      <origin xyz="0.095 -0.050 0.020" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.003" length="0.040"/>
+      </geometry>
+      <material name="metal_standoff"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.095 0.050 0.020" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.003" length="0.040"/>
+      </geometry>
+      <material name="metal_standoff"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.095 -0.050 0.020" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.003" length="0.040"/>
+      </geometry>
+      <material name="metal_standoff"/>
+    </visual>
+  </link>
+
+  <joint name="deck_standoffs_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="deck_standoffs"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <link name="front_bumper">
+    <inertial>
+      <mass value="0.06"/>
+      <origin xyz="0 0 0.006"/>
+      <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0002" iyz="0" izz="0.0002"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0.006" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.032 0.070 0.012"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0 0.006" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.032 0.070 0.012"/>
+      </geometry>
+      <material name="bumper_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0.004 0 0.011" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.020 0.090 0.006"/>
+      </geometry>
+      <material name="bumper_red"/>
+    </visual>
+  </link>
+
+  <joint name="front_bumper_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="front_bumper"/>
+    <origin xyz="0.160 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ===== WHEELS (75mm dia × 28mm wide, red multi-spoke hubs) ===== -->
+  <link name="wheel_front_left">
+    <inertial>
+      <mass value="0.25"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.0008" ixy="0" ixz="0" iyy="0.0008" iyz="0" izz="0.0014"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.0375" length="0.028"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.0375" length="0.028"/>
+      </geometry>
+      <material name="tire_rubber"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.026" length="0.029"/>
+      </geometry>
+      <material name="wheel_hub_red"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.008" length="0.030"/>
+      </geometry>
+      <material name="pcb_black"/>
+    </visual>
+  </link>
+
+  <!-- Ackermann steering: knuckle (revolute around Z) holds the wheel (continuous around Y) -->
+  <link name="steering_knuckle_left">
+    <inertial>
+      <mass value="0.02"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
+    </inertial>
+  </link>
+
+  <joint name="steering_knuckle_left_joint" type="revolute">
+    <parent link="base_link"/>
+    <child link="steering_knuckle_left"/>
+    <origin xyz="0.105 0.086 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.5236" upper="0.5236" effort="5.0" velocity="3.0"/>
+  </joint>
+
+  <joint name="wheel_front_left_joint" type="continuous">
+    <parent link="steering_knuckle_left"/>
+    <child link="wheel_front_left"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="5.0" velocity="20.0"/>
+  </joint>
+
+  <link name="wheel_front_right">
+    <inertial>
+      <mass value="0.25"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.0008" ixy="0" ixz="0" iyy="0.0008" iyz="0" izz="0.0014"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.0375" length="0.028"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.0375" length="0.028"/>
+      </geometry>
+      <material name="tire_rubber"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.026" length="0.029"/>
+      </geometry>
+      <material name="wheel_hub_red"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.008" length="0.030"/>
+      </geometry>
+      <material name="pcb_black"/>
+    </visual>
+  </link>
+
+  <link name="steering_knuckle_right">
+    <inertial>
+      <mass value="0.02"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
+    </inertial>
+  </link>
+
+  <joint name="steering_knuckle_right_joint" type="revolute">
+    <parent link="base_link"/>
+    <child link="steering_knuckle_right"/>
+    <origin xyz="0.105 -0.086 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.5236" upper="0.5236" effort="5.0" velocity="3.0"/>
+  </joint>
+
+  <joint name="wheel_front_right_joint" type="continuous">
+    <parent link="steering_knuckle_right"/>
+    <child link="wheel_front_right"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="5.0" velocity="20.0"/>
+  </joint>
+
+  <link name="wheel_rear_left">
+    <inertial>
+      <mass value="0.25"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.0008" ixy="0" ixz="0" iyy="0.0008" iyz="0" izz="0.0014"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.0375" length="0.028"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.0375" length="0.028"/>
+      </geometry>
+      <material name="tire_rubber"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.026" length="0.029"/>
+      </geometry>
+      <material name="wheel_hub_red"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.008" length="0.030"/>
+      </geometry>
+      <material name="pcb_black"/>
+    </visual>
+  </link>
+
+  <joint name="wheel_rear_left_joint" type="continuous">
+    <parent link="base_link"/>
+    <child link="wheel_rear_left"/>
+    <origin xyz="-0.105 0.086 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="5.0" velocity="20.0"/>
+  </joint>
+
+  <link name="wheel_rear_right">
+    <inertial>
+      <mass value="0.25"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.0008" ixy="0" ixz="0" iyy="0.0008" iyz="0" izz="0.0014"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.0375" length="0.028"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.0375" length="0.028"/>
+      </geometry>
+      <material name="tire_rubber"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.026" length="0.029"/>
+      </geometry>
+      <material name="wheel_hub_red"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.008" length="0.030"/>
+      </geometry>
+      <material name="pcb_black"/>
+    </visual>
+  </link>
+
+  <joint name="wheel_rear_right_joint" type="continuous">
+    <parent link="base_link"/>
+    <child link="wheel_rear_right"/>
+    <origin xyz="-0.105 -0.086 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="5.0" velocity="20.0"/>
+  </joint>
+
+  <gazebo reference="wheel_front_left">
+    <material>Gazebo/Black</material>
+    <mu1>0.8</mu1>
+    <mu2>0.8</mu2>
+  </gazebo>
+  <gazebo reference="wheel_front_right">
+    <material>Gazebo/Black</material>
+    <mu1>0.8</mu1>
+    <mu2>0.8</mu2>
+  </gazebo>
+  <gazebo reference="wheel_rear_left">
+    <material>Gazebo/Black</material>
+    <mu1>0.8</mu1>
+    <mu2>0.8</mu2>
+  </gazebo>
+  <gazebo reference="wheel_rear_right">
+    <material>Gazebo/Black</material>
+    <mu1>0.8</mu1>
+    <mu2>0.8</mu2>
+  </gazebo>
+
+  <!-- ===== STEERING SERVO (LD-1501MG, under front of chassis) ===== -->
+  <link name="steering_servo">
+    <inertial>
+      <mass value="0.06"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.00002" ixy="0" ixz="0" iyy="0.00002" iyz="0" izz="0.00002"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.040 0.020 0.036"/>
+      </geometry>
+      <material name="pcb_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.022" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.006" length="0.008"/>
+      </geometry>
+      <material name="metal_light"/>
+    </visual>
+  </link>
+
+  <joint name="steering_servo_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="steering_servo"/>
+    <origin xyz="0.080 0 -0.018" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ===== REAR DRIVE MOTOR + GEARBOX ===== -->
+  <link name="rear_motor_gearbox">
+    <inertial>
+      <mass value="0.15"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.00008" ixy="0" ixz="0" iyy="0.00015" iyz="0" izz="0.00015"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.018" length="0.070"/>
+      </geometry>
+      <material name="metal_light"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.022 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <box size="0.028 0.028 0.050"/>
+      </geometry>
+      <material name="metal_dark"/>
+    </visual>
+  </link>
+
+  <joint name="rear_motor_gearbox_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="rear_motor_gearbox"/>
+    <origin xyz="-0.105 0 -0.008" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ===== ELECTRONICS / VISUAL HARDWARE ===== -->
+  <link name="raspberry_pi">
+    <inertial>
+      <mass value="0.05"/>
+      <origin xyz="0 0 0.005"/>
+      <inertia ixx="0.00005" ixy="0" ixz="0" iyy="0.00005" iyz="0" izz="0.00008"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0.005" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.085 0.056 0.010"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0 0.0016" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.085 0.056 0.0032"/>
+      </geometry>
+      <material name="pcb_green"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.011 0.011 0.0048" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.015 0.015 0.0064"/>
+      </geometry>
+      <material name="pcb_black"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.004 0.004 0.0056" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.028 0.028 0.008"/>
+      </geometry>
+      <material name="heatsink_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.004 0.004 0.0114" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.030 0.030 0.0012"/>
+      </geometry>
+      <material name="heatsink_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.004 -0.0195 0.0052" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.052 0.005 0.0072"/>
+      </geometry>
+      <material name="header_black"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.004 -0.0195 0.0094" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.050 0.003 0.0016"/>
+      </geometry>
+      <material name="wheel_hub_yellow"/>
+    </visual>
+    <visual>
+      <origin xyz="0.032 0.014 0.0085" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.021 0.016 0.014"/>
+      </geometry>
+      <material name="metal_light"/>
+    </visual>
+    <visual>
+      <origin xyz="0.033 -0.002 0.0068" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.020 0.015 0.010"/>
+      </geometry>
+      <material name="metal_light"/>
+    </visual>
+    <visual>
+      <origin xyz="0.033 -0.017 0.0068" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.020 0.015 0.010"/>
+      </geometry>
+      <material name="metal_light"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.033 0.015 0.0048" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.010 0.012 0.006"/>
+      </geometry>
+      <material name="metal_light"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.033 0.002 0.0042" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.008 0.010 0.0048"/>
+      </geometry>
+      <material name="metal_light"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.033 -0.008 0.0042" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.008 0.010 0.0048"/>
+      </geometry>
+      <material name="metal_light"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.033 -0.020 0.0046" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.0035" length="0.006"/>
+      </geometry>
+      <material name="pcb_black"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.020 0.021 0.0042" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.022 0.004 0.004"/>
+      </geometry>
+      <material name="connector_white"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.020 -0.021 0.0042" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.018 0.004 0.004"/>
+      </geometry>
+      <material name="connector_white"/>
+    </visual>
+  </link>
+
+  <joint name="raspberry_pi_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="raspberry_pi"/>
+    <origin xyz="0.050 0 0.047" rpy="0 0 1.5708"/>
+  </joint>
+
+  <link name="heatsink">
+    <inertial>
+      <mass value="0.18"/>
+      <origin xyz="0 0 0.025"/>
+      <inertia ixx="0.0005" ixy="0" ixz="0" iyy="0.0005" iyz="0" izz="0.0005"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0.030" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.038 0.038 0.060"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.004 0 0.030" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.022 0.032 0.052"/>
+      </geometry>
+      <material name="heatsink_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.015 0 0.030" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.0025 0.030 0.052"/>
+      </geometry>
+      <material name="heatsink_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.0115 0 0.030" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.0025 0.030 0.052"/>
+      </geometry>
+      <material name="heatsink_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.008 0 0.030" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.0025 0.030 0.052"/>
+      </geometry>
+      <material name="heatsink_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.0045 0 0.030" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.0025 0.030 0.052"/>
+      </geometry>
+      <material name="heatsink_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.001 0 0.030" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.0025 0.030 0.052"/>
+      </geometry>
+      <material name="heatsink_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0.0025 0 0.030" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.0025 0.030 0.052"/>
+      </geometry>
+      <material name="heatsink_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0.006 0 0.030" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.0025 0.030 0.052"/>
+      </geometry>
+      <material name="heatsink_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0.0095 0 0.030" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.0025 0.030 0.052"/>
+      </geometry>
+      <material name="heatsink_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0.013 0 0.030" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.0025 0.030 0.052"/>
+      </geometry>
+      <material name="heatsink_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.001 0 0.058" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.032 0.032 0.004"/>
+      </geometry>
+      <material name="heatsink_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.010 0.011 0.063" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.0018" length="0.010"/>
+      </geometry>
+      <material name="copper_pin"/>
+    </visual>
+    <visual>
+      <origin xyz="0.008 0.011 0.063" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.0018" length="0.010"/>
+      </geometry>
+      <material name="copper_pin"/>
+    </visual>
+    <visual>
+      <origin xyz="0.016 0 0.031" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.026 0.030 0.026"/>
+      </geometry>
+      <material name="fan_clear"/>
+    </visual>
+    <visual>
+      <origin xyz="0.029 0 0.031" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder radius="0.0105" length="0.004"/>
+      </geometry>
+      <material name="rgb_ring"/>
+    </visual>
+    <visual>
+      <origin xyz="0.0315 0 0.031" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder radius="0.0048" length="0.007"/>
+      </geometry>
+      <material name="pcb_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0.0285 0.0065 0.0375" rpy="0.7854 1.5708 0"/>
+      <geometry>
+        <box size="0.0015 0.013 0.004"/>
+      </geometry>
+      <material name="fan_clear"/>
+    </visual>
+    <visual>
+      <origin xyz="0.0285 -0.0065 0.0375" rpy="-0.7854 1.5708 0"/>
+      <geometry>
+        <box size="0.0015 0.013 0.004"/>
+      </geometry>
+      <material name="fan_clear"/>
+    </visual>
+    <visual>
+      <origin xyz="0.0285 0.0065 0.0245" rpy="-0.7854 1.5708 0"/>
+      <geometry>
+        <box size="0.0015 0.013 0.004"/>
+      </geometry>
+      <material name="fan_clear"/>
+    </visual>
+    <visual>
+      <origin xyz="0.0285 -0.0065 0.0245" rpy="0.7854 1.5708 0"/>
+      <geometry>
+        <box size="0.0015 0.013 0.004"/>
+      </geometry>
+      <material name="fan_clear"/>
+    </visual>
+    <visual>
+      <origin xyz="0.013 -0.016 0.010" rpy="0 0.25 0"/>
+      <geometry>
+        <box size="0.016 0.0015 0.0015"/>
+      </geometry>
+      <material name="sensor_red"/>
+    </visual>
+    <visual>
+      <origin xyz="0.014 -0.016 0.0115" rpy="0 0.25 0"/>
+      <geometry>
+        <box size="0.016 0.0015 0.0015"/>
+      </geometry>
+      <material name="wheel_hub_yellow"/>
+    </visual>
+    <visual>
+      <origin xyz="0.015 -0.016 0.013" rpy="0 0.25 0"/>
+      <geometry>
+        <box size="0.016 0.0015 0.0015"/>
+      </geometry>
+      <material name="sensor_cyan"/>
+    </visual>
+  </link>
+
+  <joint name="heatsink_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="heatsink"/>
+    <origin xyz="0.050 0 0.050" rpy="0 0 1.5708"/>
+  </joint>
+
+  <link name="pico_w">
+    <inertial>
+      <mass value="0.02"/>
+      <origin xyz="0 0 0.004"/>
+      <inertia ixx="0.00002" ixy="0" ixz="0" iyy="0.00002" iyz="0" izz="0.00002"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0.0016" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.051 0.021 0.0032"/>
+      </geometry>
+      <material name="pcb_green"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.0205 0 0.0052" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.009 0.008 0.0068"/>
+      </geometry>
+      <material name="metal_light"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.009 0 0.0048" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.007 0.007 0.0058"/>
+      </geometry>
+      <material name="pcb_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0.0115 0 0.0048" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.016 0.010 0.0056"/>
+      </geometry>
+      <material name="metal_light"/>
+    </visual>
+    <visual>
+      <origin xyz="0.020 0 0.0084" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.014 0.009 0.0012"/>
+      </geometry>
+      <material name="metal_light"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.001 0.0094 0.0032" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.038 0.0018 0.0024"/>
+      </geometry>
+      <material name="wheel_hub_yellow"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.001 -0.0094 0.0032" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.038 0.0018 0.0024"/>
+      </geometry>
+      <material name="wheel_hub_yellow"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.017 0 0.0040" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.004 0.004 0.002"/>
+      </geometry>
+      <material name="connector_white"/>
+    </visual>
+    <visual>
+      <origin xyz="0.0215 0.0065 0.0028" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.0015" length="0.002"/>
+      </geometry>
+      <material name="metal_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0.0215 -0.0065 0.0028" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.0015" length="0.002"/>
+      </geometry>
+      <material name="metal_dark"/>
+    </visual>
+  </link>
+
+  <joint name="pico_w_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="pico_w"/>
+    <origin xyz="0.044 0.028 0.016" rpy="0 0 0"/>
+  </joint>
+
+  <link name="breadboard">
+    <inertial>
+      <mass value="0.035"/>
+      <origin xyz="0 0 0.005"/>
+      <inertia ixx="0.00002" ixy="0" ixz="0" iyy="0.00004" iyz="0" izz="0.00004"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0.005" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.082 0.054 0.010"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0 0.005" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.082 0.054 0.010"/>
+      </geometry>
+      <material name="metal_standoff"/>
+    </visual>
+  </link>
+
+  <joint name="breadboard_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="breadboard"/>
+    <origin xyz="0.020 -0.010 0.014" rpy="0 0 0"/>
+  </joint>
+
+  <link name="voltage_sensor">
+    <inertial>
+      <mass value="0.010"/>
+      <origin xyz="0 0 0.004"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0.004" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.030 0.022 0.008"/>
+      </geometry>
+      <material name="pcb_blue"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.009 0 0.011" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.006 0.020 0.006"/>
+      </geometry>
+      <material name="sensor_red"/>
+    </visual>
+  </link>
+
+  <joint name="voltage_sensor_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="voltage_sensor"/>
+    <origin xyz="0.067 0.060 0.010" rpy="0 0 0"/>
+  </joint>
+
+  <link name="amplifier_board">
+    <inertial>
+      <mass value="0.015"/>
+      <origin xyz="0 0 0.004"/>
+      <inertia ixx="0.000002" ixy="0" ixz="0" iyy="0.000002" iyz="0" izz="0.000002"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0.004" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.035 0.024 0.008"/>
+      </geometry>
+      <material name="pcb_green"/>
+    </visual>
+    <visual>
+      <origin xyz="0.008 0 0.011" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.010 0.016 0.006"/>
+      </geometry>
+      <material name="heatsink_silver"/>
+    </visual>
+  </link>
+
+  <joint name="amplifier_board_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="amplifier_board"/>
+    <origin xyz="-0.028 -0.050 0.011" rpy="0 0 0"/>
+  </joint>
+
+  <link name="laptop_speaker">
+    <inertial>
+      <mass value="0.045"/>
+      <origin xyz="0 0 0.010"/>
+      <inertia ixx="0.00003" ixy="0" ixz="0" iyy="0.00006" iyz="0" izz="0.00006"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0.010" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.062 0.026 0.020"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0 0.010" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.062 0.026 0.020"/>
+      </geometry>
+      <material name="pcb_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.010" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder radius="0.009" length="0.010"/>
+      </geometry>
+      <material name="metal_dark"/>
+    </visual>
+  </link>
+
+  <joint name="laptop_speaker_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="laptop_speaker"/>
+    <origin xyz="-0.060 -0.050 0.010" rpy="0 0 0"/>
+  </joint>
+
+  <link name="power_bank">
+    <inertial>
+      <mass value="0.28"/>
+      <origin xyz="0 0 0.012"/>
+      <inertia ixx="0.0009" ixy="0" ixz="0" iyy="0.0014" iyz="0" izz="0.0016"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0.012" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.128 0.072 0.024"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0 0.012" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.128 0.072 0.024"/>
+      </geometry>
+      <material name="pcb_black"/>
+    </visual>
+  </link>
+
+  <joint name="power_bank_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="power_bank"/>
+    <origin xyz="-0.060 0 0.047" rpy="0 0 0"/>
+  </joint>
+
+  <link name="battery_pack">
+    <inertial>
+      <mass value="0.18"/>
+      <origin xyz="0 0 0.011"/>
+      <inertia ixx="0.0003" ixy="0" ixz="0" iyy="0.0005" iyz="0" izz="0.0005"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0.011" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.074 0.056 0.022"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 -0.018 0.011" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder radius="0.009" length="0.067"/>
+      </geometry>
+      <material name="battery_green"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.011" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder radius="0.009" length="0.067"/>
+      </geometry>
+      <material name="battery_green"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0.018 0.011" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder radius="0.009" length="0.067"/>
+      </geometry>
+      <material name="battery_green"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.0018" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.074 0.056 0.0036"/>
+      </geometry>
+      <material name="bumper_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.027 0.010" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.074 0.004 0.020"/>
+      </geometry>
+      <material name="bumper_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0.027 0.010" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.074 0.004 0.020"/>
+      </geometry>
+      <material name="bumper_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0.035 0 0.010" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.004 0.050 0.020"/>
+      </geometry>
+      <material name="bumper_black"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.035 0 0.010" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.004 0.050 0.020"/>
+      </geometry>
+      <material name="bumper_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.021" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.074 0.006 0.003"/>
+      </geometry>
+      <material name="bumper_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0.024 0 0.021" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.006 0.050 0.003"/>
+      </geometry>
+      <material name="bumper_black"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.024 0 0.021" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.006 0.050 0.003"/>
+      </geometry>
+      <material name="bumper_black"/>
+    </visual>
+  </link>
+
+  <joint name="battery_pack_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="battery_pack"/>
+    <origin xyz="-0.060 0 0.062" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ===== SENSOR MAST / LEFT-SIDE MAGNETOMETER ===== -->
+  <link name="magnetometer_mast">
+    <inertial>
+      <mass value="0.03"/>
+      <origin xyz="0 0 0.056"/>
+      <inertia ixx="0.00005" ixy="0" ixz="0" iyy="0.00005" iyz="0" izz="0.00005"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.018 0.008 0.056" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.0025" length="0.112"/>
+      </geometry>
+      <material name="metal_standoff"/>
+    </visual>
+    <visual>
+      <origin xyz="0.018 -0.008 0.056" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.0025" length="0.112"/>
+      </geometry>
+      <material name="metal_standoff"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.018 0.008 0.056" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.0025" length="0.112"/>
+      </geometry>
+      <material name="metal_standoff"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.018 -0.008 0.056" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.0025" length="0.112"/>
+      </geometry>
+      <material name="metal_standoff"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.112" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.046 0.024 0.004"/>
+      </geometry>
+      <material name="anodized_metal"/>
+    </visual>
+  </link>
+
+  <joint name="magnetometer_mast_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="magnetometer_mast"/>
+    <origin xyz="-0.018 0.055 0.002" rpy="0 0 0"/>
+  </joint>
+
+  <link name="magnetometer">
+    <inertial>
+      <mass value="0.004"/>
+      <origin xyz="0 0 0.002"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0.002" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.028 0.018 0.004"/>
+      </geometry>
+      <material name="sensor_cyan"/>
+    </visual>
+  </link>
+
+  <joint name="magnetometer_joint" type="fixed">
+    <parent link="magnetometer_mast"/>
+    <child link="magnetometer"/>
+    <origin xyz="0 0 0.112" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ===== CAMERA / LASER GIMBAL (FRONT) ===== -->
+  <link name="camera_gimbal_base">
+    <inertial>
+      <mass value="0.04"/>
+      <origin xyz="0 0 0.010"/>
+      <inertia ixx="0.00005" ixy="0" ixz="0" iyy="0.00005" iyz="0" izz="0.00005"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0.010" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.042 0.040 0.020"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0 0.010" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.042 0.040 0.020"/>
+      </geometry>
+      <material name="pcb_black"/>
+    </visual>
+  </link>
+
+  <joint name="camera_gimbal_base_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="camera_gimbal_base"/>
+    <origin xyz="0.072 -0.022 0.048" rpy="0 0 0"/>
+  </joint>
+
+  <link name="camera_pan_link">
+    <inertial>
+      <mass value="0.03"/>
+      <origin xyz="0 0 0.010"/>
+      <inertia ixx="0.00003" ixy="0" ixz="0" iyy="0.00003" iyz="0" izz="0.00003"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0.010" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.030 0.030 0.020"/>
+      </geometry>
+      <material name="metal_dark"/>
+    </visual>
+  </link>
+
+  <joint name="camera_pan_joint" type="revolute">
+    <parent link="camera_gimbal_base"/>
+    <child link="camera_pan_link"/>
+    <origin xyz="0 0 0.020" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.5236" upper="0.5236" effort="1.0" velocity="5.0"/>
+  </joint>
+
+  <link name="camera_tilt_link">
+    <inertial>
+      <mass value="0.05"/>
+      <origin xyz="0.010 0 0.018"/>
+      <inertia ixx="0.00005" ixy="0" ixz="0" iyy="0.00007" iyz="0" izz="0.00007"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0.016 0.018" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.010 0.008 0.036"/>
+      </geometry>
+      <material name="metal_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.016 0.018" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.010 0.008 0.036"/>
+      </geometry>
+      <material name="metal_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0.014 0 0.032" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.030 0.040 0.008"/>
+      </geometry>
+      <material name="metal_dark"/>
+    </visual>
+  </link>
+
+  <joint name="camera_tilt_joint" type="revolute">
+    <parent link="camera_pan_link"/>
+    <child link="camera_tilt_link"/>
+    <origin xyz="0 0 0.018" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.5236" upper="0.5236" effort="1.0" velocity="5.0"/>
+  </joint>
+
+  <link name="camera">
+    <inertial>
+      <mass value="0.03"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.026 0.024 0.018"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.026 0.024 0.018"/>
+      </geometry>
+      <material name="pcb_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0.014 0 0" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder radius="0.006" length="0.010"/>
+      </geometry>
+      <material name="heatsink_silver"/>
+    </visual>
+  </link>
+
+  <joint name="camera_joint" type="fixed">
+    <parent link="camera_tilt_link"/>
+    <child link="camera"/>
+    <origin xyz="0.030 0 0.015" rpy="0 0 0"/>
+  </joint>
+
+  <link name="camera_optical_frame">
+    <inertial>
+      <mass value="0.0001"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
+    </inertial>
+  </link>
+
+  <joint name="camera_optical_joint" type="fixed">
+    <parent link="camera"/>
+    <child link="camera_optical_frame"/>
+    <origin xyz="0 0 0" rpy="-1.5708 0 -1.5708"/>
+  </joint>
+
+  <gazebo reference="camera">
+    <material>Gazebo/Black</material>
+    <sensor name="camera_sensor" type="camera">
+      <camera>
+        <horizontal_fov>1.047</horizontal_fov>
+        <image>
+          <width>640</width>
+          <height>480</height>
+          <format>R8G8B8</format>
+        </image>
+        <clip>
+          <near>0.05</near>
+          <far>100.0</far>
+        </clip>
+      </camera>
+      <always_on>1</always_on>
+      <update_rate>30</update_rate>
+      <visualize>1</visualize>
+      <plugin name="camera_plugin" filename="libgazebo_ros_camera.so">
+        <ros>
+          <remapping>~/image_raw:=camera/image_raw</remapping>
+          <remapping>~/camera_info:=camera/camera_info</remapping>
+        </ros>
+        <camera_name>camera</camera_name>
+        <frame_name>camera_optical_frame</frame_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+  <link name="laser_scanner">
+    <inertial>
+      <mass value="0.006"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.014 0.012 0.008"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.014 0.012 0.008"/>
+      </geometry>
+      <material name="sensor_red"/>
+    </visual>
+    <visual>
+      <origin xyz="0.008 0 0" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder radius="0.003" length="0.004"/>
+      </geometry>
+      <material name="heatsink_silver"/>
+    </visual>
+  </link>
+
+  <joint name="laser_scanner_joint" type="fixed">
+    <parent link="camera_tilt_link"/>
+    <child link="laser_scanner"/>
+    <origin xyz="0.024 -0.017 0.008" rpy="0 0 0"/>
+  </joint>
+
+  <gazebo reference="laser_scanner">
+    <material>Gazebo/Red</material>
+    <sensor name="laser_scanner_sensor" type="ray">
+      <always_on>true</always_on>
+      <visualize>false</visualize>
+      <update_rate>15</update_rate>
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>1</samples>
+            <resolution>1</resolution>
+            <min_angle>0</min_angle>
+            <max_angle>0</max_angle>
+          </horizontal>
+          <vertical>
+            <samples>1</samples>
+            <resolution>1</resolution>
+            <min_angle>0</min_angle>
+            <max_angle>0</max_angle>
+          </vertical>
+        </scan>
+        <range>
+          <min>0.03</min>
+          <max>2.0</max>
+          <resolution>0.01</resolution>
+        </range>
+        <noise>
+          <type>gaussian</type>
+          <mean>0.0</mean>
+          <stddev>0.005</stddev>
+        </noise>
+      </ray>
+      <plugin name="laser_scanner_plugin" filename="libgazebo_ros_ray_sensor.so">
+        <ros>
+          <remapping>~/out:=scan</remapping>
+        </ros>
+        <output_type>sensor_msgs/Range</output_type>
+        <frame_name>laser_scanner</frame_name>
+        <radiation_type>infrared</radiation_type>
+        <fov>0.0349</fov>
+        <min_range>0.03</min_range>
+        <max_range>2.0</max_range>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+  <!-- ===== ACTIVE SENSOR BOARDS ===== -->
+  <link name="imu">
+    <inertial>
+      <mass value="0.008"/>
+      <origin xyz="0 0 0.004"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0.004" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.018 0.018 0.008"/>
+      </geometry>
+      <material name="pcb_blue"/>
+    </visual>
+  </link>
+
+  <joint name="imu_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="imu"/>
+    <origin xyz="0.008 0 0.067" rpy="0 0 0"/>
+  </joint>
+
+  <gazebo reference="imu">
+    <material>Gazebo/Blue</material>
+    <sensor name="imu_sensor" type="imu">
+      <plugin filename="libgazebo_ros_imu_sensor.so" name="imu_plugin">
+        <ros>
+          <remapping>~/out:=imu/data</remapping>
+        </ros>
+        <initial_orientation_as_reference>0</initial_orientation_as_reference>
+      </plugin>
+      <always_on>1</always_on>
+      <update_rate>50</update_rate>
+      <visualize>0</visualize>
+      <imu>
+        <angular_velocity>
+          <x><noise type="gaussian"><mean>0.0</mean><stddev>0.009</stddev></noise></x>
+          <y><noise type="gaussian"><mean>0.0</mean><stddev>0.009</stddev></noise></y>
+          <z><noise type="gaussian"><mean>0.0</mean><stddev>0.009</stddev></noise></z>
+        </angular_velocity>
+        <linear_acceleration>
+          <x><noise type="gaussian"><mean>0.0</mean><stddev>0.021</stddev></noise></x>
+          <y><noise type="gaussian"><mean>0.0</mean><stddev>0.021</stddev></noise></y>
+          <z><noise type="gaussian"><mean>0.0</mean><stddev>0.021</stddev></noise></z>
+        </linear_acceleration>
+      </imu>
+    </sensor>
+  </gazebo>
+
+  <link name="ads1115_power_monitor">
+    <inertial>
+      <mass value="0.010"/>
+      <origin xyz="0 0 0.004"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0.004" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.028 0.018 0.008"/>
+      </geometry>
+      <material name="pcb_blue"/>
+    </visual>
+  </link>
+
+  <joint name="ads1115_power_monitor_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="ads1115_power_monitor"/>
+    <origin xyz="0.060 0.040 0.012" rpy="0 0 0"/>
+  </joint>
+
+  <link name="battery_voltage_sensor">
+    <inertial>
+      <mass value="0.0001"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
+    </inertial>
+  </link>
+
+  <joint name="battery_voltage_sensor_joint" type="fixed">
+    <parent link="ads1115_power_monitor"/>
+    <child link="battery_voltage_sensor"/>
+    <origin xyz="0.006 0 0.004" rpy="0 0 0"/>
+  </joint>
+
+  <link name="current_sensor">
+    <inertial>
+      <mass value="0.0001"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
+    </inertial>
+  </link>
+
+  <joint name="current_sensor_joint" type="fixed">
+    <parent link="ads1115_power_monitor"/>
+    <child link="current_sensor"/>
+    <origin xyz="-0.006 0 0.004" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Three encoder modules are present in the live system. Front-left is intentionally absent. -->
+  <link name="encoder_rear_left">
+    <inertial>
+      <mass value="0.005"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.018 0.012 0.010"/>
+      </geometry>
+      <material name="sensor_red"/>
+    </visual>
+  </link>
+
+  <joint name="encoder_rear_left_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="encoder_rear_left"/>
+    <origin xyz="-0.098 0.058 0.002" rpy="0 0 0"/>
+  </joint>
+
+  <link name="encoder_rear_right">
+    <inertial>
+      <mass value="0.005"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.018 0.012 0.010"/>
+      </geometry>
+      <material name="sensor_red"/>
+    </visual>
+  </link>
+
+  <joint name="encoder_rear_right_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="encoder_rear_right"/>
+    <origin xyz="-0.098 -0.058 0.002" rpy="0 0 0"/>
+  </joint>
+
+  <link name="encoder_front_right">
+    <inertial>
+      <mass value="0.005"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.018 0.012 0.010"/>
+      </geometry>
+      <material name="sensor_red"/>
+    </visual>
+  </link>
+
+  <joint name="encoder_front_right_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="encoder_front_right"/>
+    <origin xyz="0.098 -0.058 0.002" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ===== TRANSMISSIONS (rear drive only — front wheels are passive) ===== -->
+  <transmission name="wheel_rear_left_transmission">
+    <type>transmission_interface/SimpleTransmission</type>
+    <joint name="wheel_rear_left_joint">
+      <hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>
+    </joint>
+    <actuator name="motor_rear_left">
+      <hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>
+      <mechanicalReduction>30.0</mechanicalReduction>
+    </actuator>
+  </transmission>
+
+  <transmission name="wheel_rear_right_transmission">
+    <type>transmission_interface/SimpleTransmission</type>
+    <joint name="wheel_rear_right_joint">
+      <hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>
+    </joint>
+    <actuator name="motor_rear_right">
+      <hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>
+      <mechanicalReduction>30.0</mechanicalReduction>
+    </actuator>
+  </transmission>
+
+  <!-- ===== GAZEBO ACKERMANN DRIVE PLUGIN =====
+       Matches physical hardware: LD-1501MG steering servo,
+       2WD rear encoder-geared motors, wheelbase 0.210m, track 0.172m. -->
+  <gazebo>
+    <plugin filename="libgazebo_ros_ackermann_drive.so" name="ackermann_drive_controller">
+      <ros>
+        <namespace></namespace>
+        <remapping>cmd_vel:=cmd_vel</remapping>
+        <remapping>odom:=odom</remapping>
+      </ros>
+      <update_rate>100</update_rate>
+      <left_steering_joint>steering_knuckle_left_joint</left_steering_joint>
+      <right_steering_joint>steering_knuckle_right_joint</right_steering_joint>
+      <left_rear_joint>wheel_rear_left_joint</left_rear_joint>
+      <right_rear_joint>wheel_rear_right_joint</right_rear_joint>
+      <left_front_joint>wheel_front_left_joint</left_front_joint>
+      <right_front_joint>wheel_front_right_joint</right_front_joint>
+      <steering_limit>0.5236</steering_limit>
+      <wheel_separation>0.172</wheel_separation>
+      <wheelbase>0.210</wheelbase>
+      <wheel_diameter>0.075</wheel_diameter>
+      <max_wheel_torque>20</max_wheel_torque>
+      <max_wheel_acceleration>10.0</max_wheel_acceleration>
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>base_footprint</robot_base_frame>
+      <odometry_source>world</odometry_source>
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>true</publish_odom_tf>
+    </plugin>
+  </gazebo>
+
+</robot>
