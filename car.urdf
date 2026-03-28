@@ -2,22 +2,21 @@
 <!--
   URDF for the current Raspberry Pi rover build.
 
-  Chassis: Hiwonder Ackermann Metal Chassis
+  Chassis: Hiwonder Ackermann Metal Chassis (2WD Rear Drive)
            (anodized aluminium frame, 2WD rear encoder-geared motors,
             LD-1501MG high-precision Ackermann front steering servo,
-            solid rubber tyres ×4)
+            solid rubber tyres ×4, 75mm diameter, red hubs)
 
-  Notes
-  - Updated to match the Hiwonder Ackermann metal chassis layout.
-  - The old rear HC-SR04 sonar has been removed from the model because the
-    live system now aliases "sonar" calls to the forward VL53L0X laser.
-  - Added explicit frames / visuals for the active hardware stack:
-      * Pi camera on pan/tilt gimbal
-      * VL53L0X forward ToF laser
-      * MPU6500 IMU
-      * QMC5883L magnetometer on the elevated left mast
-      * ADS1115 power monitor (battery + current telemetry)
-      * LM393 wheel encoders on RL / RR / FR wheels
+  Architecture:
+  - Wheelbase: 0.210m
+  - Track width: 0.172m
+  - Front wheels: passive (steerable via Ackermann mechanism)
+  - Rear wheels: active drive motors with encoders
+  - Steering servo: LD-1501MG (mounted under front, controls knuckles)
+  - Laser (VL53L0X): mounted on steering servo at front
+  - Camera: pan/tilt gimbal on upper deck (RGB + optical frame)
+  - Sensors: IMU, magnetometer (left mast), wheel encoders (RL/RR/FR)
+  - Electronics: RPi 4, Pico-W UART bridge, power monitor (ADS1115)
 -->
 
 <robot name="rpi_rc_car">
@@ -471,7 +470,7 @@
     <mu2>0.8</mu2>
   </gazebo>
 
-  <!-- ===== STEERING SERVO (LD-1501MG, under front of chassis) ===== -->
+  <!-- ===== STEERING SERVO (LD-1501MG, mounted ON lower chassis) ===== -->
   <link name="steering_servo">
     <inertial>
       <mass value="0.06"/>
@@ -488,7 +487,7 @@
     <visual>
       <origin xyz="0 0 0.022" rpy="0 0 0"/>
       <geometry>
-        <cylinder radius="0.006" length="0.008"/>
+        <cylinder radius="0.006" length="0.010"/>
       </geometry>
       <material name="metal_light"/>
     </visual>
@@ -497,7 +496,75 @@
   <joint name="steering_servo_joint" type="fixed">
     <parent link="base_link"/>
     <child link="steering_servo"/>
-    <origin xyz="0.080 0 -0.018" rpy="0 0 0"/>
+    <origin xyz="0.105 0 0.0015" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ===== STEERING SERVO ARM (connects to tie rods) ===== -->
+  <link name="servo_arm">
+    <inertial>
+      <mass value="0.01"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.008 0.040 0.008"/>
+      </geometry>
+      <material name="metal_light"/>
+    </visual>
+  </link>
+
+  <joint name="servo_arm_joint" type="revolute">
+    <parent link="steering_servo"/>
+    <child link="servo_arm"/>
+    <origin xyz="0 0 0.028" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.5236" upper="0.5236" effort="2.0" velocity="3.0"/>
+  </joint>
+
+  <!-- ===== LEFT TIE ROD ===== -->
+  <link name="tie_rod_left">
+    <inertial>
+      <mass value="0.008"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000002" iyz="0" izz="0.000001"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder radius="0.003" length="0.070"/>
+      </geometry>
+      <material name="metal_light"/>
+    </visual>
+  </link>
+
+  <joint name="tie_rod_left_joint" type="fixed">
+    <parent link="servo_arm"/>
+    <child link="tie_rod_left"/>
+    <origin xyz="0 0.020 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ===== RIGHT TIE ROD ===== -->
+  <link name="tie_rod_right">
+    <inertial>
+      <mass value="0.008"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000002" iyz="0" izz="0.000001"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder radius="0.003" length="0.070"/>
+      </geometry>
+      <material name="metal_light"/>
+    </visual>
+  </link>
+
+  <joint name="tie_rod_right_joint" type="fixed">
+    <parent link="servo_arm"/>
+    <child link="tie_rod_right"/>
+    <origin xyz="0 -0.020 0" rpy="0 0 0"/>
   </joint>
 
   <!-- ===== REAR DRIVE MOTOR + GEARBOX ===== -->
@@ -1257,7 +1324,7 @@
   <joint name="camera_gimbal_base_joint" type="fixed">
     <parent link="base_link"/>
     <child link="camera_gimbal_base"/>
-    <origin xyz="0.072 -0.022 0.048" rpy="0 0 0"/>
+    <origin xyz="0.105 0.000 0.050" rpy="0 0 0"/>
   </joint>
 
   <link name="camera_pan_link">
@@ -1426,9 +1493,9 @@
   </link>
 
   <joint name="laser_scanner_joint" type="fixed">
-    <parent link="camera_tilt_link"/>
+    <parent link="steering_servo"/>
     <child link="laser_scanner"/>
-    <origin xyz="0.024 -0.017 0.008" rpy="0 0 0"/>
+    <origin xyz="0.010 0 0.032" rpy="0 0 0"/>
   </joint>
 
   <gazebo reference="laser_scanner">
@@ -1659,6 +1726,18 @@
     <actuator name="motor_rear_right">
       <hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>
       <mechanicalReduction>30.0</mechanicalReduction>
+    </actuator>
+  </transmission>
+
+  <!-- ===== STEERING TRANSMISSIONS (servo to steering knuckles) ===== -->
+  <transmission name="steering_servo_transmission">
+    <type>transmission_interface/SimpleTransmission</type>
+    <joint name="servo_arm_joint">
+      <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
+    </joint>
+    <actuator name="steering_servo_motor">
+      <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
+      <mechanicalReduction>1.0</mechanicalReduction>
     </actuator>
   </transmission>
 
