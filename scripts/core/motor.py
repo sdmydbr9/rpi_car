@@ -107,7 +107,6 @@ class PowerLimiter:
         "2": (3.5, 6.0),       # Moderate cruising
         "3": (6.0, 9.0),       # Fast driving
         "4": (6.0, 12.0),      # Top gear — full power
-        "S": (6.0, 12.0),      # Backward-compatible alias for legacy clients
         "R": (0.0, 6.0),       # Moderate reverse
     }
 

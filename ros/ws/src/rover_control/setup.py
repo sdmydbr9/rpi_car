@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'cmd_vel_bridge = rover_control.cmd_vel_bridge:main',
+            'odometry_publisher = rover_control.odometry_publisher:main',
         ],
     },
 )

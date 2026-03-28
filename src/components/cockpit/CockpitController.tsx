@@ -1,8 +1,10 @@
 import { useState, useCallback, useRef, useEffect } from "react";
+import useEmblaCarousel from "embla-carousel-react";
 import { Header } from "./Header";
 import { SteeringWheel } from "./SteeringWheel";
 import { CameraFeed } from "./CameraFeed";
 import { CarTelemetry } from "./CarTelemetry";
+import { MiniMap } from "./MiniMap";
 import { GearShifter } from "./GearShifter";
 import { HunterPopup } from "./HunterPopup";
 import { AutopilotTelemetry, type AutopilotStatus } from "./AutopilotTelemetry";
@@ -187,6 +189,18 @@ export const CockpitController = () => {
   const [currentHeading, setCurrentHeading] = useState(0);
   const [slalomSign, setSlalomSign] = useState(0);
   const [cameraActualFps, setCameraActualFps] = useState(0);
+  // Fused Odometry state
+
+  // Center-zone carousel (Telemetry ↔ Odometry Map)
+  const [centerCarouselRef, centerCarouselApi] = useEmblaCarousel({ loop: false, dragFree: false });
+  const [centerSlide, setCenterSlide] = useState(0);
+  useEffect(() => {
+    if (!centerCarouselApi) return;
+    const onSelect = () => setCenterSlide(centerCarouselApi.selectedScrollSnap());
+    centerCarouselApi.on("select", onSelect);
+    onSelect();
+    return () => { centerCarouselApi.off("select", onSelect); };
+  }, [centerCarouselApi]);
   // AI Image Analysis state (backend-synced: whether AI is analyzing camera frames)
   // Persisted across sessions — will auto-toggle on backend after connection
   const [imageAnalysisEnabled, setImageAnalysisEnabled] = useState(() => {
@@ -701,7 +715,7 @@ export const CockpitController = () => {
       // Update autonomous telemetry
       if (data.autonomous_mode !== undefined) setIsAutopilotRunning(data.autonomous_mode);
       if (data.autonomous_state) setAutonomousState(data.autonomous_state);
-      if (data.sonar_distance !== undefined) setLaserDistance(data.sonar_distance);
+      if (data.laser_distance !== undefined) setLaserDistance(data.laser_distance);
       if (data.autonomous_target_speed !== undefined) setAutonomousTargetSpeed(data.autonomous_target_speed);
       if (data.mpu6050_enabled !== undefined) {
         setIsMPU6050Enabled(data.mpu6050_enabled);
@@ -734,6 +748,8 @@ export const CockpitController = () => {
       if (data.target_yaw !== undefined) setTargetYaw(data.target_yaw);
       if (data.current_heading !== undefined) setCurrentHeading(data.current_heading);
       if (data.slalom_sign !== undefined) setSlalomSign(data.slalom_sign);
+      // Update fused odometry telemetry
+
       // Update narration telemetry
       if (data.narration_enabled !== undefined) setImageAnalysisEnabled(data.narration_enabled);
       if (data.narration_speaking !== undefined) setNarrationSpeaking(data.narration_speaking!);
@@ -1487,39 +1503,65 @@ export const CockpitController = () => {
             </div>
           </div>
           
-          {/* Center Zone: Car Telemetry */}
-          <div className="flex-[0.4] racing-panel m-0.5 overflow-hidden">
-            <CarTelemetry 
-              steeringAngle={controlState.steeringAngle}
-              throttle={controlState.throttle}
-              brake={controlState.brake}
-              gear={controlState.gear}
-              speed={controlState.speed}
-              speedMpm={controlState.speedMpm}
-              speedUnit={(tuning.SPEED_UNIT || "m/min") as import("./Speedometer").SpeedUnit}
-              temperature={controlState.temperature}
-              cpuClock={controlState.cpuClock}
-              gpuClock={controlState.gpuClock}
-              batteryVoltage={controlState.batteryVoltage}
-              rpm={controlState.rpm}
-              rpmLeft={controlState.rpmLeft}
-              rpmRight={controlState.rpmRight}
-              targetRpm={controlState.targetRpm}
-              encoderAvailable={controlState.encoderAvailable}
-              onLaunch={isConsoleMode ? noopVoid : handleLaunch}
-              onDonut={isConsoleMode ? noopVoid : handleDonut}
-              isEngineRunning={isEngineRunning}
-              sensors={sensors}
-              requiresService={requiresService}
-              compassHeading={compassHeading}
-              compassTargetHeading={compassTargetHeading}
-              pidCorrection={pidCorrection}
-              wheelSync={wheelSyncData}
-            />
+          {/* Center Zone: Swipeable — Telemetry ↔ Odometry Map */}
+          <div className="flex-[0.4] racing-panel m-0.5 overflow-hidden flex flex-col">
+            <div className="flex-1 min-h-0 overflow-hidden" ref={centerCarouselRef}>
+              <div className="flex h-full">
+                {/* Slide 1: Car Telemetry */}
+                <div className="flex-[0_0_100%] min-w-0 h-full overflow-y-auto">
+                  <CarTelemetry 
+                    steeringAngle={controlState.steeringAngle}
+                    throttle={controlState.throttle}
+                    brake={controlState.brake}
+                    gear={controlState.gear}
+                    speed={controlState.speed}
+                    speedMpm={controlState.speedMpm}
+                    speedUnit={(tuning.SPEED_UNIT || "m/min") as import("./Speedometer").SpeedUnit}
+                    temperature={controlState.temperature}
+                    cpuClock={controlState.cpuClock}
+                    gpuClock={controlState.gpuClock}
+                    batteryVoltage={controlState.batteryVoltage}
+                    rpm={controlState.rpm}
+                    rpmLeft={controlState.rpmLeft}
+                    rpmRight={controlState.rpmRight}
+                    targetRpm={controlState.targetRpm}
+                    encoderAvailable={controlState.encoderAvailable}
+                    onLaunch={isConsoleMode ? noopVoid : handleLaunch}
+                    onDonut={isConsoleMode ? noopVoid : handleDonut}
+                    isEngineRunning={isEngineRunning}
+                    sensors={sensors}
+                    requiresService={requiresService}
+                    compassHeading={compassHeading}
+                    compassTargetHeading={compassTargetHeading}
+                    pidCorrection={pidCorrection}
+                    wheelSync={wheelSyncData}
+                  />
+                </div>
+                {/* Slide 2: Odometry Map */}
+                <div className="flex-[0_0_100%] min-w-0 h-full">
+                  <MiniMap />
+                </div>
+              </div>
+            </div>
+            {/* Dot indicators */}
+            <div className="flex justify-center gap-1.5 py-1 border-t border-border/30">
+              {[0, 1].map((i) => (
+                <button
+                  key={i}
+                  onClick={() => centerCarouselApi?.scrollTo(i)}
+                  className={`w-1.5 h-1.5 rounded-full transition-all ${
+                    centerSlide === i
+                      ? "bg-primary scale-125"
+                      : "bg-muted-foreground/30 hover:bg-muted-foreground/50"
+                  }`}
+                />
+              ))}
+            </div>
           </div>
           
-          {/* Right Zone: Gear Shifter or Autopilot Telemetry */}
-          <div className="flex-[0.25] border-l border-border/30 racing-panel m-0.5 overflow-hidden">
+          {/* Right Zone: Gear Shifter or Autopilot Telemetry + Odometry */}
+          <div className="flex-[0.25] border-l border-border/30 racing-panel m-0.5 overflow-hidden flex flex-col">
+            <div className="flex-1 min-h-0 overflow-y-auto">
             {isAutopilotEnabled ? (
               <AutopilotTelemetry
                 status={autonomousState as AutopilotStatus}
@@ -1561,6 +1603,8 @@ export const CockpitController = () => {
                 speed={controlState.speed}
               />
             )}
+            </div>
+
           </div>
         </div>
         

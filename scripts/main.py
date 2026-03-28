@@ -86,8 +86,19 @@ from pico_sensor_reader import (
     get_battery_voltage as pico_get_battery_voltage,
     get_current_sense as pico_get_current_sense,
     get_sensor_packet as pico_get_sensor_packet,
+    get_pico_rpm,
 )
 from drive_logger import DriveLogger
+from config import read_thermal_temp_c
+from runtime_fault_handler import get_fault_handler
+from odometry_integration import (
+    init_odometry, update_odometry, get_diagnostics_dict as get_odometry_diagnostics,
+    reset_pose as odometry_reset_pose, get_position as odometry_get_position,
+    get_heading_deg as odometry_get_heading_deg,
+)
+from odom_nav import (
+    ObstacleMemory, StuckSlipDetector, TrailRecorder, ReturnToStartNavigator,
+)
 
 try:
     from PIL import Image
@@ -175,8 +186,8 @@ def _write_debug_row():
             round(float(car_state.get("user_steer_angle", 0) or 0), 1),
             car_state.get("obstacle_state", "IDLE"),
             # encoders (rear encoded motors — no front motors)
-            round(float(car_state.get("encoder_rpm_right", 0.0) or 0.0), 1),
-            round(float(car_state.get("encoder_rpm_left",  0.0) or 0.0), 1),
+            round(pkt.rpm_right, 1) if pkt else round(float(car_state.get("encoder_rpm_right", 0.0) or 0.0), 1),
+            round(pkt.rpm_left, 1) if pkt else round(float(car_state.get("encoder_rpm_left",  0.0) or 0.0), 1),
             # accelerometer
             round(pkt.accel_x, 4) if pkt else 0.0,
             round(pkt.accel_y, 4) if pkt else 0.0,
@@ -234,7 +245,6 @@ def _write_csv_row():
         # 2WD build: rear encoded motors only, front has steering servo only
         row = {
             'laser_front_mm': pkt.laser_mm if pkt else -1,
-            'sonar_front_cm': 0.0,
             'accel_x': round(pkt.accel_x, 4) if pkt else 0.0,
             'accel_y': round(pkt.accel_y, 4) if pkt else 0.0,
             'accel_z': round(pkt.accel_z, 4) if pkt else 0.0,
@@ -244,8 +254,8 @@ def _write_csv_row():
             'temp_c': round(pkt.temp_c, 2) if pkt else 0.0,
             'battery_mv': round(pkt.adc_a0, 1) if pkt else 0.0,
             'current_mv': round(pkt.adc_a1, 1) if pkt else 0.0,
-            'rpm_rear_left': round(float(car_state.get("encoder_rpm_left", 0.0) or 0.0), 1),
-            'rpm_rear_right': round(float(car_state.get("encoder_rpm_right", 0.0) or 0.0), 1),
+            'rpm_rear_left': round(pkt.rpm_left, 1) if pkt else round(float(car_state.get("encoder_rpm_left", 0.0) or 0.0), 1),
+            'rpm_rear_right': round(pkt.rpm_right, 1) if pkt else round(float(car_state.get("encoder_rpm_right", 0.0) or 0.0), 1),
             'cmd_pwm': round(float(car_state.get("current_pwm", 0.0) or 0.0), 2),
             'applied_pwm': round(sync.get("pwm_out", 0.0), 2),
             'target_rpm': round(sync.get("target_rpm", 0.0), 1),
@@ -2140,13 +2150,26 @@ except Exception as e:
     pico_reader = None
     print(f"⚠️  Pico sensor bridge initialization error: {e}")
 
+# Initialize Fused Odometry (UKF sensor fusion)
+try:
+    init_odometry()
+except Exception as e:
+    logging.error("Fused odometry initialization error: %s", e, exc_info=True)
+    print(f"⚠️  Fused odometry initialization error: {e}")
+
+# Initialize odometry-aware navigation helpers
+_obstacle_memory = ObstacleMemory()
+_stuck_slip_detector = StuckSlipDetector()
+_trail_recorder = TrailRecorder()
+_return_to_start_nav = None  # initialized after car_system is available
+
 # Wheel encoders now on Pico — RPM read via PicoEncoderProxy (setup below).
 # CarSystem.attach_wheel_sync() receives proxy objects in the encoder init block.
 
-# Initialize Sensor System (servo + laser on Pi)
+# Initialize Sensor System (fixed VL53L0X + camera pan/tilt)
 try:
     sensor_system = SensorSystem()
-    print("✅ Sensor system initialized (Servo + Laser)")
+    print("✅ Sensor system initialized (fixed VL53L0X + camera pan/tilt)")
 except Exception as e:
     print(f"⚠️  Sensor system initialization error: {e}")
     # Create dummy sensor system for testing
@@ -2157,6 +2180,14 @@ except Exception as e:
         def scan_sweep(self, **kw): return []
         def cleanup(self): pass
     sensor_system = DummySensorSystem()
+
+# Initialize Runtime Fault Handler (monitors system health, activates degraded mode)
+try:
+    fault_handler = get_fault_handler()
+    print("✅ Runtime fault handler initialized")
+except Exception as e:
+    print(f"⚠️  Fault handler initialization error: {e}")
+    fault_handler = None
 
 # ==========================================
 # 🏎️ AUTOPILOT INSTANTIATION
@@ -2172,6 +2203,12 @@ autopilot = AutoPilot(
     car_system,
     _get_laser_for_autopilot,
     sensor_system=sensor_system,
+)
+
+# Initialize return-to-start navigator (needs car_system + odometry)
+_return_to_start_nav = ReturnToStartNavigator(
+    car_system, odometry_get_position, odometry_get_heading_deg,
+    _trail_recorder, _obstacle_memory,
 )
 
 # Store a copy of the original class-level defaults (immutable reference for reset)
@@ -2191,7 +2228,7 @@ follow_target.init(
     car_system=car_system,
     sensor_system=sensor_system,
     get_laser=_get_laser_for_autopilot,
-    get_sonar=_get_laser_for_autopilot,
+    get_sonar=None,
     get_gyro_z_fn=pico_get_gyro_z,
     get_accel_xyz_fn=pico_get_accel_xyz,
     get_battery_voltage_fn=pico_get_battery_voltage,
@@ -2263,6 +2300,7 @@ car_state = {
     "service_light_active": False,  # True if any sensor has error/warning
     # 📷 CAMERA / VISION / OBJECT DETECTION
     "camera_enabled": False,         # Camera master toggle (disabled by default)
+    "camera_frame_count": 0,         # Frame counter for freeze detection
     "user_wants_vision": False,      # User's explicit CV toggle preference
     "vision_active": False,          # True if vision DNN is running
     "camera_obstacle_distance": 999.0,  # Virtual distance from camera (cm)
@@ -2283,6 +2321,10 @@ car_state = {
     "camera_mediamtx_webrtc_url": "",        # WebRTC URL exposed by MediaMTX
     "camera_mediamtx_rtsp_ingest_url": "",   # RTSP ingest URL in MediaMTX
     "camera_mediamtx_error": "",             # Last MediaMTX/publisher error
+    # 🚨 RUNTIME SYSTEM HEALTH
+    "system_health_status": "OK",    # OK | FAULT (monitored by runtime_fault_handler)
+    "system_faults": "",              # Fault description string (semicolon-separated)
+    "degraded_mode_active": False,    # True when vehicle is in limp-home mode
     # 🧭 MPU6050 Gyro telemetry
     "gyro_z": 0.0,                     # Current Z-axis yaw rate (°/s)
     "gyro_available": False,           # MPU6050 hardware detected
@@ -2294,6 +2336,17 @@ car_state = {
     "encoder_speed_mpm": 0.0,            # Speed in meters per minute (from RPM + 75mm wheel)
     "encoder_available": False,          # True if encoder GPIO setup succeeded
     "current_target_rpm": 0.0,           # Current RPM target from gear + throttle
+    # 📍 FUSED ODOMETRY (UKF sensor fusion)
+    "odometry_x_m": 0.0,                # X position (meters, East)
+    "odometry_y_m": 0.0,                # Y position (meters, North)
+    "odometry_heading_deg": 0.0,         # Heading (degrees)
+    "odometry_v_linear": 0.0,            # Linear velocity (m/s)
+    "odometry_v_angular": 0.0,           # Angular velocity (rad/s)
+    "odometry_active": False,            # True when odometry is initialized and running
+    # 🛡️ Odometry-aware navigation state
+    "stuck_detected": False,             # True when stuck (high cmd, no motion)
+    "slip_detected": False,              # True when wheel slip detected
+    "return_to_start_active": False,     # True when RTH is running
     # 🔋 Battery / Current (from Pico ADC)
     "battery_voltage": -1.0,                 # Battery voltage in V (from ADS1115 A0)
     "current_amps": -1.0,                    # Current draw in A (from ADS1115 A1)
@@ -2518,21 +2571,32 @@ _startup_check_running = False
 # ==========================================
 # 📡 LASER MOVING-AVERAGE FILTER
 # ==========================================
-# Circular buffer of last 5 laser readings for noise rejection.
-# At 20Hz autopilot rate, this spans ~250ms — fast enough for
-# real-time, smooth enough to reject single bad readings.
-laser_buffer = deque(maxlen=5)
+# Timestamped circular buffer of last 5 laser readings for noise rejection.
+# Readings older than LASER_MAX_AGE_S are discarded so the display never
+# shows stale data when the VL53L0X returns transient errors (e.g. EMI
+# from motors, I2C glitch).
+LASER_MAX_AGE_S = 0.5          # expire readings older than 500 ms
+laser_buffer = deque(maxlen=5)  # (timestamp, cm) tuples
+_laser_buffer_lock = threading.Lock()  # protect deque from concurrent iteration
+_laser_raw_cm = -1              # last raw reading for telemetry debug
 
 def get_smoothed_laser():
     """Read forward laser from Pico bridge and return a moving-average smoothed distance."""
+    global _laser_raw_cm
+    now = time.monotonic()
     try:
         raw = pico_get_laser_cm()
-    except:
+    except Exception:
         raw = -1
-    if raw > 0:
-        laser_buffer.append(raw)
-    if laser_buffer:
-        return sum(laser_buffer) / len(laser_buffer)
+    _laser_raw_cm = raw
+    with _laser_buffer_lock:
+        if raw > 0:
+            laser_buffer.append((now, raw))
+        # Evict stale entries
+        while laser_buffer and (now - laser_buffer[0][0]) > LASER_MAX_AGE_S:
+            laser_buffer.popleft()
+        if laser_buffer:
+            return sum(v for _, v in laser_buffer) / len(laser_buffer)
     return 100  # Safe default
 
 
@@ -3484,6 +3548,42 @@ def physics_loop():
         
         car_state["laser_distance"] = round(laser_distance, 1)
         
+        # --- RUNTIME FAULT CHECK (Pico packets, battery, thermal, etc.) ---
+        if fault_handler is not None:
+            pkt = pico_get_sensor_packet()
+            camera_frame_id = car_state.get("camera_frame_count", 0)
+            health = fault_handler.check_system_health(
+                pico_reader=pico_reader,
+                pkt=pkt,
+                camera_frame_count=camera_frame_id,
+                temp_c=read_thermal_temp_c(),
+                compass_heading=car_state.get("compass_heading", None),
+                gyro_z=pkt.gyro_z if pkt else None,
+                accel_vec=(pkt.accel_x, pkt.accel_y, pkt.accel_z) if pkt else None,
+            )
+            
+            # Store health state for telemetry/logging
+            car_state["system_health_status"] = "OK" if health.healthy else "FAULT"
+            car_state["system_faults"] = "; ".join(health.active_faults) if health.active_faults else ""
+            car_state["degraded_mode_active"] = health.degraded_mode_active
+            
+            # If degraded mode is active, apply motion limits.
+            # Only kill autopilot for faults that compromise laser-based
+            # navigation (Pico UART loss = no laser/encoder data).
+            # Camera, battery ADC, and thermal faults do not affect
+            # the VL53L0X autopilot and should not prevent it.
+            if health.degraded_mode_active:
+                _autopilot_critical = any(
+                    f.startswith("PICO_PACKET_CRITICAL")
+                    for f in (health.active_faults or [])
+                )
+                if _autopilot_critical:
+                    if car_state["autonomous_mode"]:
+                        print(f"🔴 Degraded mode: disabling autonomous driving. Faults: {car_state['system_faults']}")
+                        car_state["autonomous_mode"] = False
+                    if car_state["hunter_mode"]:
+                        car_state["hunter_mode"] = False
+        
         # --- VISION ACTIVATION FOR MANUAL MODE ---
         # Activate vision DNN when driving forward in manual mode (only if camera + CV enabled)
         if VISION_AVAILABLE and vision_system is not None and not car_state["autonomous_mode"]:
@@ -3744,8 +3844,9 @@ def physics_loop():
         )
 
         # --- 3. STEERING MIXER (The Magic) ---
-        # In autonomous or hunter mode, CarSystem handles GPIO directly — skip mixer.
-        if car_state["autonomous_mode"] or car_state["hunter_mode"]:
+        # In autonomous, hunter, or return-to-start mode, CarSystem handles GPIO directly — skip mixer.
+        rth_running = _return_to_start_nav is not None and _return_to_start_nav.active
+        if car_state["autonomous_mode"] or car_state["hunter_mode"] or rth_running:
             was_autonomous = True
             # Feed gear to wheel sync so RPM limits apply in autopilot/hunter.
             # Autopilot uses gear "3", hunter uses top gear "4".
@@ -3856,6 +3957,9 @@ def drive_autonomous():
         car_state["current_heading"] = round(autopilot.current_heading, 1)
         car_state["slalom_sign"] = autopilot.slalom_sign
 
+        # Mirror planner telemetry
+        car_state["planner_debug"] = autopilot.planner_debug
+
         # Emit fresh laser scan data to UI clients
         if autopilot.scan_data_fresh:
             scan_payload = [
@@ -3901,7 +4005,15 @@ if DEBUG_MODE:
         print(f"⚠️  [DebugPlots] Failed to start debug plot server: {_dps_err}")
 
 # Start the Engine (Thread)
-engine_thread = threading.Thread(target=physics_loop, daemon=True)
+def _physics_loop_wrapper():
+    try:
+        physics_loop()
+    except Exception as e:
+        import traceback
+        print(f"💀 [Physics] THREAD CRASHED: {e}")
+        traceback.print_exc()
+
+engine_thread = threading.Thread(target=_physics_loop_wrapper, daemon=True)
 engine_thread.start()
 
 # Start the Smart Driver Autonomous Thread
@@ -4046,6 +4158,28 @@ def api_server_ip():
         "gamepad_connected": car_state.get("gamepad_connected", False),
         "gamepad_enabled": car_state.get("gamepad_enabled", False),
     })
+
+@app.route("/api/odometry")
+def api_odometry():
+    """Return fused odometry state (position, heading, velocity, uncertainties)."""
+    try:
+        diag = get_odometry_diagnostics()
+        if not diag:
+            return jsonify({"active": False, "error": "Odometry not initialized"})
+        diag["active"] = True
+        return jsonify(diag)
+    except Exception as e:
+        return jsonify({"active": False, "error": str(e)}), 500
+
+@app.route("/api/odometry/reset", methods=["POST"])
+def api_odometry_reset():
+    """Reset odometry pose to origin (or provided x, y, heading_deg)."""
+    data = request.get_json(silent=True) or {}
+    x = float(data.get("x", 0.0))
+    y = float(data.get("y", 0.0))
+    heading = float(data.get("heading_deg", 0.0))
+    odometry_reset_pose(x, y, heading)
+    return jsonify({"status": "ok", "x": x, "y": y, "heading_deg": heading})
 
 @app.route("/api/now-playing")
 def api_now_playing():
@@ -4305,7 +4439,7 @@ def enable_autonomous():
     car_state["autonomous_state"] = State.CRUISING.value
     car_state["last_obstacle_side"] = "none"
     autopilot.start()
-    print(f"🤖 SMART DRIVER: ENABLED - Laser-scanner autonomous active")
+    print(f"🤖 SMART DRIVER: ENABLED - Planner autopilot active (Ackermann + fixed VL53L0X)")
     return "AUTONOMOUS_ENABLED"
 
 @app.route("/autonomous_disable")
@@ -5160,7 +5294,7 @@ def on_autonomous_enable(data):
     if car_state.get("hunter_mode", False):
         _stop_hunter()
     autopilot.start()
-    print(f"\n⚙️ [UI Control] 🤖 SMART DRIVER: ENABLED - Laser-scanner autonomous active")
+    print(f"\n⚙️ [UI Control] 🤖 SMART DRIVER: ENABLED - Planner autopilot active (Ackermann + fixed VL53L0X)")
     emit('autonomous_response', {'status': 'ok', 'autonomous_enabled': True})
 
 @socketio.on('autonomous_disable')
@@ -5195,6 +5329,39 @@ def on_autonomous_toggle(data):
 def on_autopilot_toggle(data):
     """Alias for autonomous_toggle — frontend emits this event name"""
     on_autonomous_toggle(data)
+
+@socketio.on('odometry_reset')
+def on_odometry_reset(data):
+    """Reset odometry pose and trail to origin."""
+    x = float(data.get('x', 0))
+    y = float(data.get('y', 0))
+    heading = float(data.get('heading_deg', 0))
+    odometry_reset_pose(x, y, heading)
+    _trail_recorder.clear()
+    _obstacle_memory.clear()
+    _stuck_slip_detector.reset()
+    car_state["stuck_detected"] = False
+    car_state["slip_detected"] = False
+    print(f"📍 [Odometry] Reset to ({x:.2f}, {y:.2f}, {heading:.0f}°)")
+
+@socketio.on('return_to_start')
+def on_return_to_start(data):
+    """Activate return-to-start behavior using odometry trail."""
+    if _return_to_start_nav is None:
+        print("⚠️  Return-to-start: navigator not initialized")
+        return
+    if _return_to_start_nav.active:
+        _return_to_start_nav.stop()
+        car_state["return_to_start_active"] = False
+        print("🛑 [RTH] Return-to-start cancelled")
+    else:
+        # Disable any active autonomous mode first
+        if car_state["autonomous_mode"]:
+            car_state["autonomous_mode"] = False
+            autopilot.stop()
+        _return_to_start_nav.start()
+        car_state["return_to_start_active"] = True
+        print("🔙 [RTH] Return-to-start activated")
 
 @socketio.on('tuning_update')
 def on_tuning_update(data):
@@ -5973,20 +6140,15 @@ def encoder_and_power_thread():
             time.sleep(interval)
 
             # ── Read RPM directly from Pico (calculated on-device at 50 Hz) ──
-            if car_state["encoder_available"]:
-                rpm_l, rpm_r = get_pico_rpm()
-                avg_rpm = (rpm_l + rpm_r) / 2.0
-                speed_mpm = avg_rpm * WHEEL_CIRCUMFERENCE_M
+            # Always read RPM from Pico packet — independent of encoder proxy availability
+            rpm_l, rpm_r = get_pico_rpm()
+            avg_rpm = (rpm_l + rpm_r) / 2.0
+            speed_mpm = avg_rpm * WHEEL_CIRCUMFERENCE_M
 
-                car_state["encoder_rpm"] = round(avg_rpm, 1)
-                car_state["encoder_rpm_left"] = round(rpm_l, 1)
-                car_state["encoder_rpm_right"] = round(rpm_r, 1)
-                car_state["encoder_speed_mpm"] = round(speed_mpm, 2)
-            else:
-                car_state["encoder_rpm"] = 0.0
-                car_state["encoder_rpm_left"] = 0.0
-                car_state["encoder_rpm_right"] = 0.0
-                car_state["encoder_speed_mpm"] = 0.0
+            car_state["encoder_rpm"] = round(avg_rpm, 1)
+            car_state["encoder_rpm_left"] = round(rpm_l, 1)
+            car_state["encoder_rpm_right"] = round(rpm_r, 1)
+            car_state["encoder_speed_mpm"] = round(speed_mpm, 2)
 
             # --- Pico sensor data (accel, laser, temp) for Grafana telemetry ---
             pico_pkt = pico_get_sensor_packet()
@@ -5996,6 +6158,77 @@ def encoder_and_power_thread():
                 car_state["accel_z"] = pico_pkt.accel_z
                 car_state["laser_mm"] = pico_pkt.laser_mm if pico_pkt.laser_mm > 0 else 0
                 car_state["imu_temp_c"] = round(pico_pkt.temp_c, 1)
+
+            # --- FUSED ODOMETRY UPDATE (UKF sensor fusion @ 20 Hz) ---
+            try:
+                rpm_l_odom = car_state.get("encoder_rpm_left", 0.0)
+                rpm_r_odom = car_state.get("encoder_rpm_right", 0.0)
+
+                # PWM-based RPM fallback when encoders report 0 but motors are active
+                # Calibrated from max_rpm_test: ~285 RPM at duty=100, dead zone ~35
+                if abs(rpm_l_odom) < 0.5 and abs(rpm_r_odom) < 0.5:
+                    pwm_l = abs(car_state.get("current_pwm_l", 0.0))
+                    pwm_r = abs(car_state.get("current_pwm_r", 0.0))
+                    PWM_DEAD_ZONE = 20.0
+                    PWM_TO_RPM = 3.5  # ~285 RPM at pwm=100 → 2.85, with margin
+                    if pwm_l > PWM_DEAD_ZONE or pwm_r > PWM_DEAD_ZONE:
+                        direction_sign = -1.0 if car_state.get("direction") == "backward" else 1.0
+                        rpm_l_odom = max(0.0, pwm_l - PWM_DEAD_ZONE) * PWM_TO_RPM * direction_sign
+                        rpm_r_odom = max(0.0, pwm_r - PWM_DEAD_ZONE) * PWM_TO_RPM * direction_sign
+
+                gyro_z_odom = car_state.get("gyro_z", 0.0)
+                steer_odom = car_state.get("steer_angle", 0.0)
+                compass_odom = car_state.get("compass_heading", None)
+                accel_x_odom = car_state.get("accel_x", 0.0)
+
+                odom_state = update_odometry(
+                    rpm_left=rpm_l_odom,
+                    rpm_right=rpm_r_odom,
+                    gyro_z_deg_s=gyro_z_odom,
+                    mag_heading_deg=compass_odom,
+                    steering_angle_deg=steer_odom,
+                    accel_x=accel_x_odom,
+                )
+                if odom_state is not None:
+                    car_state["odometry_x_m"] = round(odom_state.x, 4)
+                    car_state["odometry_y_m"] = round(odom_state.y, 4)
+                    car_state["odometry_heading_deg"] = round(math.degrees(odom_state.theta), 1)
+                    car_state["odometry_v_linear"] = round(odom_state.v_linear, 3)
+                    car_state["odometry_v_angular"] = round(odom_state.v_angular, 3)
+                    car_state["odometry_active"] = True
+
+                    # --- ODOM-NAV: trail recorder, obstacle memory, stuck/slip ---
+                    _trail_recorder.update(odom_state.x, odom_state.y)
+
+                    # Project laser hit into world frame for obstacle memory
+                    laser_m = car_state.get("laser_mm", 0) / 1000.0
+                    if 0.02 < laser_m < 2.0:
+                        _obstacle_memory.add_laser_hit(
+                            odom_state.x, odom_state.y, odom_state.theta,
+                            laser_m, laser_angle_rad=0.0,
+                        )
+
+                    # Stuck / slip detection
+                    cmd_pwm = max(
+                        abs(car_state.get("current_pwm_l", 0)),
+                        abs(car_state.get("current_pwm_r", 0)),
+                    )
+                    _stuck_slip_detector.update(
+                        cmd_pwm, odom_state.v_linear,
+                        rpm_l_odom, rpm_r_odom,
+                    )
+                    car_state["stuck_detected"] = _stuck_slip_detector.stuck
+                    car_state["slip_detected"] = _stuck_slip_detector.slip
+            except Exception as odom_err:
+                if not hasattr(encoder_and_power_thread, '_odom_err_count'):
+                    encoder_and_power_thread._odom_err_count = 0
+                encoder_and_power_thread._odom_err_count += 1
+                # Log first error with full traceback, then every 100th
+                if encoder_and_power_thread._odom_err_count == 1:
+                    logging.warning("[Odometry] Update error (#1): %s", odom_err, exc_info=True)
+                elif encoder_and_power_thread._odom_err_count % 100 == 0:
+                    logging.warning("[Odometry] Update error (count=%d): %s",
+                                    encoder_and_power_thread._odom_err_count, odom_err)
 
             # --- Battery / Current from Pico ADC (every ~1s) ---
             power_counter += 1
@@ -6117,7 +6350,9 @@ def telemetry_broadcast():
                 "hunter_mode": car_state["hunter_mode"],
                 "autonomous_state": car_state["autonomous_state"],
                 "autonomous_target_speed": car_system._current_speed if car_state["autonomous_mode"] else 0,
-                "sonar_distance": car_state["laser_distance"],
+                "laser_distance": car_state["laser_distance"],
+                "laser_raw_cm": _laser_raw_cm,
+                "laser_mm": car_state.get("laser_mm", 0),
                 "mpu6050_enabled": car_state["mpu6050_enabled"],
                 # 🧭 MPU6050 Accelerometer telemetry
                 "accel_x": accel_x,
@@ -6180,6 +6415,19 @@ def telemetry_broadcast():
                 "gamepad_gear": car_state["gamepad_gear"],
                 # 🔄 Wheel Sync telemetry
                 "wheel_sync": car_system.get_sync_telemetry(),
+                # 📍 Fused Odometry telemetry
+                "odometry_x_m": car_state.get("odometry_x_m", 0.0),
+                "odometry_y_m": car_state.get("odometry_y_m", 0.0),
+                "odometry_heading_deg": car_state.get("odometry_heading_deg", 0.0),
+                "odometry_v_linear": car_state.get("odometry_v_linear", 0.0),
+                "odometry_v_angular": car_state.get("odometry_v_angular", 0.0),
+                "odometry_active": car_state.get("odometry_active", False),
+                # 🛡️ Odometry-aware navigation telemetry
+                "stuck_detected": car_state.get("stuck_detected", False),
+                "slip_detected": car_state.get("slip_detected", False),
+                "odometry_trail": _trail_recorder.get_trail(),
+                "obstacle_memory": _obstacle_memory.get_obstacles(),
+                "return_to_start_active": _return_to_start_nav.active if _return_to_start_nav else False,
             }
             
             socketio.emit('telemetry_update', telemetry_data)
@@ -6204,13 +6452,15 @@ def telemetry():
     """Returns current car state for the dashboard"""
     pwm = car_state["current_pwm"]
     
-    # Use real encoder data when available, fall back to PWM estimates
-    if car_state["encoder_available"]:
-        real_rpm = car_state["encoder_rpm"]
-        real_speed_mpm = car_state["encoder_speed_mpm"]
-    else:
-        real_rpm = round(pwm * 2.2, 1)
-        real_speed_mpm = round(pwm * 2.2 * WHEEL_CIRCUMFERENCE_M, 2)
+    # Use Pico RPM data (always read regardless of encoder proxy state)
+    real_rpm = car_state.get("encoder_rpm", 0.0)
+    real_speed_mpm = car_state.get("encoder_speed_mpm", 0.0)
+    # Fallback: read RPM directly from Pico packet if car_state hasn't been updated yet
+    if real_rpm == 0.0 and abs(pwm) > 5:
+        pkt_tel = pico_get_sensor_packet()
+        if pkt_tel and (abs(pkt_tel.rpm_left) > 0.1 or abs(pkt_tel.rpm_right) > 0.1):
+            real_rpm = round((pkt_tel.rpm_left + pkt_tel.rpm_right) / 2.0, 1)
+            real_speed_mpm = round(real_rpm * WHEEL_CIRCUMFERENCE_M, 2)
     
     # 📡 Get fresh IMU + compass data from Pico
     pico_pkt = pico_get_sensor_packet()
@@ -6250,8 +6500,10 @@ def telemetry():
         # 🤖 Autonomous driving telemetry
         "autonomous_mode": car_state["autonomous_mode"],
         "autonomous_state": car_state["autonomous_state"],
-        "autonomous_target_speed": car_state["autonomous_target_speed"],
-        "sonar_distance": car_state["laser_distance"],
+        "autonomous_target_speed": car_state.get("autonomous_target_speed", 0),
+        "laser_distance": car_state["laser_distance"],
+        "laser_raw_cm": _laser_raw_cm,
+        "laser_mm": car_state.get("laser_mm", 0),
         "compass_heading": (
             compass_heading
             if compass_heading is not None

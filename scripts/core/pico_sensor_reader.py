@@ -88,6 +88,11 @@ class PicoSensorReader:
         self._error_count = 0
         self._packet_count = 0
         self._read_thread = None
+        
+        # Fault detection metrics
+        self._consecutive_errors = 0  # Count of parse errors in a row
+        self._last_error_time = 0.0  # When last error occurred
+        self._error_rate_window = deque(maxlen=100)  # Recent 100 packets (error=True/False)
 
         self._connect()
 
@@ -217,15 +222,22 @@ class PicoSensorReader:
                             self._last_packet_time = time.monotonic()
                             self._packet_buffer.append(packet)
                             self._packet_count += 1
+                            self._consecutive_errors = 0  # Reset on success
+                            self._error_rate_window.append(False)  # No error this packet
 
                     except (json.JSONDecodeError, KeyError, TypeError, IndexError) as e:
                         self._error_count += 1
+                        self._consecutive_errors += 1
+                        self._last_error_time = time.time()
+                        self._error_rate_window.append(True)  # Error this packet
                         print(f"⚠️  Parse error: {e} | Data: {line[:80]}")
 
             except Exception as e:
                 if not self._running:
                     break
                 self._error_count += 1
+                self._consecutive_errors += 1
+                self._last_error_time = time.time()
                 print(f"⚠️  Read error: {e}")
                 time.sleep(0.01)
 
@@ -258,8 +270,41 @@ class PicoSensorReader:
             return {
                 "packets_received": self._packet_count,
                 "errors": self._error_count,
-                "connected": self._running
+                "connected": self._running,
+                "consecutive_errors": self._consecutive_errors,
+                "error_rate_recent": self._get_error_rate(),
             }
+    
+    def _get_error_rate(self):
+        """Return recent error rate (0.0-1.0) from last 100 read attempts."""
+        if not self._error_rate_window:
+            return 0.0
+        errors = sum(self._error_rate_window)
+        return errors / len(self._error_rate_window)
+    
+    def get_connection_health(self):
+        """
+        Return True if connection is healthy, False if degraded.
+        Considers packet freshness, error rate, and consecutive errors.
+        """
+        with self._lock:
+            if not self._running or self._last_packet is None:
+                return False
+            
+            age_s = time.monotonic() - self._last_packet_time
+            
+            # Connection is unhealthy if:
+            # - No packet received in >5 seconds, OR
+            # - 3+ consecutive parse errors, OR
+            # - Error rate > 20% in recent window
+            if age_s > 5.0:
+                return False
+            if self._consecutive_errors >= 3:
+                return False
+            if self._get_error_rate() > 0.20:
+                return False
+            
+            return True
 
     # ── Pan/tilt UART commands ─────────────────────────────────
 

@@ -1,43 +1,62 @@
 """
-autopilot_pid.py — Laser-Scanner Autonomous Rover
+autopilot_pid.py — Autonomous Rover with Forward Obstacle Memory + Polar Hazard Map
 
-4-State Finite State Machine
+6-State Finite State Machine
 ─────────────────────────────
-  CRUISING         Servo centred, drive forward with PID heading correction.
-  SCANNING         Obstacle < OBSTACLE_CM ahead → stop, sweep -30° to +30°.
-  TURNING          Analyse sweep → pivot toward clearest direction.
+  CRUISE           Drive forward with PID; planner scores steering arcs.
+  CAUTION          Obstacle nearby — reduce speed, let planner steer around it.
+  PLAN             All easy arcs poor; stop briefly to let planner re-evaluate.
+  PROBE            Small cautious pivot to gather new laser data.
+  RECOVER          Blocking reverse + spin fallback (last resort).
   EMERGENCY_STOP   Manual kill — all motors locked.
+
+  Legacy states (CRUISING, SCANNING, TURNING) kept as aliases so
+  external code referencing them does not break.
 
 Sensor Stack (via Pico UART Bridge)
 ────────────
-  VL53L0X + Pan/Tilt  Pan/tilt gimbal on Pico GP2/GP3, VL53L0X on Pico I2C → UART bridge
+  VL53L0X (fixed forward, centre)  Pico I2C → UART bridge — single fixed beam
   MPU6050          Pico I2C 0x68 → UART bridge — gyro Z-axis yaw rate for PID
   ADS1115 ADC      Pico I2C 0x48 — battery voltage & current sensing
 
-Scan-then-Drive Logic
-─────────────────────
-  Default:  Servo at 0° (centre).  Drive Forward.
-  Trigger:  Centre distance < OBSTACLE_CM (50 cm).
-  Reaction: Stop → sweep (-30 to +30) → pick best direction → pivot turn → resume.
-  Sweep:    7 readings × 0.05 s ≈ 0.35 s.
-  Fallback: Both sectors blocked → reverse + spin.
+Steering: Ackermann (single front servo linkage, rear 2WD)
+Odometry: UKF fused (encoders + gyro + magnetometer + steering angle)
 
-Wraps CarSystem (motor.py) and SensorSystem (sensors.py).
+Planner Logic
+─────────────
+  1. Record forward laser into world-frame obstacle memory each tick.
+  2. Reproject memory into body frame → polar hazard map.
+  3. Score candidate steering arcs (cost = collision + proximity + unknown + smoothness).
+  4. Pick lowest-cost arc → drive along it briefly → replan next tick.
+  5. If all arcs blocked → PROBE (pivot whole rover) → re-score → RECOVER if still stuck.
+
+Wraps CarSystem (motor.py).  VL53L0X is fixed centre-forward — no scanning servo.
 """
 
+import math
 import time
 import threading
 from collections import deque
 from enum import Enum
 
+from obstacle_memory import ForwardObstacleMemory, ARC_BLOCKED_THRESHOLD, PROBE_ANGLE_DEG
+
 
 # ── FSM States ─────────────────────────────────────────
 
 class State(Enum):
-    CRUISING        = "CRUISING"
-    SCANNING        = "SCANNING"
-    TURNING         = "TURNING"
+    # New planner-aware states
+    CRUISE          = "CRUISE"
+    CAUTION         = "CAUTION"
+    PLAN            = "PLAN"
+    PROBE           = "PROBE"
+    RECOVER         = "RECOVER"
     EMERGENCY_STOP  = "EMERGENCY_STOP"
+
+    # Legacy aliases (so external code using State.CRUISING still works)
+    CRUISING        = "CRUISE"
+    SCANNING        = "PLAN"
+    TURNING         = "CAUTION"
 
 
 # ── PID Controller ─────────────────────────────────────
@@ -274,24 +293,73 @@ class MotorDriver:
         self._car._apply_steering(base_speed, steer_angle, forward=True)
         self._car._current_speed = base_speed
 
-    def reverse(self, speed, duration=0.8):
-        """Reverse at *speed* for *duration* seconds, then stop."""
+    def reverse(self, speed, duration=0.8, target_dist_m=0.20):
+        """Reverse at *speed* until *target_dist_m* reached or *duration* timeout.
+
+        Uses odometry for distance measurement when available, falls back to
+        time-based duration if odometry is not active.
+        """
+        try:
+            from odometry_integration import get_position
+            sx, sy = get_position()
+            use_odom = True
+        except Exception:
+            use_odom = False
+
         end = time.time() + duration
         while time.time() < end:
             self._car.reverse(speed)
             time.sleep(0.02)
+            if use_odom:
+                cx, cy = get_position()
+                dx, dy = cx - sx, cy - sy
+                if (dx * dx + dy * dy) >= target_dist_m * target_dist_m:
+                    break
         self._car.stop()
 
-    def spin_right(self, speed=50, duration=0.4):
-        """Full-lock right turn for *duration* seconds.
+    def spin_right(self, speed=50, duration=0.4, target_angle_deg=45.0):
+        """Full-lock right turn until *target_angle_deg* reached or *duration* timeout.
 
-        With Ackermann, this does full steering lock + forward creep
-        (true zero-radius turn is not possible).
+        Uses odometry heading when available, falls back to time-based.
         """
+        try:
+            from odometry_integration import get_heading_deg
+            start_hdg = get_heading_deg()
+            use_odom = True
+        except Exception:
+            use_odom = False
+
         end = time.time() + duration
         while time.time() < end:
             self._car.pivot_turn("right", speed)
             time.sleep(0.02)
+            if use_odom:
+                delta = abs(get_heading_deg() - start_hdg)
+                if delta > 180:
+                    delta = 360 - delta
+                if delta >= target_angle_deg:
+                    break
+        self._car.stop()
+
+    def spin_left(self, speed=50, duration=0.4, target_angle_deg=45.0):
+        """Full-lock left turn until *target_angle_deg* reached or *duration* timeout."""
+        try:
+            from odometry_integration import get_heading_deg
+            start_hdg = get_heading_deg()
+            use_odom = True
+        except Exception:
+            use_odom = False
+
+        end = time.time() + duration
+        while time.time() < end:
+            self._car.pivot_turn("left", speed)
+            time.sleep(0.02)
+            if use_odom:
+                delta = abs(get_heading_deg() - start_hdg)
+                if delta > 180:
+                    delta = 360 - delta
+                if delta >= target_angle_deg:
+                    break
         self._car.stop()
 
     def stop(self):
@@ -325,25 +393,32 @@ class MotorDriver:
 
 class AutoPilot:
     """
-    Laser-Scanner Autonomous Rover — 4-State FSM.
+    Planner-based Autonomous Rover — 6-State FSM with Ackermann steering.
 
     States
     ------
-    CRUISING       Servo centred, drive forward with PID heading correction.
-    SCANNING       Obstacle < OBSTACLE_CM → stop, sweep ±30° to map surroundings.
-    TURNING        Analyse sweep data → pivot toward clearest sector, then resume.
+    CRUISE         Drive forward with PID heading correction + planner arc scoring.
+    CAUTION        Obstacle nearby — reduce speed, planner steers around it.
+    PLAN           All arcs poor — brief stop, re-evaluate.
+    PROBE          Small cautious pivot (whole rover) to gather new laser data.
+    RECOVER        Blocking reverse + spin fallback (last resort).
     EMERGENCY_STOP Manual kill — brake.  Only start() exits.
+
+    Hardware
+    --------
+    VL53L0X     Fixed centre-forward (no scanning servo).
+    Steering    Ackermann servo linkage (±50°).
+    Drive       2WD rear, dual independent PID RPM control.
+    Odometry    UKF fused (encoders + gyro + magnetometer + steering angle).
 
     Parameters
     ----------
     car : motor.CarSystem
-        Low-level motor controller.
+        Low-level Ackermann motor controller.
     get_forward_distance : callable → float
-        Returns forward laser distance in cm (servo already centred).
-    sensor_system : sensors.SensorSystem
-        Used for scan_sweep() during SCANNING state.
+        Returns forward VL53L0X distance in cm (fixed sensor, no servo).
     get_rear_distance : callable → float | None
-        Rear distance in cm (optional; -1 when absent).
+        Rear distance in cm (optional; currently unused — no rear sensor).
     """
 
     # ── Tuning constants ──────────────────────────────
@@ -382,6 +457,15 @@ class AutoPilot:
     # Emergency
     EMERGENCY_STOP_CM = 10
 
+    # ── Planner constants ──────────────────────────────
+    CAUTION_CM        = 80     # Start planner steering below this range
+    CAUTION_SPEED     = 35     # Reduced speed in CAUTION
+    PLAN_PAUSE_S      = 0.15   # Brief stop in PLAN before re-scoring
+    PROBE_SPEED       = 30     # Slow creep during PROBE
+    PROBE_TIMEOUT_S   = 1.0    # Max time in PROBE before RECOVER
+    PROBE_ANGLE_DEG   = PROBE_ANGLE_DEG  # from obstacle_memory defaults
+    REPLAN_ARC_BLOCKED = ARC_BLOCKED_THRESHOLD  # cost threshold
+
     TUNING_KEYS = [
         "BASE_SPEED",
         "PID_KP", "PID_KI", "PID_KD", "PID_LIMIT",
@@ -397,22 +481,26 @@ class AutoPilot:
         "SPIN_SPEED", "SPIN_DURATION", "STOP_PAUSE",
         # Emergency
         "EMERGENCY_STOP_CM",
+        # Planner
+        "CAUTION_CM", "CAUTION_SPEED",
+        "PLAN_PAUSE_S", "PROBE_SPEED", "PROBE_TIMEOUT_S",
     ]
 
     def __init__(self, car, get_forward_distance,
                  sensor_system=None, get_rear_distance=None):
-        # Motor wrapper
+        # Motor wrapper (Ackermann steering + 2WD rear drive)
         self._motor = MotorDriver(car, min_correction=self.MIN_CORRECTION_PWM,
                                   noise_gate=self.CORRECTION_NOISE_GATE)
         self._car = car
 
-        # Distance sensor (threaded + median)
+        # Distance sensor (threaded + median) — VL53L0X fixed centre-forward
         self._front_sensor = DistanceSensor(get_forward_distance, "front_laser")
 
-        # Scan capability (needs the full SensorSystem for sweep)
+        # Legacy: sensor_system accepted but not used for scanning
+        # (VL53L0X is fixed; servo only has camera now)
         self._sensor_system = sensor_system
 
-        # Rear distance (optional)
+        # Rear distance (optional — currently no rear sensor)
         self._get_rear_distance = get_rear_distance
 
         # Gyroscope
@@ -446,6 +534,14 @@ class AutoPilot:
         self._gyro_calibrated = False
         self._last_scan_data = []      # most recent sweep results
         self._scan_data_fresh = False  # True when new scan available
+
+        # ── Forward Obstacle Memory + Planner ──────────
+        self._planner = ForwardObstacleMemory()
+        self._current_steer_deg = 0.0  # last commanded steering angle
+        self._plan_enter_time = 0.0    # timestamp when PLAN entered
+        self._probe_enter_time = 0.0   # timestamp when PROBE entered
+        self._probe_direction = 1      # +1 right, -1 left
+        self._last_planner_log_time = 0.0
 
     # ── Properties ─────────────────────────────────
 
@@ -502,6 +598,16 @@ class AutoPilot:
             return True
         return False
 
+    @property
+    def planner_debug(self):
+        """Latest PlannerDebug snapshot (dict) for telemetry."""
+        return self._planner.debug.to_dict()
+
+    @property
+    def planner_memory(self):
+        """Forward obstacle memory instance (for external telemetry)."""
+        return self._planner
+
     # ── Tuning API ─────────────────────────────────
 
     @classmethod
@@ -514,14 +620,14 @@ class AutoPilot:
     # ── Lifecycle ──────────────────────────────────
 
     def start(self):
-        """Calibrate gyro, centre servo, reset PID, begin CRUISING."""
+        """Calibrate gyro, reset PID, begin CRUISE."""
         self._gyro.calibrate(duration=self.CALIBRATION_TIME)
         self._gyro_calibrated = self._gyro.available
         self._pid = PIDController(
             kp=self.PID_KP, ki=self.PID_KI,
             kd=self.PID_KD, output_limit=self.PID_LIMIT,
         )
-        self._state = State.CRUISING
+        self._state = State.CRUISE
         self._turn_direction = ""
         self._dodge_direction = 0
         self._heading = 0.0
@@ -530,16 +636,22 @@ class AutoPilot:
         self._last_pid_time = time.time()
         self._last_scan_data = []
         self._scan_data_fresh = False
+        self._current_steer_deg = 0.0
+        self._plan_enter_time = 0.0
+        self._probe_enter_time = 0.0
+        self._probe_direction = 1
 
-        # Centre the laser scanner servo
-        if self._sensor_system:
-            self._sensor_system.center_servo()
+        # Reset planner memory
+        self._planner.clear()
+
+        # Centre steering servo (start straight)
+        self._car.set_steering(0)
 
         self._active = True
-        print("🚀 [ROVER] Laser-scanner autonomous navigation STARTED")
+        print("🚀 [ROVER] Planner-based autonomous navigation STARTED")
 
     def stop(self):
-        """Halt motors, centre servo, deactivate FSM."""
+        """Halt motors, centre steering, deactivate FSM."""
         self._active = False
         self._motor.brake()
         self._pid.reset()
@@ -549,9 +661,11 @@ class AutoPilot:
         self._target_yaw = 0.0
         self._dodge_direction = 0
         self._turn_direction = ""
-        if self._sensor_system:
-            self._sensor_system.center_servo()
-        print("🛑 [ROVER] Laser-scanner autonomous navigation STOPPED")
+        self._current_steer_deg = 0.0
+        self._planner.clear()
+        # Centre steering servo on stop
+        self._car.set_steering(0)
+        print("🛑 [ROVER] Planner-based autonomous navigation STOPPED")
 
     # ── Sensor helpers ─────────────────────────────
 
@@ -635,10 +749,42 @@ class AutoPilot:
                   f"Gyro_Z: {gyro_z:+.2f}°/s | "
                   f"PID: {correction:+.1f}{extra_str}")
 
+    def _maybe_log_planner(self, transition, front_dist, planner_result):
+        """Rate-limited planner state-transition log."""
+        now = time.time()
+        if now - self._last_planner_log_time < 0.3:
+            return
+        self._last_planner_log_time = now
+        dbg = self._planner.debug
+        extra = ""
+        if planner_result is not None:
+            extra = (f" | best:{planner_result.best_arc_deg:+.0f}° "
+                     f"cost:{planner_result.best_arc_cost:.0f} "
+                     f"map:[{dbg.hazard_bins_summary}]")
+        print(f"🗺️  [{transition}] Front:{front_dist:.0f}cm "
+              f"obs:{dbg.obstacle_count} clr:{dbg.clear_corridor_count}{extra}")
+
+    # ── Odometry helpers (lazy import) ──────────────
+
+    @staticmethod
+    def _get_odom_pose():
+        """Return (x, y, heading_rad) from fused odometry, or None."""
+        try:
+            from odometry_integration import get_position, get_heading
+            x, y = get_position()
+            heading = get_heading()  # radians
+            return x, y, heading
+        except Exception:
+            return None
+
     # ── FSM Core ───────────────────────────────────
 
     def update(self):
-        """Single tick of the 4-state FSM (called at ~20 Hz)."""
+        """Single tick of the 6-state FSM (called at ~20 Hz).
+
+        States: CRUISE → CAUTION → PLAN → PROBE → RECOVER → CRUISE
+        EMERGENCY_STOP is always checked first and stays locked.
+        """
         if not self._active:
             return
 
@@ -658,121 +804,157 @@ class AutoPilot:
         if 0 < dt < 0.5:
             self._heading += gyro_z * dt
 
-        # ── STATE: CRUISING ──────────────────────────
-        if self._state == State.CRUISING:
+        # ── Read sensors ──────────────────────────────
+        front_dist = self._front_sensor.read()   # cm, -1 on error
+        display_dist = front_dist if front_dist >= 0 else 999
+        front_m = front_dist / 100.0 if front_dist > 0 else 999.0
+
+        # ── Emergency brake (ALL states except EMERGENCY_STOP) ──
+        if 0 < front_dist < self.EMERGENCY_STOP_CM:
+            self._motor.brake()
+            print(f"\n🚨 [EMERGENCY BRAKE] Obstacle at {front_dist:.0f}cm!")
+            self._state = State.PLAN
+            self._plan_enter_time = now
+            return
+
+        # ── Feed planner with pose + laser ────────────
+        pose = self._get_odom_pose()
+        if pose is not None:
+            rx, ry, rh = pose
+            planner_result = self._planner.plan(
+                rx, ry, rh, front_m, self._current_steer_deg
+            )
+        else:
+            planner_result = None
+
+        # ── STATE: CRUISE ────────────────────────────
+        if self._state == State.CRUISE:
             self._turn_direction = ""
             self._dodge_direction = 0
 
-            # Read forward distance (servo should already be centred)
-            front_dist = self._front_sensor.read()
-            display_dist = front_dist if front_dist >= 0 else 999
-
-            # Emergency hard stop
-            if 0 < front_dist < self.EMERGENCY_STOP_CM:
-                self._motor.brake()
-                print(f"\n🚨 [EMERGENCY BRAKE] Obstacle at {front_dist:.0f}cm!")
-                self._state = State.SCANNING
+            # Transition to CAUTION when obstacle within caution range
+            if 0 < front_dist < self.CAUTION_CM:
+                self._state = State.CAUTION
+                self._maybe_log_planner("CRUISE→CAUTION", front_dist, planner_result)
+                # Fall through to CAUTION handling below
+            else:
+                # Normal PID cruise — open road
+                correction = self._pid.update(gyro_z, dt)
+                self._last_pid_correction = correction
+                self._motor.forward(self.BASE_SPEED, correction)
+                self._maybe_print_status(display_dist, gyro_z, correction)
                 return
 
-            # Obstacle threshold → scan
-            if 0 < front_dist < self.OBSTACLE_CM:
-                self._motor.stop()
-                print(f"\n🔍 [CRUISE→SCAN] Obstacle at {front_dist:.0f}cm "
-                      f"(< {self.OBSTACLE_CM}cm) — stopping to scan")
-                self._state = State.SCANNING
+        # ── STATE: CAUTION ───────────────────────────
+        if self._state == State.CAUTION:
+            # Use planner arc scoring to steer around obstacles
+            if planner_result is not None and not planner_result.all_arcs_blocked:
+                steer_deg = planner_result.best_arc_deg
+                self._current_steer_deg = steer_deg
+                self._dodge_direction = -1 if steer_deg < -3 else (1 if steer_deg > 3 else 0)
+                self._turn_direction = (
+                    "left" if steer_deg < -3 else "right" if steer_deg > 3 else ""
+                )
+
+                # Use reduced speed when near obstacles
+                speed = self.CAUTION_SPEED if front_dist < self.OBSTACLE_CM else self.BASE_SPEED
+                self._motor.forward_steer(speed, steer_deg)
+
+                # Return to CRUISE if obstacle clears
+                if front_dist < 0 or front_dist >= self.CAUTION_CM:
+                    self._state = State.CRUISE
+                    self._pid.reset()
+                    self._last_pid_time = time.time()
+
+                self._maybe_print_status(
+                    display_dist, gyro_z, steer_deg,
+                    f"Arc:{steer_deg:+.0f}° cost:{planner_result.best_arc_cost:.0f}"
+                )
                 return
 
-            # Normal PID cruise
-            correction = self._pid.update(gyro_z, dt)
-            self._last_pid_correction = correction
-            self._motor.forward(self.BASE_SPEED, correction)
-            self._maybe_print_status(display_dist, gyro_z, correction)
+            # All arcs blocked → PLAN
+            self._motor.stop()
+            self._state = State.PLAN
+            self._plan_enter_time = now
+            self._maybe_log_planner("CAUTION→PLAN", front_dist, planner_result)
             return
 
-        # ── STATE: SCANNING (blocking sweep, ~0.6 s) ─
-        if self._state == State.SCANNING:
-            self._turn_direction = ""
+        # ── STATE: PLAN ──────────────────────────────
+        if self._state == State.PLAN:
+            # Brief pause to let planner re-evaluate (non-blocking on next tick)
+            elapsed = now - self._plan_enter_time
             self._motor.stop()
 
-            if self._sensor_system is None:
-                # No scanner available — go to fallback reverse+spin
-                print("⚠️  No sensor_system for scanning — fallback")
-                self._do_fallback()
+            if elapsed < self.PLAN_PAUSE_S:
+                return  # wait one more tick
+
+            # Re-score arcs after pause
+            if planner_result is not None and not planner_result.all_arcs_blocked:
+                # Found a way out → resume CAUTION
+                self._state = State.CAUTION
+                self._maybe_log_planner("PLAN→CAUTION", front_dist, planner_result)
                 return
 
-            # Perform full sweep
-            print("🔄 Sweeping -30° to +30° …")
-            scan_data = self._sensor_system.scan_sweep(
-                start_deg=-self.SCAN_RANGE_DEG,
-                end_deg=self.SCAN_RANGE_DEG,
-                step_deg=self.SCAN_STEP_DEG,
-            )
-            self._last_scan_data = scan_data
-            self._scan_data_fresh = True
-
-            # Log sweep results
-            readings_str = "  ".join(
-                f"{a:+3d}°:{d:.0f}cm" for a, d in scan_data
-            )
-            print(f"📊 Scan: {readings_str}")
-
-            # Analyse
-            analysis = self._analyse_scan(scan_data, self.ALL_BLOCKED_CM)
-            print(f"📊 Left avg: {analysis['left_avg']}cm | "
-                  f"Right avg: {analysis['right_avg']}cm | "
-                  f"Best: {analysis['best_angle']:+d}° @ {analysis['best_dist']}cm | "
-                  f"Decision: {analysis['direction']}")
-
-            if analysis["direction"] == "blocked":
-                print("⛔ Both sectors blocked — fallback reverse+spin")
-                self._do_fallback()
-                return
-
-            # Set up turn
-            self._turn_direction = analysis["direction"]
-            self._dodge_direction = -1 if analysis["direction"] == "left" else 1
-            self._turn_target_angle = analysis["angle"]
-            self._turn_start_heading = self._heading
-            self._state = State.TURNING
-            print(f"🔀 [SCAN→TURN] Pivoting {analysis['direction']} "
-                  f"~{analysis['angle']:.0f}°")
+            # Still blocked → enter PROBE
+            self._state = State.PROBE
+            self._probe_enter_time = now
+            # Alternate probe direction each time
+            self._probe_direction *= -1
+            self._maybe_log_planner("PLAN→PROBE", front_dist, planner_result)
             return
 
-        # ── STATE: TURNING (pivot until heading delta met) ──
-        if self._state == State.TURNING:
-            target_delta = self._turn_target_angle
-            actual_delta = abs(self._heading - self._turn_start_heading)
+        # ── STATE: PROBE ─────────────────────────────
+        if self._state == State.PROBE:
+            elapsed = now - self._probe_enter_time
 
-            if actual_delta >= target_delta:
-                # Turn complete
+            if elapsed > self.PROBE_TIMEOUT_S:
+                # Probe timed out → RECOVER (fallback)
                 self._motor.stop()
-                time.sleep(0.1)
-                self._pid.reset()
-                self._last_pid_time = time.time()
-                self._target_yaw = self._heading  # new straight heading
-                self._turn_direction = ""
-                self._dodge_direction = 0
-                self._state = State.CRUISING
-                print(f"    ✅ Turn complete ({actual_delta:.1f}° of "
-                      f"{target_delta:.0f}°) — resuming CRUISING\n")
+                self._state = State.RECOVER
+                print("    ⏳ PROBE timeout → RECOVER")
                 return
 
-            # Continue pivoting
-            if self._turn_direction == "left":
-                self._car.pivot_turn("left", self.TURN_SPEED)
-            else:
-                self._car.pivot_turn("right", self.TURN_SPEED)
+            # Small cautious steering to gather new observations
+            probe_steer = self.PROBE_ANGLE_DEG * self._probe_direction
+            self._motor.forward_steer(self.PROBE_SPEED, probe_steer)
+            self._current_steer_deg = probe_steer
+
+            # Check if planner found a path after gathering new info
+            if planner_result is not None and not planner_result.all_arcs_blocked:
+                self._motor.stop()
+                self._state = State.CAUTION
+                self._maybe_log_planner("PROBE→CAUTION", front_dist, planner_result)
+                return
+
+            # Emergency check during probe
+            if 0 < front_dist < self.EMERGENCY_STOP_CM:
+                self._motor.brake()
+                self._state = State.RECOVER
+                return
 
             self._maybe_print_status(
-                999, gyro_z, 0,
-                f"Pivot {self._turn_direction} | "
-                f"{actual_delta:.1f}°/{target_delta:.0f}°")
+                display_dist, gyro_z, probe_steer,
+                f"PROBE {elapsed:.1f}s dir:{'R' if self._probe_direction > 0 else 'L'}"
+            )
             return
 
-    # ── Fallback manoeuvre (reverse + spin) ────────
+        # ── STATE: RECOVER ───────────────────────────
+        if self._state == State.RECOVER:
+            self._do_fallback()
+            return
+
+    # ── Fallback manoeuvre (reverse + spin) — odometry-aware ────────
+
+    # Distance/angle targets for odometry-based fallback
+    REVERSE_DIST_M   = 0.20   # reverse 20 cm
+    SPIN_ANGLE_DEG   = 60.0   # spin 60 degrees
 
     def _do_fallback(self):
-        """Blocking: stop → reverse → random spin → resume cruise."""
+        """Blocking: stop, reverse (distance-based), spin (angle-based), resume.
+
+        When odometry is active, uses distance/angle targets instead of
+        fixed durations.  Falls back to time-based if odometry unavailable.
+        """
         self._motor.stop()
         time.sleep(self.STOP_PAUSE)
         if not self._active:
@@ -781,9 +963,11 @@ class AutoPilot:
         # Reverse if rear clear
         rear_dist = self._read_rear()
         if rear_dist < 0 or rear_dist > self.REAR_CLEAR_CM:
-            print(f"    ↩️  Reversing {self.REVERSE_DURATION:.1f}s "
+            print(f"    ↩️  Reversing ~{self.REVERSE_DIST_M*100:.0f}cm "
                   f"(rear: {rear_dist:.0f}cm)")
-            self._motor.reverse(self.REVERSE_SPEED, self.REVERSE_DURATION)
+            self._motor.reverse(self.REVERSE_SPEED,
+                                duration=self.REVERSE_DURATION,
+                                target_dist_m=self.REVERSE_DIST_M)
         else:
             print(f"    ⛔ Rear blocked ({rear_dist:.0f}cm) — skip reverse")
 
@@ -794,16 +978,18 @@ class AutoPilot:
         if not self._active:
             return
 
-        # Spin (alternate direction)
+        # Spin (alternate direction) — angle-based with time fallback
         import random
         spin_dir = random.choice(["left", "right"])
-        print(f"    🔄 Spinning {spin_dir} {self.SPIN_DURATION:.1f}s")
+        print(f"    🔄 Spinning {spin_dir} ~{self.SPIN_ANGLE_DEG:.0f}°")
         if spin_dir == "left":
-            self._car.pivot_turn("left", self.SPIN_SPEED)
+            self._motor.spin_left(self.SPIN_SPEED,
+                                  duration=self.SPIN_DURATION,
+                                  target_angle_deg=self.SPIN_ANGLE_DEG)
         else:
-            self._car.pivot_turn("right", self.SPIN_SPEED)
-        time.sleep(self.SPIN_DURATION)
-        self._car.stop()
+            self._motor.spin_right(self.SPIN_SPEED,
+                                   duration=self.SPIN_DURATION,
+                                   target_angle_deg=self.SPIN_ANGLE_DEG)
 
         if not self._active:
             return
@@ -815,8 +1001,9 @@ class AutoPilot:
         self._target_yaw = 0.0
         self._turn_direction = ""
         self._dodge_direction = 0
-        self._state = State.CRUISING
-        print("    ✅ Fallback complete — resuming CRUISING\n")
+        self._current_steer_deg = 0.0
+        self._state = State.CRUISE
+        print("    ✅ Fallback complete — resuming CRUISE\n")
 
 
 # ── Standalone test ────────────────────────────────────

@@ -1,10 +1,16 @@
-import { Navigation, AlertTriangle, RotateCcw, OctagonX, Compass, Activity, Gauge, Ruler, Play, Square, RefreshCw, Crosshair, ArrowRightLeft } from "lucide-react";
+import { Navigation, AlertTriangle, RotateCcw, OctagonX, Compass, Activity, Gauge, Ruler, Play, Square, RefreshCw, Crosshair, ArrowRightLeft, Search, Map, Eye } from "lucide-react";
 
 export type AutopilotStatus = 
   | "CRUISING"
   | "DODGING"
   | "ESCAPING"
-  | "EMERGENCY_STOP";
+  | "EMERGENCY_STOP"
+  // New planner states
+  | "CRUISE"
+  | "CAUTION"
+  | "PLAN"
+  | "PROBE"
+  | "RECOVER";
 
 interface AutopilotTelemetryProps {
   status: AutopilotStatus;
@@ -66,6 +72,47 @@ const STATUS_CONFIG: Record<AutopilotStatus, {
     bgColor: "bg-destructive/20",
     borderColor: "border-destructive",
     description: "Emergency — motors locked",
+  },
+  // New planner-aware states
+  CRUISE: {
+    icon: Navigation,
+    label: "CRUISE",
+    color: "text-primary",
+    bgColor: "bg-primary/20",
+    borderColor: "border-primary",
+    description: "Open road — PID heading control",
+  },
+  CAUTION: {
+    icon: AlertTriangle,
+    label: "CAUTION",
+    color: "text-amber-400",
+    bgColor: "bg-amber-400/20",
+    borderColor: "border-amber-400",
+    description: "Obstacle nearby — planner steering",
+  },
+  PLAN: {
+    icon: Map,
+    label: "PLAN",
+    color: "text-cyan-400",
+    bgColor: "bg-cyan-400/20",
+    borderColor: "border-cyan-400",
+    description: "Re-evaluating hazard map",
+  },
+  PROBE: {
+    icon: Eye,
+    label: "PROBE",
+    color: "text-purple-400",
+    bgColor: "bg-purple-400/20",
+    borderColor: "border-purple-400",
+    description: "Cautious pivot to gather data",
+  },
+  RECOVER: {
+    icon: RotateCcw,
+    label: "RECOVER",
+    color: "text-orange-500",
+    bgColor: "bg-orange-500/20",
+    borderColor: "border-orange-500",
+    description: "Reverse + spin recovery",
   },
 };
 

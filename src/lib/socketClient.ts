@@ -3,8 +3,10 @@ import { io, Socket } from 'socket.io-client';
 // Socket instance
 let socket: Socket | null = null;
 
-// Telemetry callback
+// Telemetry callback (legacy, for backward compatibility)
 let telemetryCallback: ((data: TelemetryData) => void) | null = null;
+// Telemetry subscribers (new, supports multiple subscribers)
+const telemetrySubscribers = new Set<(data: TelemetryData) => void>();
 let cameraResponseCallback: ((data: CameraResponse) => void) | null = null;
 
 // Connection state callback - fired when socket connects/disconnects
@@ -35,7 +37,7 @@ export interface TelemetryData {
   autonomous_mode?: boolean;
   autonomous_state?: string;
   autonomous_target_speed?: number;
-  sonar_distance?: number;
+  laser_distance?: number;
   mpu6050_enabled?: boolean;
   // MPU6050 Gyro telemetry
   gyro_z?: number;
@@ -108,6 +110,22 @@ export interface TelemetryData {
       on_target?: boolean;
     }>;
   };
+  // Fused Odometry telemetry
+  odometry_x_m?: number;
+  odometry_y_m?: number;
+  odometry_heading_deg?: number;
+  odometry_v_linear?: number;
+  odometry_v_angular?: number;
+  odometry_active?: boolean;
+  // Stuck/slip detection
+  stuck_detected?: boolean;
+  slip_detected?: boolean;
+  // Obstacle memory
+  obstacle_memory?: Array<{ x: number; y: number; age_s: number }>;
+  // Path trail
+  odometry_trail?: Array<{ x: number; y: number }>;
+  // RTH state
+  return_to_start_active?: boolean;
 }
 
 export interface CameraResponse {
@@ -170,9 +188,12 @@ export function connectToServer(serverIp: string, port: number = 5000): Promise<
     });
 
     socket.on('telemetry_update', (data: TelemetryData) => {
+      // Call legacy callback (for backward compatibility)
       if (telemetryCallback) {
         telemetryCallback(data);
       }
+      // Call all subscribers
+      telemetrySubscribers.forEach((callback) => callback(data));
     });
 
     socket.on('camera_response', (data: CameraResponse) => {
@@ -825,6 +846,26 @@ export function emitResetDriverData(): void {
 }
 
 /**
+ * Reset odometry pose to origin (or specified position)
+ */
+export function emitOdometryReset(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 📍 ODOMETRY RESET`);
+    socket.emit('odometry_reset', {});
+  }
+}
+
+/**
+ * Request return-to-start behavior
+ */
+export function emitReturnToStart(): void {
+  if (socket && socket.connected) {
+    console.log(`[UI Control] 🔙 RETURN TO START`);
+    socket.emit('return_to_start', {});
+  }
+}
+
+/**
  * Disconnect from the backend
  */
 export function disconnectFromServer(): void {
@@ -832,6 +873,7 @@ export function disconnectFromServer(): void {
     socket.disconnect();
     socket = null;
     telemetryCallback = null;
+    telemetrySubscribers.clear();
   }
 }
 
@@ -865,10 +907,21 @@ export function onHeartbeatStatus(callback: (active: boolean) => void): void {
 
 
 /**
- * Subscribe to telemetry updates
+ * Subscribe to telemetry updates (legacy, single callback)
  */
 export function onTelemetry(callback: (data: TelemetryData) => void): void {
   telemetryCallback = callback;
+}
+
+/**
+ * Subscribe to telemetry updates (new, supports multiple subscribers)
+ * Returns an unsubscribe function
+ */
+export function subscribeTelemetry(callback: (data: TelemetryData) => void): () => void {
+  telemetrySubscribers.add(callback);
+  return () => {
+    telemetrySubscribers.delete(callback);
+  };
 }
 
 /**
@@ -1238,6 +1291,7 @@ export default {
   isConnected,
   onConnectionStateChange,
   onTelemetry,
+  subscribeTelemetry,
   emitEngineStart,
   emitEngineStop,
   emitThrottle,

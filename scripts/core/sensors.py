@@ -1,18 +1,15 @@
 """
-sensors.py — Laser Scanner (VL53L0X via Pico on Pan/Tilt Gimbal)
+sensors.py — VL53L0X Forward Laser (Fixed Centre) + Camera Pan/Tilt Gimbal
 
 Hardware
 ────────
-  VL53L0X          Pico I2C — time-of-flight laser via UART bridge
-  Pan/Tilt Gimbal  Pico GP2/GP3 — controlled via UART PT: protocol
+  VL53L0X          Pico I2C — fixed centre-forward, no servo scanning
+  Pan/Tilt Gimbal  Pico GP6/GP7 — camera only (laser is NOT on the gimbal)
 
-The VL53L0X laser is mounted on the camera pan/tilt gimbal (Pico servos).
-Scanning sweeps the pan servo via UART commands while tilt stays centred.
-Range: ±30° (pan servo 60–120°, centre = 90°).
-
-User-space angles:  -30 (left)  …  0 (center)  …  +30 (right)
-Pan servo angles:    60           90              120
-Mapping: pan_angle = 90 + user_angle
+The VL53L0X laser is mounted in a fixed bracket, pointing straight ahead.
+The pan/tilt gimbal carries the camera only and is controlled separately.
+No laser scanning sweep is available — the planner works with the single
+fixed forward beam + odometry-based obstacle memory.
 """
 
 try:
@@ -23,7 +20,7 @@ except (ImportError, RuntimeError):
 
 import time
 
-# ── Pico sensor bridge (VL53L0X + pan/tilt now on Pico) ────────
+# ── Pico sensor bridge (VL53L0X fixed forward + pan/tilt camera) ────
 try:
     from pico_sensor_reader import (
         get_laser_distance_mm as _pico_laser_mm,
@@ -32,7 +29,7 @@ try:
         send_center as _pico_send_center,
     )
     _pico_available = True
-    print("🔴 VL53L0X: Reading from Pico bridge (UART), laser on pan/tilt gimbal")
+    print("🔴 VL53L0X: Reading from Pico bridge (UART), fixed centre-forward")
 except ImportError:
     _pico_available = False
     _pico_laser_mm = lambda: -1
@@ -52,7 +49,11 @@ _SETTLE_TIME = 0.05     # 50 ms settle after each pan move
 
 
 class SensorSystem:
-    """Manages the laser scanner (VL53L0X on pan/tilt gimbal via Pico)."""
+    """Manages forward VL53L0X laser (fixed) and camera pan/tilt (via Pico).
+
+    The VL53L0X is fixed centre-forward — no scanning servo.
+    Pan/tilt commands only move the camera gimbal.
+    """
 
     def __init__(self):
         # 1. GPIO mode
@@ -64,23 +65,23 @@ class SensorSystem:
         except Exception as e:
             print(f"⚠️ GPIO Config Error: {e}")
 
-        # 2. Laser on pan/tilt (controlled via Pico UART, no Pi GPIO needed)
+        # 2. Laser is fixed forward (not on gimbal)
         self._laser_available = _pico_available
 
-        # 3. Centre the pan/tilt on start-up
+        # 3. Centre the camera pan/tilt on start-up
         _pico_send_center()
         time.sleep(0.3)
-        print("🎯 Laser scanner ready (pan/tilt centred via Pico)")
+        print("🎯 VL53L0X fixed forward | Camera pan/tilt centred via Pico")
 
     # ──────────────────────────────────────────────────
-    #  Pan/tilt servo helpers (via Pico UART)
+    #  Camera pan/tilt servo helpers (via Pico UART)
     # ──────────────────────────────────────────────────
 
     def set_servo_angle(self, user_deg):
-        """Set pan servo to a user-space angle (-30 … 0 … +30).
+        """Set camera pan servo to a user-space angle (-30 … 0 … +30).
 
         -30 = hard left, 0 = centre, +30 = hard right.
-        Tilt stays centred. Sends PT: command to Pico via UART.
+        This controls the CAMERA gimbal only (not the laser).
         """
         user_deg = max(-30, min(30, user_deg))
         pan = _PAN_CENTER + user_deg   # e.g. 90 + (-30) = 60
@@ -88,12 +89,12 @@ class SensorSystem:
         time.sleep(_SETTLE_TIME)
 
     def center_servo(self):
-        """Return pan/tilt to forward-facing centre."""
+        """Return camera pan/tilt to forward-facing centre."""
         _pico_send_center()
         time.sleep(_SETTLE_TIME)
 
     # ──────────────────────────────────────────────────
-    #  Laser distance helpers
+    #  Laser distance helpers (VL53L0X — fixed forward)
     # ──────────────────────────────────────────────────
 
     def read_laser_mm(self):
@@ -121,68 +122,33 @@ class SensorSystem:
             return -1
 
     def get_forward_distance(self):
-        """Centre the servo and return forward distance in cm.
+        """Return forward distance in cm from the fixed VL53L0X laser.
 
-        Drop-in replacement for the old ``get_sonar_distance()`` —
-        used by the smoothing buffer and physics_loop.
+        The laser is fixed centre-forward — no servo movement needed.
+        Drop-in replacement for the old ``get_sonar_distance()``.
         """
-        self.center_servo()
         return self.read_laser_cm()
 
-    # kept for backward-compat (main.py references)
-    def get_sonar_distance(self):
-        """Alias → get_forward_distance() for code that still says 'sonar'."""
-        return self.get_forward_distance()
-
-    def get_sonar_distance_raw(self):
-        """Alias → get_forward_distance() for backward compat. Sonar hardware removed."""
-        return self.get_forward_distance()
-
-    # Backward-compat aliases
-    def get_front_sonar_distance(self):
-        """Alias → get_forward_distance() for backward compatibility."""
-        return self.get_forward_distance()
-
-    def get_rear_sonar_distance(self):
-        """Alias → get_forward_distance() for backward compatibility."""
-        return self.get_forward_distance()
-
     # ──────────────────────────────────────────────────
-    #  Full sweep scan (-30° to +30° in STEP increments)
+    #  Scan sweep (legacy compat — returns single forward reading)
     # ──────────────────────────────────────────────────
 
     def scan_sweep(self, start_deg=-30, end_deg=30, step_deg=10):
-        """Sweep pan servo and sample VL53L0X at each angle.
+        """Legacy compatibility — returns a single forward reading at 0°.
 
-        Parameters
-        ----------
-        start_deg : int   Left-most user-space angle (default -30).
-        end_deg   : int   Right-most user-space angle (default +30).
-        step_deg  : int   Angle increment (default 10).
-
-        Returns
-        -------
-        list[tuple[int, float]]
-            ``[(angle_deg, distance_cm), …]`` for each step.
-            distance_cm is -1 when the laser read fails.
-
-        Timing: 7 steps × ~0.05 s settle = ~0.35 s total.
+        The VL53L0X is fixed; pan servo is camera-only. No real sweep
+        is possible. Returns [(0, forward_cm)] so callers that expect
+        sweep data get a safe single reading.
         """
-        readings = []
-        for angle in range(start_deg, end_deg + 1, step_deg):
-            self.set_servo_angle(angle)
-            dist = self.read_laser_cm()
-            readings.append((angle, dist))
-        # Return pan to centre after sweep
-        self.center_servo()
-        return readings
+        dist = self.read_laser_cm()
+        return [(0, dist)]
 
     # ──────────────────────────────────────────────────
     #  Cleanup
     # ──────────────────────────────────────────────────
 
     def cleanup(self):
-        """Centre pan/tilt on shutdown."""
+        """Centre camera pan/tilt on shutdown."""
         try:
             _pico_send_center()
         except Exception:

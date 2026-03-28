@@ -302,6 +302,7 @@ class TelemetryPostman:
         # ── 5. autonomy ─────────────────────────────────────────────────
         auto_state    = str(cs.get("autonomous_state", "IDLE"))
         obstacle_state = str(cs.get("obstacle_state", "IDLE"))
+        planner = cs.get("planner_debug", {})
         line = _build_line(
             "autonomy",
             {"host": HOST_TAG, "state": auto_state, "obstacle": obstacle_state},
@@ -313,6 +314,13 @@ class TelemetryPostman:
                 "slalom_sign"           : cs.get("slalom_sign", 0),
                 "speed_limit"           : cs.get("speed_limit", 100),
                 "speed_limit_enabled"   : cs.get("speed_limit_enabled", False),
+                # Planner fields
+                "planner_active"        : planner.get("planner_active", False),
+                "obstacle_mem_count"    : planner.get("obstacle_count", 0),
+                "best_arc_deg"          : planner.get("best_arc_deg", 0.0),
+                "best_arc_cost"         : planner.get("best_arc_cost", 0.0),
+                "probe_active"          : planner.get("probe_active", False),
+                "fwd_corridor_conf"     : planner.get("forward_corridor_confidence", 0.0),
             },
             ts,
         )

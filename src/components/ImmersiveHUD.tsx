@@ -65,6 +65,13 @@ interface ImmersiveHUDProps {
   gamepadConnected?: boolean;
   isEngineRunning?: boolean;
   inputMode?: "console" | "device" | null;
+  // Odometry overlay
+  odomX?: number;
+  odomY?: number;
+  odomHeading?: number;
+  odomActive?: boolean;
+  stuckDetected?: boolean;
+  slipDetected?: boolean;
 }
 
 export const ImmersiveHUD = ({
@@ -107,6 +114,12 @@ export const ImmersiveHUD = ({
   gamepadConnected = false,
   isEngineRunning = false,
   inputMode = null,
+  odomX = 0,
+  odomY = 0,
+  odomHeading = 0,
+  odomActive = false,
+  stuckDetected = false,
+  slipDetected = false,
 }: ImmersiveHUDProps) => {
   const { triggerHaptic, playSound } = useGameFeedback();
   const [steeringDirection, setSteeringDirection] = useState<'left' | 'right' | null>(null);

@@ -29,7 +29,7 @@ export interface TelemetryData {
   autonomous_mode?: boolean;
   autonomous_state?: string;
   autonomous_target_speed?: number;
-  sonar_distance?: number;
+  laser_distance?: number;
   camera_enabled?: boolean;
   vision_active?: boolean;
 }
