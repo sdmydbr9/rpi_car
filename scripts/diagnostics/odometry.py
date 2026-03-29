@@ -18,6 +18,8 @@ import sys
 import math
 import json
 import time
+import csv
+import logging
 import threading
 import signal
 import atexit
@@ -103,6 +105,465 @@ gamepad_gear = "1"
 _gp_select_last_press = 0.0
 _GP_DOUBLE_PRESS_WINDOW = 0.6
 
+# ── RTH (Return-to-Home) state ──────────────────────────────────
+rth_active = False
+rth_thread: threading.Thread = None
+rth_waypoints = []       # list of (x,y) waypoints for return path
+rth_current_wp = 0       # index of current waypoint being pursued
+rth_total_wp = 0         # total waypoints
+rth_status = "idle"      # idle | navigating | obstacle | arrived | cancelled
+
+# RTH navigation constants
+_RTH_WAYPOINT_SPACING_M = 0.30  # thin trail to ~30 cm
+_RTH_ARRIVE_DIST_M = 0.20       # 20 cm arrival tolerance per waypoint
+_RTH_FINAL_ARRIVE_M = 0.10      # 10 cm for origin
+_RTH_NAV_SPEED = 50              # PWM % for normal driving
+_RTH_SLOW_SPEED = 40             # PWM % for large heading error
+_RTH_STEER_GAIN = 1.8
+_RTH_MAX_STEER_DEG = 35
+_RTH_OBSTACLE_DIST_MM = 200     # brake if laser < this
+_RTH_OBSTACLE_CLEAR_MM = 300    # resume when laser > this
+_RTH_STUCK_WINDOW_S = 2.0       # seconds to evaluate stuck condition
+_RTH_STUCK_DIST_M = 0.015      # must move at least this much in the window
+_RTH_MAX_STUCK_COUNT = 3        # skip waypoint after this many stuck events
+_RTH_UTURN_THRESHOLD_DEG = 90   # heading error above this → execute U-turn
+_RTH_BREAKAWAY_STEP = 5         # PWM % to add per tick during breakaway ramp
+_RTH_BREAKAWAY_MAX = 90         # maximum PWM % during breakaway
+_RTH_RPM_MOVING = 3.0           # RPM threshold to consider wheels spinning
+
+# Breakaway state — persists across ticks so ramp doesn't restart each tick
+_rth_applied_pwm = 0             # actual PWM being sent (may be higher than target)
+_rth_wheels_spinning = False     # True once encoders confirm movement
+
+
+def _wrap_angle_deg(angle):
+    while angle > 180:
+        angle -= 360
+    while angle < -180:
+        angle += 360
+    return angle
+
+
+def _steer_angle_to_pw(angle_deg):
+    """Convert steering angle in degrees to servo pulse width."""
+    if angle_deg >= 0:
+        return int(STEER_CENTER_PW + (angle_deg / 30.0) * (STEER_RIGHT_PW - STEER_CENTER_PW))
+    else:
+        return int(STEER_CENTER_PW + (angle_deg / 30.0) * (STEER_CENTER_PW - STEER_LEFT_PW))
+
+
+def _thin_waypoints(points):
+    """Reduce dense trail to waypoints spaced ~10 cm apart."""
+    if not points:
+        return []
+    result = [points[0]]
+    for x, y in points[1:]:
+        lx, ly = result[-1]
+        dx, dy = x - lx, y - ly
+        if dx * dx + dy * dy >= _RTH_WAYPOINT_SPACING_M ** 2:
+            result.append((x, y))
+    return result
+
+
+def _rth_drive(target_pwm, steer_pw, forward=True):
+    """Send drive command with encoder-feedback breakaway ramp.
+
+    If wheels aren't spinning (RPM < threshold), ramp PWM up by
+    _RTH_BREAKAWAY_STEP each call until they start moving.
+    Once wheels are confirmed spinning, settle back to target_pwm.
+    """
+    global _rth_applied_pwm, _rth_wheels_spinning
+    if not pico:
+        return 0
+
+    # Read current encoder RPMs
+    packet = pico.get_latest()
+    avg_rpm = 0.0
+    if packet:
+        avg_rpm = (abs(packet.rpm_left) + abs(packet.rpm_right)) / 2.0
+
+    if avg_rpm >= _RTH_RPM_MOVING:
+        # Wheels are spinning — use target speed (or ease down from breakaway)
+        _rth_wheels_spinning = True
+        if _rth_applied_pwm > target_pwm:
+            _rth_applied_pwm = max(target_pwm, _rth_applied_pwm - 3)
+        else:
+            _rth_applied_pwm = target_pwm
+    else:
+        # Wheels NOT spinning — ramp up to break static friction
+        _rth_wheels_spinning = False
+        if _rth_applied_pwm < target_pwm:
+            _rth_applied_pwm = target_pwm  # start at least at target
+        _rth_applied_pwm = min(_RTH_BREAKAWAY_MAX,
+                               _rth_applied_pwm + _RTH_BREAKAWAY_STEP)
+
+    pwm = int(max(0, min(100, _rth_applied_pwm)))
+    pico.send_lr_pwm(pwm, pwm, steer_pw, forward=forward)
+    return pwm
+
+
+def _rth_reset_drive_state():
+    """Reset breakaway ramp state (call after brake/stop)."""
+    global _rth_applied_pwm, _rth_wheels_spinning
+    _rth_applied_pwm = 0
+    _rth_wheels_spinning = False
+
+
+def _rth_thread_func():
+    """RTH navigation thread: follow reversed trail back to origin with laser avoidance."""
+    global rth_active, rth_waypoints, rth_current_wp, rth_total_wp, rth_status
+    global current_steer_pw
+
+    # ── Open CSV log file ────────────────────────────────────────
+    _log_dir = os.path.join(_script_dir, '..', '..', 'rover_logs')
+    os.makedirs(_log_dir, exist_ok=True)
+    _ts = time.strftime('%Y%m%d_%H%M%S')
+    _log_path = os.path.join(_log_dir, f'rth_log_{_ts}.csv')
+    _csv_file = open(_log_path, 'w', newline='', buffering=1)  # line-buffered
+    _csv = csv.writer(_csv_file)
+    _csv.writerow([
+        'elapsed_s', 'tick', 'event',
+        'wp_idx', 'wp_total', 'wp_target_x', 'wp_target_y',
+        'pos_x', 'pos_y', 'heading_deg', 'v_linear', 'v_angular',
+        'dist_to_wp', 'desired_hdg', 'hdg_error', 'steer_deg', 'steer_pw', 'cmd_speed',
+        'rpm_l', 'rpm_r', 'enc_l', 'enc_r', 'duty_l', 'duty_r',
+        'gyro_z', 'accel_x', 'accel_y',
+        'mag_x', 'mag_y', 'compass_deg',
+        'laser_mm', 'temp_c', 'batt_adc',
+        'stuck_count', 'moved_cm', 'note',
+    ])
+    _t0 = time.monotonic()
+
+    def _log(event, wp_i=0, wp_x=0, wp_y=0, dist=0, desired=0, error=0,
+             steer=0, steer_p=STEER_CENTER_PW, spd=0, pkt=None,
+             stuck_c=0, moved=0, note=''):
+        """Write one row to the CSV log."""
+        cx, cy = get_position()
+        hdg = get_heading_deg()
+        vl = get_linear_velocity()
+        va = get_angular_velocity()
+        r_l = r_r = enc_l = enc_r = d_l = d_r = 0.0
+        gz = ax = ay = mx = my = 0.0
+        comp = laser = temp = batt = 0
+        if pkt:
+            r_l, r_r = pkt.rpm_left, pkt.rpm_right
+            enc_l, enc_r = pkt.enc_left_steps, pkt.enc_right_steps
+            d_l, d_r = pkt.mot_duty_left, pkt.mot_duty_right
+            gz = pkt.gyro_z
+            ax, ay = pkt.accel_x, pkt.accel_y
+            mx, my = pkt.mag_x, pkt.mag_y
+            laser = pkt.laser_mm
+            temp = pkt.temp_c
+            batt = pkt.adc_a0
+            comp = compute_compass_heading(mx, my) or 0
+        _csv.writerow([
+            f'{time.monotonic()-_t0:.3f}', tick_counter[0], event,
+            wp_i, rth_total_wp, f'{wp_x:.4f}', f'{wp_y:.4f}',
+            f'{cx:.4f}', f'{cy:.4f}', f'{hdg:.1f}', f'{vl:.4f}', f'{va:.4f}',
+            f'{dist:.4f}', f'{desired:.1f}', f'{error:.1f}', f'{steer:.1f}', steer_p, spd,
+            f'{r_l:.1f}', f'{r_r:.1f}', enc_l, enc_r, f'{d_l:.1f}', f'{d_r:.1f}',
+            f'{gz:.2f}', f'{ax:.3f}', f'{ay:.3f}',
+            f'{mx:.0f}', f'{my:.0f}', f'{comp:.1f}',
+            laser, f'{temp:.1f}', batt,
+            stuck_c, f'{moved:.2f}', note,
+        ])
+
+    tick_counter = [0]  # mutable for nested scope
+    print(f"📝 [RTH] Logging to {_log_path}")
+
+    try:
+        # Build waypoint list from current trail
+        trail_points = list(trail)
+        _log('INIT', note=f'trail_points={len(trail_points)}')
+
+        if len(trail_points) < 2:
+            waypoints = [(0.0, 0.0)]
+            _log('INIT', note='no_trail, direct_to_origin')
+        else:
+            trail_points.reverse()
+            waypoints = _thin_waypoints(trail_points)
+            # Always end at origin
+            lx, ly = waypoints[-1]
+            if math.sqrt(lx * lx + ly * ly) > _RTH_FINAL_ARRIVE_M:
+                waypoints.append((0.0, 0.0))
+
+        rth_waypoints = waypoints
+        rth_total_wp = len(waypoints)
+        rth_current_wp = 0
+        rth_status = "navigating"
+
+        # Log all waypoints for reference
+        for wi, (wwx, wwy) in enumerate(waypoints):
+            _log('WAYPOINT_PLAN', wp_i=wi, wp_x=wwx, wp_y=wwy,
+                 note=f'planned_{wi+1}_of_{rth_total_wp}')
+
+        print(f"🏠 [RTH] Following {rth_total_wp} waypoints back to start")
+        _rth_reset_drive_state()
+
+        wp_idx = 0
+        while wp_idx < len(waypoints):
+            if not rth_active:
+                rth_status = "cancelled"
+                _log('CANCELLED', wp_i=wp_idx, wp_x=waypoints[wp_idx][0],
+                     wp_y=waypoints[wp_idx][1],
+                     note=f'user_cancel_at_wp_{wp_idx}')
+                print(f"🏠 [RTH] Cancelled at waypoint {wp_idx}/{rth_total_wp}")
+                break
+
+            wx, wy = waypoints[wp_idx]
+            rth_current_wp = wp_idx
+            is_final = (wp_idx == len(waypoints) - 1)
+            arrive_dist = _RTH_FINAL_ARRIVE_M if is_final else _RTH_ARRIVE_DIST_M
+
+            # ── Look-ahead: skip to the furthest waypoint we're already close to ──
+            if not is_final:
+                best_skip = wp_idx
+                cx, cy = get_position()
+                for j in range(wp_idx + 1, len(waypoints)):
+                    sjx, sjy = waypoints[j]
+                    dj = math.sqrt((sjx - cx)**2 + (sjy - cy)**2)
+                    if dj < _RTH_ARRIVE_DIST_M:
+                        best_skip = j
+                if best_skip > wp_idx:
+                    _log('WP_LOOKAHEAD_SKIP', wp_i=wp_idx,
+                         wp_x=wx, wp_y=wy,
+                         note=f'skip_{wp_idx}_to_{best_skip}')
+                    print(f"🏠 [RTH] Look-ahead: skip wp {wp_idx}→{best_skip}")
+                    wp_idx = best_skip
+                    continue
+
+            cx, cy = get_position()
+            dx = wx - cx; dy = wy - cy
+            dist_initial = math.sqrt(dx*dx + dy*dy)
+            _log('WP_START', wp_i=wp_idx, wp_x=wx, wp_y=wy, dist=dist_initial,
+                 note=f'arrive_tol={arrive_dist:.3f} final={is_final}')
+
+            # Check if we need a U-turn first (waypoint is behind us)
+            # Only for the final waypoint (origin) — intermediate ones use look-ahead
+            desired_deg = math.degrees(math.atan2(dy, dx))
+            current_deg = get_heading_deg()
+            initial_error = abs(_wrap_angle_deg(desired_deg - current_deg))
+            if is_final and initial_error > _RTH_UTURN_THRESHOLD_DEG and rth_active:
+                _log('UTURN_START', wp_i=wp_idx, wp_x=wx, wp_y=wy,
+                     desired=desired_deg, error=initial_error,
+                     note=f'hdg_err={initial_error:.0f} > {_RTH_UTURN_THRESHOLD_DEG}')
+                # Determine turn direction: steer toward the waypoint
+                turn_error = _wrap_angle_deg(desired_deg - current_deg)
+                steer_dir = STEER_LEFT_PW if turn_error < 0 else STEER_RIGHT_PW
+
+                # Drive forward with full lock steering to arc around
+                uturn_ticks = 0
+                for _ in range(120):  # max ~6s
+                    if not rth_active:
+                        break
+                    # Check obstacle
+                    p = pico.get_latest() if pico else None
+                    if p and 0 < p.laser_mm < _RTH_OBSTACLE_DIST_MM:
+                        if pico:
+                            pico.send_brake()
+                        _rth_reset_drive_state()
+                        time.sleep(0.5)
+                        continue
+                    _rth_drive(_RTH_NAV_SPEED, steer_dir, forward=True)
+                    time.sleep(0.05)
+                    uturn_ticks += 1
+                    # Recalculate desired heading from current position
+                    ux, uy = get_position()
+                    fresh_desired = math.degrees(math.atan2(wy - uy, wx - ux))
+                    new_hdg = get_heading_deg()
+                    new_err = abs(_wrap_angle_deg(fresh_desired - new_hdg))
+                    if new_err < 45:
+                        break
+                if pico:
+                    pico.send_brake()
+                _rth_reset_drive_state()
+                time.sleep(0.1)
+                _log('UTURN_DONE', wp_i=wp_idx, wp_x=wx, wp_y=wy,
+                     desired=desired_deg, error=abs(_wrap_angle_deg(
+                         desired_deg - get_heading_deg())),
+                     note=f'uturn_ticks={uturn_ticks}')
+
+            # Navigate to this waypoint
+            max_ticks = 600  # ~12s at 50Hz
+            stuck_count = 0
+            stuck_check_time = time.monotonic()
+            stuck_check_pos = get_position()
+            wp_arrived = False
+            for tick in range(max_ticks):
+                tick_counter[0] += 1
+                if not rth_active:
+                    _log('CANCELLED', wp_i=wp_idx, wp_x=wx, wp_y=wy, note='mid_nav_cancel')
+                    break
+
+                # Get fresh sensor packet
+                packet = pico.get_latest() if pico else None
+
+                # Check laser for obstacles
+                if packet and 0 < packet.laser_mm < _RTH_OBSTACLE_DIST_MM:
+                    rth_status = "obstacle"
+                    _log('OBSTACLE_START', wp_i=wp_idx, wp_x=wx, wp_y=wy, pkt=packet,
+                         note=f'laser={packet.laser_mm}mm < {_RTH_OBSTACLE_DIST_MM}mm')
+                    if pico:
+                        pico.send_brake()
+                    _rth_reset_drive_state()
+                    obs_deadline = time.monotonic() + 10.0
+                    while rth_active and time.monotonic() < obs_deadline:
+                        time.sleep(0.1)
+                        p = pico.get_latest() if pico else None
+                        if p and (p.laser_mm <= 0 or p.laser_mm >= _RTH_OBSTACLE_CLEAR_MM):
+                            _log('OBSTACLE_CLEAR', wp_i=wp_idx, wp_x=wx, wp_y=wy, pkt=p,
+                                 note=f'laser={p.laser_mm}mm')
+                            break
+                    else:
+                        if rth_active:
+                            _log('OBSTACLE_TIMEOUT', wp_i=wp_idx, wp_x=wx, wp_y=wy,
+                                 note='10s_timeout')
+                    if not rth_active:
+                        break
+                    rth_status = "navigating"
+                    _rth_reset_drive_state()
+                    stuck_check_time = time.monotonic()
+                    stuck_check_pos = get_position()
+
+                cx, cy = get_position()
+                dx = wx - cx
+                dy = wy - cy
+                dist = math.sqrt(dx * dx + dy * dy)
+
+                if dist < arrive_dist:
+                    _log('WP_ARRIVED', wp_i=wp_idx, wp_x=wx, wp_y=wy, dist=dist, pkt=packet,
+                         note=f'ticks={tick}')
+                    wp_arrived = True
+                    break  # arrived at waypoint
+
+                # ── Look-ahead during navigation: skip if a later wp is closer ──
+                if not is_final and tick % 5 == 0:
+                    best_skip = wp_idx
+                    for j in range(wp_idx + 1, len(waypoints)):
+                        sjx, sjy = waypoints[j]
+                        dj = math.sqrt((sjx - cx)**2 + (sjy - cy)**2)
+                        if dj < _RTH_ARRIVE_DIST_M:
+                            best_skip = j
+                    if best_skip > wp_idx:
+                        _log('WP_LOOKAHEAD_SKIP', wp_i=wp_idx,
+                             wp_x=wx, wp_y=wy, dist=dist, pkt=packet,
+                             note=f'nav_skip_{wp_idx}_to_{best_skip}')
+                        wp_idx = best_skip
+                        wp_arrived = True
+                        break
+
+                # Stuck detection
+                now = time.monotonic()
+                moved_cm = 0.0
+                if now - stuck_check_time >= _RTH_STUCK_WINDOW_S:
+                    sx, sy = stuck_check_pos
+                    moved = math.sqrt((cx - sx)**2 + (cy - sy)**2)
+                    moved_cm = moved * 100
+                    if moved < _RTH_STUCK_DIST_M:
+                        stuck_count += 1
+                        _log('STUCK', wp_i=wp_idx, wp_x=wx, wp_y=wy, dist=dist, pkt=packet,
+                             stuck_c=stuck_count, moved=moved_cm,
+                             note=f'moved_{moved_cm:.1f}cm < {_RTH_STUCK_DIST_M*100:.1f}cm')
+                        print(f"⚠️  [RTH] Stuck detected ({stuck_count}/{_RTH_MAX_STUCK_COUNT}) "
+                              f"— moved only {moved_cm:.1f}cm in {_RTH_STUCK_WINDOW_S}s")
+                        if stuck_count >= _RTH_MAX_STUCK_COUNT:
+                            _log('WP_SKIPPED', wp_i=wp_idx, wp_x=wx, wp_y=wy, dist=dist,
+                                 stuck_c=stuck_count, note='max_stuck_reached')
+                            print(f"⚠️  [RTH] Skipping waypoint {wp_idx} after {stuck_count} stuck events")
+                            if pico:
+                                pico.send_brake()
+                            _rth_reset_drive_state()
+                            time.sleep(0.3)
+                            break
+                        _log('REVERSE_NUDGE', wp_i=wp_idx, wp_x=wx, wp_y=wy, pkt=packet,
+                             note='reverse_ramp_0.8s')
+                        _rth_reset_drive_state()
+                        for _ in range(16):
+                            _rth_drive(50, STEER_CENTER_PW, forward=False)
+                            time.sleep(0.05)
+                        if pico:
+                            pico.send_brake()
+                        _rth_reset_drive_state()
+                        time.sleep(0.2)
+                    else:
+                        stuck_count = max(0, stuck_count - 1)
+                    stuck_check_time = now
+                    stuck_check_pos = (cx, cy)
+
+                # Desired heading toward waypoint
+                desired_deg = math.degrees(math.atan2(dy, dx))
+                current_deg = get_heading_deg()
+                error = _wrap_angle_deg(desired_deg - current_deg)
+
+                # If waypoint is behind us (>120°) and not final, skip it
+                if not is_final and abs(error) > 120:
+                    _log('WP_BEHIND_SKIP', wp_i=wp_idx, wp_x=wx, wp_y=wy,
+                         dist=dist, desired=desired_deg, error=error, pkt=packet,
+                         note=f'hdg_err={error:.0f}_skip')
+                    break
+
+                # Speed: reduce on large heading error
+                if abs(error) < 30:
+                    speed = _RTH_NAV_SPEED
+                elif abs(error) < 60:
+                    speed = _RTH_SLOW_SPEED
+                else:
+                    speed = _RTH_SLOW_SPEED
+
+                # Proportional steering
+                steer_deg = max(-_RTH_MAX_STEER_DEG, min(_RTH_MAX_STEER_DEG, error * _RTH_STEER_GAIN))
+                steer_pw = _steer_angle_to_pw(steer_deg)
+                steer_pw = max(STEER_LEFT_PW, min(STEER_RIGHT_PW, steer_pw))
+                current_steer_pw = steer_pw
+
+                if tick < 5 or tick % 10 == 0:
+                    _log('NAV', wp_i=wp_idx, wp_x=wx, wp_y=wy, dist=dist,
+                         desired=desired_deg, error=error, steer=steer_deg,
+                         steer_p=steer_pw, spd=speed, pkt=packet,
+                         stuck_c=stuck_count, moved=moved_cm,
+                         note=f'applied={_rth_applied_pwm} spinning={_rth_wheels_spinning}')
+
+                _rth_drive(speed, steer_pw, forward=True)
+                time.sleep(0.05)
+
+            # End of waypoint loop
+            if not wp_arrived and rth_active:
+                _log('WP_TIMEOUT', wp_i=wp_idx, wp_x=wx, wp_y=wy,
+                     note=f'max_ticks={max_ticks} stuck={stuck_count}')
+            wp_idx += 1
+
+        # Done — stop motors
+        if pico:
+            pico.send_brake()
+        _rth_reset_drive_state()
+
+        if rth_active:
+            rth_status = "arrived"
+            cx, cy = get_position()
+            dist_from_origin = math.sqrt(cx*cx + cy*cy)
+            _log('ARRIVED_HOME', dist=dist_from_origin,
+                 note=f'final_pos=({cx:.4f},{cy:.4f}) dist_from_origin={dist_from_origin:.4f}m')
+            print(f"🏠 [RTH] Arrived at ({cx:.3f}, {cy:.3f})")
+        else:
+            rth_status = "cancelled"
+            _log('FINAL_CANCELLED')
+
+    except Exception as e:
+        import traceback
+        _log('ERROR', note=f'{type(e).__name__}: {e}')
+        print(f"❌ [RTH] Error: {e}")
+        traceback.print_exc()
+        if pico:
+            pico.send_brake()
+        _rth_reset_drive_state()
+        rth_status = "idle"
+    finally:
+        rth_active = False
+        _log('SHUTDOWN', note=f'status={rth_status}')
+        _csv_file.close()
+        print(f"📝 [RTH] Log saved → {_log_path}")
+
+
 # ── Flask + SocketIO ─────────────────────────────────────────────
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.urandom(16).hex()
@@ -131,18 +592,26 @@ def on_reset():
 
 @socketio.on('engine_toggle')
 def on_engine_toggle():
-    global engine_running
+    global engine_running, rth_active, rth_status
     engine_running = not engine_running
     state = "ON" if engine_running else "OFF"
     print(f"🏎️ Engine {state}")
-    if not engine_running and pico:
-        pico.send_stop()
+    if not engine_running:
+        if rth_active:
+            rth_active = False
+            rth_status = "cancelled"
+        if pico:
+            pico.send_stop()
 
 
 @socketio.on('engine_off')
 def on_engine_off():
-    global engine_running
+    global engine_running, rth_active, rth_status
     engine_running = False
+    # Cancel RTH if active
+    if rth_active:
+        rth_active = False
+        rth_status = "cancelled"
     if pico:
         pico.send_stop()
 
@@ -151,7 +620,7 @@ def on_engine_off():
 def on_drive(data):
     """Drive command from web UI or gamepad relay: {throttle: -100..100, steering: -100..100}"""
     global current_steer_pw
-    if not engine_running or not pico:
+    if not engine_running or not pico or rth_active:
         return
     throttle = max(-100, min(100, float(data.get('throttle', 0))))
     steering = max(-100, min(100, float(data.get('steering', 0))))
@@ -168,9 +637,9 @@ def on_drive(data):
     if speed < 3:
         pico.send_stop()
     elif throttle >= 0:
-        pico.send_motor_command(int(speed), steer_pw)
+        pico.send_lr_pwm(int(speed), int(speed), steer_pw, forward=True)
     else:
-        pico.send_reverse_command(int(speed), steer_pw)
+        pico.send_lr_pwm(int(speed), int(speed), steer_pw, forward=False)
 
 
 @socketio.on('brake')
@@ -190,6 +659,28 @@ def on_encoder_reset():
     if pico:
         pico.send_encoder_reset()
         print("🔄 Encoder steps reset")
+
+
+@socketio.on('return_to_home')
+def on_return_to_home():
+    global rth_active, rth_thread, rth_status
+    if rth_active:
+        # Cancel RTH
+        rth_active = False
+        if pico:
+            pico.send_brake()
+        rth_status = "cancelled"
+        print("🏠 [RTH] Cancelled by user")
+    else:
+        # Start RTH (requires engine to be on)
+        if not engine_running:
+            print("⚠️  [RTH] Engine must be ON to start RTH")
+            return
+        rth_active = True
+        rth_status = "navigating"
+        rth_thread = threading.Thread(target=_rth_thread_func, daemon=True, name="rth-nav")
+        rth_thread.start()
+        print("🏠 [RTH] Started return-to-home")
 
 
 # ── Gamepad reader thread (server-side USB, same as main app) ────
@@ -286,7 +777,7 @@ def _gamepad_drive_thread():
     smoothed_steering = 0.0
 
     while True:
-        if engine_running and gamepad_connected:
+        if engine_running and gamepad_connected and not rth_active:
             smoothed_throttle = 0.4 * gamepad_throttle + 0.6 * smoothed_throttle
             smoothed_steering = gamepad_steering  # no smoothing for instant response
 
@@ -304,10 +795,10 @@ def _gamepad_drive_thread():
                     pico.send_stop()
             elif smoothed_throttle >= 0:
                 if pico:
-                    pico.send_motor_command(int(speed), steer_pw)
+                    pico.send_lr_pwm(int(speed), int(speed), steer_pw, forward=True)
             else:
                 if pico:
-                    pico.send_reverse_command(int(speed), steer_pw)
+                    pico.send_lr_pwm(int(speed), int(speed), steer_pw, forward=False)
         elif not engine_running:
             smoothed_throttle = 0.0
             smoothed_steering = 0.0
@@ -448,6 +939,12 @@ def telemetry_loop():
                 # Odometry diagnostics
                 'odom_diag': diag,
                 'odom_errors': _odom_error_count,
+                # RTH state
+                'rth_active': rth_active,
+                'rth_status': rth_status,
+                'rth_current_wp': rth_current_wp,
+                'rth_total_wp': rth_total_wp,
+                'rth_waypoints': [{'x': round(wx, 3), 'y': round(wy, 3)} for wx, wy in rth_waypoints] if rth_active else [],
             }
             socketio.emit('telemetry', telemetry)
             time.sleep(0.02)  # 50 Hz
@@ -559,6 +1056,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .btn-danger:hover { background: rgba(239,68,68,0.15); }
   .btn-active { background: var(--primary) !important; color: #000 !important; border-color: var(--primary); }
   .btn-engine-on { background: var(--primary) !important; color: #000 !important; animation: pulse 1.5s infinite; }
+  .btn-rth-active { background: var(--amber) !important; color: #000 !important; border-color: var(--amber) !important; animation: pulse 1.5s infinite; }
+  .btn-rth-obstacle { background: var(--danger) !important; color: #fff !important; border-color: var(--danger) !important; animation: pulse 0.5s infinite; }
   @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.7; } }
 
   /* Raw data log */
@@ -695,8 +1194,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <button class="btn btn-danger" onclick="emergencyStop()">⛔ STOP</button>
       <button class="btn" onclick="resetOdometry()">🔄 RESET ODOM</button>
       <button class="btn" onclick="resetEncoders()">↺ RESET ENC</button>
+      <button class="btn" id="btnRTH" onclick="toggleRTH()" style="border-color:var(--amber);color:var(--amber)">🏠 RTH</button>
     </div>
-    <div style="margin-top:6px;font-size:9px;color:var(--muted)">
+    <div style="margin-top:4px;display:flex;align-items:center;gap:8px">
+      <span id="rthStatus" style="font-size:10px;color:var(--muted);display:none"></span>
+    </div>
+    <div style="margin-top:4px;font-size:9px;color:var(--muted)">
       🎮 Gamepad: Left stick = Throttle | Right stick = Steering | Start = Engine | Select×2 = Kill
     </div>
   </div>
@@ -807,6 +1310,37 @@ function updateTelemetry(d) {
     gpLabel.textContent = 'No Gamepad';
     gpGear.textContent = '';
   }
+
+  // RTH button & status
+  const btnRTH = document.getElementById('btnRTH');
+  const rthStatus = document.getElementById('rthStatus');
+  if (d.rth_active) {
+    if (d.rth_status === 'obstacle') {
+      btnRTH.className = 'btn btn-rth-obstacle';
+      btnRTH.textContent = '⚠ OBSTACLE';
+    } else {
+      btnRTH.className = 'btn btn-rth-active';
+      btnRTH.textContent = '■ CANCEL RTH';
+    }
+    rthStatus.style.display = 'inline';
+    const progress = d.rth_total_wp > 0 ? `${d.rth_current_wp + 1}/${d.rth_total_wp}` : '';
+    const statusText = d.rth_status === 'obstacle' ? '⚠ OBSTACLE — waiting' : `Navigating ${progress}`;
+    rthStatus.innerHTML = `🏠 RTH: <span style="color:var(--amber)">${statusText}</span>`;
+  } else {
+    btnRTH.className = 'btn';
+    btnRTH.style.borderColor = 'var(--amber)';
+    btnRTH.style.color = 'var(--amber)';
+    btnRTH.textContent = '🏠 RTH';
+    if (d.rth_status === 'arrived') {
+      rthStatus.style.display = 'inline';
+      rthStatus.innerHTML = '🏠 <span style="color:var(--primary)">Arrived home ✓</span>';
+    } else if (d.rth_status === 'cancelled') {
+      rthStatus.style.display = 'inline';
+      rthStatus.innerHTML = '🏠 <span style="color:var(--muted)">RTH cancelled</span>';
+    } else {
+      rthStatus.style.display = 'none';
+    }
+  }
 }
 
 function updateConnectionStatus(d) {
@@ -888,6 +1422,29 @@ function updateMap(d) {
   const gridLabel = gridSpacing === 0.25 ? '0.25m' : gridSpacing === 0.5 ? '0.5m' : '1.0m';
   document.getElementById('scaleLabel').textContent = 'grid: ' + gridLabel;
 
+  // RTH waypoint path
+  let rthSvg = '';
+  const rthWps = d.rth_waypoints || [];
+  if (d.rth_active && rthWps.length > 0) {
+    // Draw remaining waypoints from current onward
+    const remaining = rthWps.slice(d.rth_current_wp || 0);
+    if (remaining.length > 0) {
+      // Line from rover to first remaining waypoint, then through the rest
+      let rthPath = `M${rx.toFixed(1)},${ry.toFixed(1)}`;
+      remaining.forEach(p => {
+        rthPath += ` L${w2sx(p.x).toFixed(1)},${w2sy(p.y).toFixed(1)}`;
+      });
+      rthSvg = `<path d="${rthPath}" fill="none" stroke="#f59e0b" stroke-width="2" stroke-dasharray="6 3" opacity="0.7"/>`;
+      // Dot on current target waypoint
+      if (remaining.length > 0) {
+        const tw = remaining[0];
+        rthSvg += `<circle cx="${w2sx(tw.x)}" cy="${w2sy(tw.y)}" r="4" fill="#f59e0b" opacity="0.8">
+          <animate attributeName="r" values="3;6;3" dur="1s" repeatCount="indefinite"/>
+        </circle>`;
+      }
+    }
+  }
+
   svg.innerHTML = `
     ${gridSvg}
     <!-- Origin marker -->
@@ -909,6 +1466,8 @@ function updateMap(d) {
     <!-- Rover arrow -->
     <polygon points="${tipX},${tipY} ${bLx},${bLy} ${bRx},${bRy}" fill="#22c55e" stroke="rgba(255,255,255,0.4)" stroke-width="0.8"/>
     <circle cx="${rx}" cy="${ry}" r="3" fill="white"/>
+    <!-- RTH path -->
+    ${rthSvg}
     <!-- Compass rose -->
     ${compassSvg}
     <!-- Scale -->
@@ -999,6 +1558,7 @@ function toggleEngine() { socket.emit('engine_toggle'); }
 function emergencyStop() { socket.emit('engine_off'); socket.emit('stop'); }
 function resetOdometry() { socket.emit('reset_odometry'); }
 function resetEncoders() { socket.emit('encoder_reset'); }
+function toggleRTH() { socket.emit('return_to_home'); }
 
 // Gamepad is handled server-side via USB `inputs` library.
 // No browser Gamepad API needed — the Pi reads the controller directly.
