@@ -28,7 +28,9 @@ interface AutopilotTelemetryProps {
   gyroAvailable?: boolean;
   gyroCalibrated?: boolean;
   isMPU6050Enabled?: boolean;
+  isOdometryMapEnabled?: boolean;
   onEmergencyStop?: () => void;
+  onOdometryMapToggle?: () => void;
   onAutopilotToggle?: () => void;
   onStartStop?: () => void;
 }
@@ -140,7 +142,9 @@ export const AutopilotTelemetry = ({
   gyroAvailable = false,
   gyroCalibrated = false,
   isMPU6050Enabled = true,
+  isOdometryMapEnabled = false,
   onEmergencyStop,
+  onOdometryMapToggle,
   onAutopilotToggle,
   onStartStop,
 }: AutopilotTelemetryProps) => {
@@ -159,9 +163,22 @@ export const AutopilotTelemetry = ({
       {/* Scrollable Content Area */}
       <div className="flex flex-col items-center flex-1 w-full overflow-y-auto gap-0.5 min-h-0">
         {/* Header */}
-        <div className="flex items-center gap-1 flex-shrink-0">
-          <Navigation className={`w-3 h-3 sm:w-4 sm:h-4 ${isRunning ? 'text-primary animate-pulse' : 'text-muted-foreground'}`} />
-          <span className={`racing-text text-[8px] sm:text-xs font-bold ${isRunning ? 'text-primary' : 'text-muted-foreground'}`}>AUTOPILOT</span>
+        <div className="flex items-center justify-between gap-1 w-full flex-shrink-0">
+          <div className="flex items-center gap-1">
+            <Navigation className={`w-3 h-3 sm:w-4 sm:h-4 ${isRunning ? 'text-primary animate-pulse' : 'text-muted-foreground'}`} />
+            <span className={`racing-text text-[8px] sm:text-xs font-bold ${isRunning ? 'text-primary' : 'text-muted-foreground'}`}>AUTOPILOT</span>
+          </div>
+          <button
+            onClick={onOdometryMapToggle}
+            className={`p-1 rounded border transition-colors ${
+              isOdometryMapEnabled
+                ? 'border-primary/50 bg-primary/15 text-primary'
+                : 'border-border/40 text-muted-foreground hover:text-foreground hover:border-primary/40'
+            }`}
+            title={isOdometryMapEnabled ? 'Hide odometry map' : 'Show odometry map'}
+          >
+            <Map className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+          </button>
         </div>
       
       {/* Status Display */}

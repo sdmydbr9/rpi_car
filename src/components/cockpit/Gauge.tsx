@@ -9,6 +9,7 @@ interface GaugeProps {
   isEngineRunning?: boolean;
   warningThreshold?: number; // Value above which gauge shows warning color
   size?: "small" | "medium" | "large"; // small for first row, medium/large for second row
+  snappy?: boolean;
 }
 
 export const Gauge = ({
@@ -20,6 +21,7 @@ export const Gauge = ({
   isEngineRunning = false,
   warningThreshold,
   size = "medium",
+  snappy = false,
 }: GaugeProps) => {
   const [performSweep, setPerformSweep] = useState(false);
   const [wasEngineRunning, setWasEngineRunning] = useState(false);
@@ -124,7 +126,7 @@ export const Gauge = ({
             strokeDashoffset={220 - (220 * percentage) / 100}
             style={{
               filter: percentage > 50 ? `drop-shadow(0 0 4px ${isWarning ? 'hsl(var(--destructive))' : 'hsl(var(--primary))'})` : 'none',
-              transition: 'stroke-dashoffset 0.15s ease-out'
+              transition: snappy ? 'stroke-dashoffset 0.04s linear' : 'stroke-dashoffset 0.15s ease-out'
             }}
           />
           
@@ -133,7 +135,7 @@ export const Gauge = ({
           
           {/* Needle */}
           <g transform={`rotate(${performSweep ? -135 : needleRotation} 50 50)`} style={{ 
-            transition: performSweep ? 'none' : 'transform 0.1s ease-out',
+            transition: performSweep ? 'none' : (snappy ? 'transform 0.03s linear' : 'transform 0.1s ease-out'),
             animation: performSweep ? 'needleSweep 0.8s ease-in-out' : 'none'
           }}>
             <polygon

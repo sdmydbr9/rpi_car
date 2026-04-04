@@ -1,0 +1,12 @@
+when i run the pico sensor reader script, the rpm data and other data i get is instant: [Frame 01137] V: 0.00V | I: 5.73A | Laser: 119mm | RPM L: 0.0 R: -0.2 | Acc:( 0.00, 0.02, -1.86) | Mag:( 0.154, -0.422, 0.119)G
+[Frame 01142] V: 0.10V | I: 5.74A | Laser: 120mm | RPM L: 0.0 R: -0.0 | Acc:( 0.00, 0.01, -1.90) | Mag:( 0.156, -0.413, 0.133)G
+[Frame 01146] V: 0.09V | I: 5.74A | Laser: 120mm | RPM L: 0.6 R: 0.5 | Acc:( 0.16, 0.00, -1.00) | Mag:( 0.147, -0.417, 0.143)G
+[Frame 01151] V: 0.44V | I: 5.75A | Laser: 116mm | RPM L: 28.8 R: 25.2 | Acc:( 0.01, 0.00, -0.87) | Mag:( 0.148, -0.417, 0.140)G
+[Frame 01156] V: 0.75V | I: 5.75A | Laser: 112mm | RPM L: 48.9 R: 47.1 | Acc:( 0.26, 0.02, -1.88) | Mag:( 0.130, -0.424, 0.152)G
+[Frame 01161] V: 0.70V | I: 5.75A | Laser: 108mm | RPM L: 21.4 R: 22.2 | Acc:( 0.31, -0.03, -1.00) | Mag:( 0.120, -0.409, 0.166)G
+[Frame 01165] V: 0.71V | I: 5.75A | Laser: -1mm | RPM L: 2.0 R: 1.9 | Acc:( 0.28, 0.00, -1.00) | Mag:( 0.128, -0.403, 0.172)G
+
+but the in the cockpit ui, the rpm data is very old, like few 100 seconds which is not efficient for car controls which needs instant ui update. are we using the same ui update for car controls? since the rpm limit is not respected the car just drives around.
+is it not more efficient to use a backend system independent of the car ui to control the rpm limits? are we already doing it? because this is more efficient and another question is, find out why the UI rendered is very slow and takes time to update.
+
+no code fixing required, find the bugs and suggest changes only

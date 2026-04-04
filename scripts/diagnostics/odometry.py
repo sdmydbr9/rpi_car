@@ -35,6 +35,12 @@ from flask import Flask, Response
 from flask_socketio import SocketIO
 
 from pico_sensor_reader import PicoSensorReader, SensorPacket
+from gamepad_axis import (
+    build_default_axis_profiles,
+    describe_axis_profile,
+    load_inputs_axis_profiles,
+    normalize_centered_axis,
+)
 from odometry_integration import (
     init_odometry, update_odometry, get_position, get_heading_deg,
     get_linear_velocity, get_angular_velocity, get_diagnostics_dict,
@@ -92,6 +98,10 @@ current_steer_pw = STEER_CENTER_PW  # current steering pulse width
 # ── Gamepad state (server-side USB via `inputs` library) ─────────
 _GAMEPAD_JOY_CENTER = 128
 _GAMEPAD_JOY_DEADZONE = 15
+_GAMEPAD_AXIS_PROFILES = build_default_axis_profiles(
+    center=_GAMEPAD_JOY_CENTER,
+    deadzone=_GAMEPAD_JOY_DEADZONE,
+)
 _GAMEPAD_GEAR_MAP = {
     "1":  35.0,
     "2":  60.0,
@@ -104,6 +114,17 @@ gamepad_steering = 0.0
 gamepad_gear = "1"
 _gp_select_last_press = 0.0
 _GP_DOUBLE_PRESS_WINDOW = 0.6
+
+
+def _refresh_gamepad_axis_profiles():
+    global _GAMEPAD_AXIS_PROFILES
+    _GAMEPAD_AXIS_PROFILES, source_path = load_inputs_axis_profiles(_GAMEPAD_AXIS_PROFILES)
+    if source_path:
+        summary = ", ".join(
+            describe_axis_profile(axis_code, _GAMEPAD_AXIS_PROFILES[axis_code])
+            for axis_code in ("ABS_Y", "ABS_Z")
+        )
+        print(f"🎮 [Gamepad] Axis calibration from {source_path}: {summary}")
 
 # ── RTH (Return-to-Home) state ──────────────────────────────────
 rth_active = False
@@ -704,24 +725,28 @@ def _gamepad_reader_thread():
             if not gamepad_connected:
                 gamepad_connected = True
                 print("🎮 [Gamepad] Controller connected!")
+                _refresh_gamepad_axis_profiles()
 
             for event in events:
                 # Left Stick Y → Throttle
                 if event.code == 'ABS_Y':
                     val = event.state
-                    if abs(val - _GAMEPAD_JOY_CENTER) < _GAMEPAD_JOY_DEADZONE:
-                        gamepad_throttle = 0.0
-                    else:
-                        max_speed = _GAMEPAD_GEAR_MAP.get(gamepad_gear, 35.0)
-                        gamepad_throttle = ((_GAMEPAD_JOY_CENTER - val) / 128.0) * max_speed
+                    max_speed = _GAMEPAD_GEAR_MAP.get(gamepad_gear, 35.0)
+                    gamepad_throttle = normalize_centered_axis(
+                        val,
+                        _GAMEPAD_AXIS_PROFILES["ABS_Y"],
+                        output_scale=max_speed,
+                        invert=True,
+                    )
 
                 # Right Stick X → Steering (ABS_Z on EvoFox-style pads)
                 elif event.code == 'ABS_Z':
                     val = event.state
-                    if abs(val - _GAMEPAD_JOY_CENTER) < _GAMEPAD_JOY_DEADZONE:
-                        gamepad_steering = 0.0
-                    else:
-                        gamepad_steering = ((val - _GAMEPAD_JOY_CENTER) / 128.0) * 100.0
+                    gamepad_steering = normalize_centered_axis(
+                        val,
+                        _GAMEPAD_AXIS_PROFILES["ABS_Z"],
+                        output_scale=100.0,
+                    )
 
                 # Face buttons → Gear
                 elif event.code in ('BTN_SOUTH', 'BTN_A') and event.state == 1:

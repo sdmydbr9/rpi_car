@@ -447,6 +447,7 @@ export const CarTelemetry = ({
               isEngineRunning={isEngineRunning}
               warningThreshold={400}
               size="small"
+              snappy
             />
             <Gauge 
               value={rpmRight}
@@ -457,6 +458,7 @@ export const CarTelemetry = ({
               isEngineRunning={isEngineRunning}
               warningThreshold={400}
               size="small"
+              snappy
             />
           </div>
           {targetRpm > 0 && (

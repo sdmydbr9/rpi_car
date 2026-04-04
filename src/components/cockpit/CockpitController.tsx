@@ -18,7 +18,7 @@ import type { AudioOutputDevice } from "../../lib/ttsService";
 import { useAutoAcceleration } from "../../hooks/useAutoAcceleration";
 import type { SensorStatus } from "./ServiceLight";
 import { DEFAULT_TUNING, type TuningConstants } from "./SettingsDialog";
-import type { CameraSpecs, NarrationConfig, DriverData } from "../../lib/socketClient";
+import type { CameraSpecs, NarrationConfig, DriverData, TelemetryData } from "../../lib/socketClient";
 import { toast } from "@/components/ui/sonner";
 
 interface ControlState {
@@ -189,11 +189,11 @@ export const CockpitController = () => {
   const [currentHeading, setCurrentHeading] = useState(0);
   const [slalomSign, setSlalomSign] = useState(0);
   const [cameraActualFps, setCameraActualFps] = useState(0);
-  // Fused Odometry state
-
-  // Center-zone carousel (Telemetry ↔ Odometry Map)
+  // Center-zone carousel (Telemetry ↔ optional Odometry Map)
+  const [isOdometryMapEnabled, setIsOdometryMapEnabled] = useState(false);
   const [centerCarouselRef, centerCarouselApi] = useEmblaCarousel({ loop: false, dragFree: false });
   const [centerSlide, setCenterSlide] = useState(0);
+  const pendingCenterMapOpenRef = useRef(false);
   useEffect(() => {
     if (!centerCarouselApi) return;
     const onSelect = () => setCenterSlide(centerCarouselApi.selectedScrollSnap());
@@ -201,6 +201,27 @@ export const CockpitController = () => {
     onSelect();
     return () => { centerCarouselApi.off("select", onSelect); };
   }, [centerCarouselApi]);
+  useEffect(() => {
+    if (!centerCarouselApi) return;
+
+    centerCarouselApi.reInit();
+
+    if (!isOdometryMapEnabled) {
+      centerCarouselApi.scrollTo(0, true);
+      pendingCenterMapOpenRef.current = false;
+      return;
+    }
+
+    if (!pendingCenterMapOpenRef.current) return;
+
+    const frameId = window.requestAnimationFrame(() => {
+      centerCarouselApi.reInit();
+      centerCarouselApi.scrollTo(1, true);
+      pendingCenterMapOpenRef.current = false;
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [centerCarouselApi, isOdometryMapEnabled]);
   // AI Image Analysis state (backend-synced: whether AI is analyzing camera frames)
   // Persisted across sessions — will auto-toggle on backend after connection
   const [imageAnalysisEnabled, setImageAnalysisEnabled] = useState(() => {
@@ -690,10 +711,6 @@ export const CockpitController = () => {
           temperature: isEngineRunning ? (data.temperature ?? prev.temperature) : 0,
           cpuClock: isEngineRunning ? (data.cpu_clock ?? prev.cpuClock) : 0,
           gpuClock: isEngineRunning ? (data.gpu_clock ?? prev.gpuClock) : 0,
-          rpm: isEngineRunning ? (data.rpm ?? prev.rpm) : 0,
-          rpmLeft: isEngineRunning ? (data.rpm_left ?? prev.rpmLeft) : 0,
-          rpmRight: isEngineRunning ? (data.rpm_right ?? prev.rpmRight) : 0,
-          targetRpm: isEngineRunning ? (data.target_rpm ?? prev.targetRpm) : 0,
           batteryVoltage: data.battery_voltage ?? prev.batteryVoltage,
           encoderAvailable: data.encoder_available ?? prev.encoderAvailable,
           // In console (gamepad) mode, sync steering angle from telemetry so the
@@ -706,6 +723,8 @@ export const CockpitController = () => {
           // that must maintain their state while held
         };
       });
+      // RPM is updated by the dedicated 50Hz rpm_update stream so the slower
+      // telemetry packet does not overwrite fresher gauge values.
       // Update camera enabled state from telemetry
       if (data.camera_enabled !== undefined) {
         setIsCameraEnabled(data.camera_enabled);
@@ -779,13 +798,32 @@ export const CockpitController = () => {
       }
     });
 
+    socketClient.onRpmUpdate((data) => {
+      // Check if data is fresh (add timestamp freshness validation)
+      const now = Date.now();
+      const ageMs = data.timestamp_ms ? now - data.timestamp_ms : 0;
+      const isStale = ageMs > 200; // 200ms = stale threshold
+      
+      // Only update if data is fresh
+      if (!isStale) {
+        const engineRunning = data.engine_running ?? isEngineRunning;
+        setControlState(prev => ({
+          ...prev,
+          rpm: engineRunning ? (data.rpm ?? prev.rpm) : 0,
+          rpmLeft: engineRunning ? (data.rpm_left ?? prev.rpmLeft) : 0,
+          rpmRight: engineRunning ? (data.rpm_right ?? prev.rpmRight) : 0,
+          targetRpm: engineRunning ? (data.target_rpm ?? prev.targetRpm) : 0,
+        }));
+      }
+    });
+
     // Subscribe to gamepad Start button presses (engine toggle from physical controller)
     socketClient.onGamepadStartPressed((data) => {
       console.log('🎮 [Gamepad] Start pressed — engine_running:', data.engine_running);
       setIsEngineRunning(data.engine_running);
       if (!data.engine_running) {
         setIsAutoMode(false);
-        setControlState(prev => ({ ...prev, throttle: false, brake: false, speed: 0, speedMpm: 0, temperature: 0, cpuClock: 0, gpuClock: 0, rpm: 0, batteryVoltage: 0 }));
+        setControlState(prev => ({ ...prev, throttle: false, brake: false, speed: 0, speedMpm: 0, temperature: 0, cpuClock: 0, gpuClock: 0, rpm: 0, rpmLeft: 0, rpmRight: 0, targetRpm: 0, batteryVoltage: 0 }));
       }
     });
 
@@ -826,6 +864,7 @@ export const CockpitController = () => {
 
     return () => {
       socketClient.onTelemetry(() => {}); // Unsubscribe
+      socketClient.onRpmUpdate(() => {}); // Unsubscribe
       if (analyzeNowTimeoutRef.current) {
         window.clearTimeout(analyzeNowTimeoutRef.current);
         analyzeNowTimeoutRef.current = null;
@@ -1131,6 +1170,16 @@ export const CockpitController = () => {
     socketClient.emitCameraToggle();
   }, [isConnected]);
 
+  const handleOdometryMapToggle = useCallback(() => {
+    const nextEnabled = !isOdometryMapEnabled;
+    if (nextEnabled) {
+      pendingCenterMapOpenRef.current = true;
+    } else {
+      centerCarouselApi?.scrollTo(0, true);
+    }
+    setIsOdometryMapEnabled(nextEnabled);
+  }, [centerCarouselApi, isOdometryMapEnabled]);
+
   // Toggle autopilot VIEW (does not start/stop the autopilot FSM)
   const handleAutopilotToggle = useCallback(() => {
     console.log('🎮 Autopilot view toggle');
@@ -1222,7 +1271,7 @@ export const CockpitController = () => {
     socketClient.emitAutoAccelDisable();
     socketClient.emitThrottle(false);
     socketClient.emitBrake(true);
-    setControlState(prev => ({ ...prev, throttle: false, brake: false, speed: 0, speedMpm: 0, temperature: 0, cpuClock: 0, gpuClock: 0, rpm: 0, batteryVoltage: 0 }));
+    setControlState(prev => ({ ...prev, throttle: false, brake: false, speed: 0, speedMpm: 0, temperature: 0, cpuClock: 0, gpuClock: 0, rpm: 0, rpmLeft: 0, rpmRight: 0, targetRpm: 0, batteryVoltage: 0 }));
     console.log('✅ Engine stopped');
   }, [isConnected]);
 
@@ -1234,6 +1283,8 @@ export const CockpitController = () => {
   const handleImmersiveViewToggle = useCallback(() => {
     setIsImmersiveView(prev => !prev);
   }, []);
+
+  const centerSlideCount = isOdometryMapEnabled ? 2 : 1;
 
   const handleImageAnalysisToggle = useCallback((enabled: boolean) => {
     setImageAnalysisEnabled(enabled);
@@ -1503,7 +1554,7 @@ export const CockpitController = () => {
             </div>
           </div>
           
-          {/* Center Zone: Swipeable — Telemetry ↔ Odometry Map */}
+          {/* Center Zone: Telemetry with optional Odometry Map */}
           <div className="flex-[0.4] racing-panel m-0.5 overflow-hidden flex flex-col">
             <div className="flex-1 min-h-0 overflow-hidden" ref={centerCarouselRef}>
               <div className="flex h-full">
@@ -1537,26 +1588,29 @@ export const CockpitController = () => {
                     wheelSync={wheelSyncData}
                   />
                 </div>
-                {/* Slide 2: Odometry Map */}
-                <div className="flex-[0_0_100%] min-w-0 h-full">
-                  <MiniMap />
-                </div>
+                {isOdometryMapEnabled && (
+                  <div className="flex-[0_0_100%] min-w-0 h-full">
+                    <MiniMap />
+                  </div>
+                )}
               </div>
             </div>
-            {/* Dot indicators */}
-            <div className="flex justify-center gap-1.5 py-1 border-t border-border/30">
-              {[0, 1].map((i) => (
-                <button
-                  key={i}
-                  onClick={() => centerCarouselApi?.scrollTo(i)}
-                  className={`w-1.5 h-1.5 rounded-full transition-all ${
-                    centerSlide === i
-                      ? "bg-primary scale-125"
-                      : "bg-muted-foreground/30 hover:bg-muted-foreground/50"
-                  }`}
-                />
-              ))}
-            </div>
+            {centerSlideCount > 1 && (
+              <div className="flex justify-center gap-1.5 py-1 border-t border-border/30">
+                {Array.from({ length: centerSlideCount }, (_, i) => (
+                  <button
+                    key={i}
+                    onClick={() => centerCarouselApi?.scrollTo(i)}
+                    className={`w-1.5 h-1.5 rounded-full transition-all ${
+                      centerSlide === i
+                        ? "bg-primary scale-125"
+                        : "bg-muted-foreground/30 hover:bg-muted-foreground/50"
+                    }`}
+                    title={i === 0 ? "Telemetry" : "Odometry map"}
+                  />
+                ))}
+              </div>
+            )}
           </div>
           
           {/* Right Zone: Gear Shifter or Autopilot Telemetry + Odometry */}
@@ -1577,7 +1631,9 @@ export const CockpitController = () => {
                 gyroAvailable={gyroAvailable}
                 gyroCalibrated={gyroCalibrated}
                 isMPU6050Enabled={isMPU6050Enabled}
+                isOdometryMapEnabled={isOdometryMapEnabled}
                 onEmergencyStop={isConsoleMode ? noopVoid : handleAutopilotEBrake}
+                onOdometryMapToggle={handleOdometryMapToggle}
                 onAutopilotToggle={isConsoleMode ? noopVoid : handleAutopilotToggle}
                 onStartStop={isConsoleMode ? noopVoid : handleAutopilotStartStop}
               />
@@ -1594,7 +1650,9 @@ export const CockpitController = () => {
                 onCameraToggle={isConsoleMode ? noopVoid : handleCameraToggle}
                 onTargetOpen={isConsoleMode ? noopVoid : handleTargetOpen}
                 isCameraEnabled={isCameraEnabled}
+                isOdometryMapEnabled={isOdometryMapEnabled}
                 onAutopilotToggle={isConsoleMode ? noopVoid : handleAutopilotToggle}
+                onOdometryMapToggle={handleOdometryMapToggle}
                 isEnabled={isConsoleMode ? false : isEngineRunning}
                 isEngineRunning={isEngineRunning}
                 onEngineStart={handleEngineStart}

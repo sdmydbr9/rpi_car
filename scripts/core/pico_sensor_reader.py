@@ -69,11 +69,15 @@ class PicoSensorReader:
     PAN_MIN = 60;  PAN_MAX = 120
     TILT_MIN = 60; TILT_MAX = 120
 
-    # Ackermann steering servo limits (Pico GP15)
-    # CRITICAL: from physically tested steering.py — do not exceed!
-    STEER_CENTER_PW = 1440   # µs — straight ahead
-    STEER_LEFT_PW   = 940    # µs — max left lock
-    STEER_RIGHT_PW  = 2150   # µs — max right lock
+    # Ackermann steering servo bounds (Pico GP15).
+    # The Pi owns the actual chassis calibration; the bridge keeps only a
+    # broad absolute clamp so calibration can change without reflashing.
+    STEER_CENTER_PW = 1440   # µs — fallback straight-ahead pulse
+    STEER_MIN_PW = 500       # µs — broad low-level servo guard
+    STEER_MAX_PW = 2500      # µs — broad low-level servo guard
+    # Backward-compatible aliases for older callers.
+    STEER_LEFT_PW = STEER_MIN_PW
+    STEER_RIGHT_PW = STEER_MAX_PW
 
     def __init__(self, port='/dev/ttyS0', baudrate=115200, buffer_size=10):
         self.port = port
@@ -334,11 +338,11 @@ class PicoSensorReader:
 
     def send_motor_command(self, speed, steer_pw):
         """Send MC:<speed>,<steer_pw> to drive forward with steering.
-        speed: 0-100 (duty %), steer_pw: 940-2150 (µs)."""
+        speed: 0-100 (duty %), steer_pw: absolute pulse width in µs."""
         if not self._serial or not self._running:
             return
         speed = max(0, min(100, int(speed)))
-        steer_pw = max(self.STEER_LEFT_PW, min(self.STEER_RIGHT_PW, int(steer_pw)))
+        steer_pw = max(self.STEER_MIN_PW, min(self.STEER_MAX_PW, int(steer_pw)))
         with self._write_lock:
             try:
                 self._serial.write(f"MC:{speed},{steer_pw}\n".encode())
@@ -347,11 +351,11 @@ class PicoSensorReader:
 
     def send_reverse_command(self, speed, steer_pw):
         """Send MR:<speed>,<steer_pw> to drive in reverse with steering.
-        speed: 0-100 (duty %), steer_pw: 940-2150 (µs)."""
+        speed: 0-100 (duty %), steer_pw: absolute pulse width in µs."""
         if not self._serial or not self._running:
             return
         speed = max(0, min(100, int(speed)))
-        steer_pw = max(self.STEER_LEFT_PW, min(self.STEER_RIGHT_PW, int(steer_pw)))
+        steer_pw = max(self.STEER_MIN_PW, min(self.STEER_MAX_PW, int(steer_pw)))
         with self._write_lock:
             try:
                 self._serial.write(f"MR:{speed},{steer_pw}\n".encode())
@@ -391,7 +395,7 @@ class PicoSensorReader:
     def send_lr_pwm(self, left_pwm, right_pwm, steer_pw=None, forward=True):
         """Send ML:<left>,<right>[,<steer_pw>,<F|R>] for independent L/R motor PWM.
         left_pwm, right_pwm: 0-100 (duty %).
-        steer_pw: optional steering servo pulse width in µs (940-2150).
+        steer_pw: optional steering servo pulse width in µs.
         forward: direction flag (True=forward, False=reverse)."""
         if not self._serial or not self._running:
             return
@@ -399,7 +403,7 @@ class PicoSensorReader:
         right_pwm = max(0, min(100, int(right_pwm)))
         cmd = f"ML:{left_pwm},{right_pwm}"
         if steer_pw is not None:
-            steer_pw = max(940, min(2150, int(steer_pw)))
+            steer_pw = max(self.STEER_MIN_PW, min(self.STEER_MAX_PW, int(steer_pw)))
             direction = 'F' if forward else 'R'
             cmd += f",{steer_pw},{direction}"
         with self._write_lock:
@@ -407,6 +411,10 @@ class PicoSensorReader:
                 self._serial.write(f"{cmd}\n".encode())
             except Exception:
                 pass
+
+    def send_steering_pw(self, steer_pw):
+        """Move the steering servo without applying drive power."""
+        self.send_lr_pwm(0, 0, steer_pw=steer_pw, forward=True)
 
     def close(self):
         self._running = False
@@ -475,13 +483,13 @@ def send_center():
 
 def send_motor_command(speed, steer_pw):
     """Send forward motor + steering command to Pico.
-    speed: 0-100 (duty %), steer_pw: 940-2150 (µs)."""
+    speed: 0-100 (duty %), steer_pw: absolute pulse width in µs."""
     if _global_reader:
         _global_reader.send_motor_command(speed, steer_pw)
 
 def send_reverse_command(speed, steer_pw):
     """Send reverse motor + steering command to Pico.
-    speed: 0-100 (duty %), steer_pw: 940-2150 (µs)."""
+    speed: 0-100 (duty %), steer_pw: absolute pulse width in µs."""
     if _global_reader:
         _global_reader.send_reverse_command(speed, steer_pw)
 
@@ -504,6 +512,12 @@ def send_lr_pwm(left_pwm, right_pwm, steer_pw=None, forward=True):
     """Send independent L/R motor PWM. 0-100 duty %. Optional steering PW + direction."""
     if _global_reader:
         _global_reader.send_lr_pwm(left_pwm, right_pwm, steer_pw, forward)
+
+
+def send_steering_pw(steer_pw):
+    """Move the steering servo without applying drive power."""
+    if _global_reader:
+        _global_reader.send_steering_pw(steer_pw)
 
 
 class PicoEncoderProxy:

@@ -5,6 +5,7 @@ let socket: Socket | null = null;
 
 // Telemetry callback (legacy, for backward compatibility)
 let telemetryCallback: ((data: TelemetryData) => void) | null = null;
+let rpmUpdateCallback: ((data: RpmUpdateData) => void) | null = null;
 // Telemetry subscribers (new, supports multiple subscribers)
 const telemetrySubscribers = new Set<(data: TelemetryData) => void>();
 let cameraResponseCallback: ((data: CameraResponse) => void) | null = null;
@@ -128,6 +129,15 @@ export interface TelemetryData {
   return_to_start_active?: boolean;
 }
 
+export interface RpmUpdateData {
+  rpm: number;
+  rpm_left?: number;
+  rpm_right?: number;
+  target_rpm?: number;
+  engine_running?: boolean;
+  timestamp_ms?: number;
+}
+
 export interface CameraResponse {
   status: 'ok' | 'error' | 'blocked';
   message?: string;
@@ -194,6 +204,12 @@ export function connectToServer(serverIp: string, port: number = 5000): Promise<
       }
       // Call all subscribers
       telemetrySubscribers.forEach((callback) => callback(data));
+    });
+
+    socket.on('rpm_update', (data: RpmUpdateData) => {
+      if (rpmUpdateCallback) {
+        rpmUpdateCallback(data);
+      }
     });
 
     socket.on('camera_response', (data: CameraResponse) => {
@@ -873,6 +889,7 @@ export function disconnectFromServer(): void {
     socket.disconnect();
     socket = null;
     telemetryCallback = null;
+    rpmUpdateCallback = null;
     telemetrySubscribers.clear();
   }
 }
@@ -911,6 +928,13 @@ export function onHeartbeatStatus(callback: (active: boolean) => void): void {
  */
 export function onTelemetry(callback: (data: TelemetryData) => void): void {
   telemetryCallback = callback;
+}
+
+/**
+ * Subscribe to high-frequency RPM updates.
+ */
+export function onRpmUpdate(callback: (data: RpmUpdateData) => void): void {
+  rpmUpdateCallback = callback;
 }
 
 /**
@@ -1291,6 +1315,7 @@ export default {
   isConnected,
   onConnectionStateChange,
   onTelemetry,
+  onRpmUpdate,
   subscribeTelemetry,
   emitEngineStart,
   emitEngineStop,

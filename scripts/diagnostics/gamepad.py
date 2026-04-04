@@ -14,6 +14,12 @@ from inputs import get_gamepad
 
 # Import CarSystem for unified motor control with closed-loop RPM sync
 from motor import CarSystem
+from gamepad_axis import (
+    build_default_axis_profiles,
+    describe_axis_profile,
+    load_inputs_axis_profiles,
+    normalize_centered_axis,
+)
 
 # Import the Pico bridge 
 from pico_sensor_reader import (
@@ -42,6 +48,8 @@ gp_throttle = 0.0
 gp_steering = 0.0
 JOY_CENTER = 128
 JOY_DEADZONE = 15 
+AXIS_PROFILES = build_default_axis_profiles(center=JOY_CENTER, deadzone=JOY_DEADZONE)
+_axis_profiles_loaded = False
 
 current_gear = "1"
 current_max_speed = 35.0  # Default to Gear 1
@@ -74,65 +82,76 @@ def drive_like_a_car(throttle, steering, current_gz):
     global curr_L, curr_R
     target_yaw_rate = (steering / 100.0) * MAX_YAW_RATE
     corrected_steering = max(-100, min(100, steering + ((target_yaw_rate - current_gz) * GYRO_KP)))
-    
-    left_target = throttle + corrected_steering
-    right_target = throttle - corrected_steering
+    servo_angle = max(-50.0, min(50.0, corrected_steering * 0.5))
+    target_speed = abs(throttle)
 
-    max_val = max(abs(left_target), abs(right_target))
-    if max_val > 100.0:
-        left_target = (left_target / max_val) * 100.0
-        right_target = (right_target / max_val) * 100.0
+    if abs(throttle) < 5 and abs(steering) < 5:
+        target_speed = 0.0
 
-    is_forward_l = left_target >= 0
-    is_forward_r = right_target >= 0
-    
-    if abs(throttle) < 5 and abs(steering) < 5: 
-        left_target = right_target = 0
-        is_forward_l = is_forward_r = True
-
-    # Ramp toward target speeds
-    target_L = abs(left_target)
-    target_R = abs(right_target)
-    if curr_L < target_L: curr_L = min(target_L, curr_L + RAMP_STEP)
-    elif curr_L > target_L: curr_L = max(target_L, curr_L - RAMP_STEP)
-    if curr_R < target_R: curr_R = min(target_R, curr_R + RAMP_STEP)
-    elif curr_R > target_R: curr_R = max(target_R, curr_R - RAMP_STEP)
+    if curr_L < target_speed:
+        curr_L = min(target_speed, curr_L + RAMP_STEP)
+    elif curr_L > target_speed:
+        curr_L = max(target_speed, curr_L - RAMP_STEP)
+    curr_R = curr_L
 
     # Map gear string for CarSystem
     gear_map = {"1": "1", "2": "2", "3": "3", "SPORT 🚀": "S"}
     gear_key = gear_map.get(current_gear, "1")
     car_system.set_gear(gear_key)
 
-    # Drive through CarSystem → WheelSpeedController (closed-loop RPM sync)
-    car_system._set_raw_motors(curr_L, curr_R, is_forward_l, is_forward_r)
+    if curr_L < 1.0:
+        curr_L = curr_R = 0.0
+        if abs(servo_angle) >= 1.0:
+            car_system.send_steering_only(angle=servo_angle)
+        else:
+            car_system.stop()
+        return
+
+    car_system._apply_steering(curr_L, servo_angle, forward=(throttle >= 0))
+
+
+def _refresh_axis_profiles():
+    global AXIS_PROFILES, _axis_profiles_loaded
+    AXIS_PROFILES, source_path = load_inputs_axis_profiles(AXIS_PROFILES)
+    _axis_profiles_loaded = True
+    if source_path:
+        summary = ", ".join(
+            describe_axis_profile(axis_code, AXIS_PROFILES[axis_code])
+            for axis_code in ("ABS_Y", "ABS_Z")
+        )
+        print(f"🎮 Axis calibration from {source_path}: {summary}")
 
 # =================================================================
 # 🎮 GAMEPAD INPUT THREAD (EVOFOX 8-BIT SCALING)
 # =================================================================
 def gamepad_loop():
-    global gp_throttle, gp_steering, status_msg, running
+    global gp_throttle, gp_steering, status_msg, running, _axis_profiles_loaded, _select_last_press
     global current_gear, current_max_speed
     
     while True:
         try:
             events = get_gamepad()
+            if not _axis_profiles_loaded:
+                _refresh_axis_profiles()
             for event in events:
                 # 🕹️ Left Stick Y (Throttle)
                 if event.code == 'ABS_Y':
                     val = event.state
-                    if abs(val - JOY_CENTER) < JOY_DEADZONE: 
-                        gp_throttle = 0.0
-                    else:
-                        # Throttle relies on the CURRENT active gear
-                        gp_throttle = ((JOY_CENTER - val) / 128.0) * current_max_speed
+                    gp_throttle = normalize_centered_axis(
+                        val,
+                        AXIS_PROFILES["ABS_Y"],
+                        output_scale=current_max_speed,
+                        invert=True,
+                    )
                 
                 # 🕹️ Right Stick X (Steering) -> ABS_Z
                 elif event.code == 'ABS_Z':
                     val = event.state
-                    if abs(val - JOY_CENTER) < JOY_DEADZONE: 
-                        gp_steering = 0.0
-                    else:
-                        gp_steering = ((val - JOY_CENTER) / 128.0) * 100.0
+                    gp_steering = normalize_centered_axis(
+                        val,
+                        AXIS_PROFILES["ABS_Z"],
+                        output_scale=100.0,
+                    )
                 
                 # ⚙️ GEAR SHIFTING (A, B, X, Y buttons)
                 # Note: `inputs` maps face buttons differently per driver. 
@@ -169,6 +188,7 @@ def gamepad_loop():
                 
             status_msg = "🎮 EvoFox Active"
         except Exception:
+            _axis_profiles_loaded = False
             status_msg = "⚠️ Gamepad Error"
             time.sleep(1)
 

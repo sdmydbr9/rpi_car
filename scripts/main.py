@@ -68,7 +68,7 @@ from io import BytesIO
 from enum import Enum
 from collections import deque
 from sensors import SensorSystem
-from motor import CarSystem
+from motor import CarSystem, load_steering_calibration
 from autopilot_pid import AutoPilot, State
 import follow_target
 from vision import VisionSystem
@@ -89,12 +89,20 @@ from pico_sensor_reader import (
     get_pico_rpm,
 )
 from drive_logger import DriveLogger
+from gamepad_axis import (
+    build_default_axis_profiles,
+    describe_axis_profile,
+    load_inputs_axis_profiles,
+    normalize_centered_axis,
+)
 from config import read_thermal_temp_c
 from runtime_fault_handler import get_fault_handler
 from odometry_integration import (
     init_odometry, update_odometry, get_diagnostics_dict as get_odometry_diagnostics,
     reset_pose as odometry_reset_pose, get_position as odometry_get_position,
     get_heading_deg as odometry_get_heading_deg,
+    get_linear_velocity as odometry_get_linear_velocity,
+    get_angular_velocity as odometry_get_angular_velocity,
 )
 from odom_nav import (
     ObstacleMemory, StuckSlipDetector, TrailRecorder, ReturnToStartNavigator,
@@ -294,6 +302,7 @@ WHEEL_CIRCUMFERENCE_M = math.pi * WHEEL_DIAMETER_M  # ~0.2356m per revolution
 # --- COMPASS CALIBRATION / HEADING ---
 _COMPASS_CAL_PATH = os.path.join(_scripts_dir, "diagnostics", "compass_cal.json")
 _MIN_COMPASS_VECTOR_SQ = 1e-6
+_ODOMETRY_STEER_MAX_DEG = 30.0
 
 
 def _wrap_heading_360(angle):
@@ -306,6 +315,15 @@ def _safe_float(value, default=0.0):
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+_STEERING_CAL = CarSystem.apply_steering_calibration(load_steering_calibration())
+print(
+    "✅ [Steering Config] Active calibration: "
+    f"left={_STEERING_CAL['left_pw']}us "
+    f"center={_STEERING_CAL['center_pw']}us "
+    f"right={_STEERING_CAL['right_pw']}us"
+)
 
 
 def _load_compass_calibration():
@@ -361,6 +379,24 @@ def _resolve_compass_headings(packet, relative_heading=0.0, relative_target=0.0)
     yaw_delta = _safe_float(relative_target) - _safe_float(relative_heading)
     target_heading = _wrap_heading_360(heading + yaw_delta)
     return round(heading, 1), round(target_heading, 1)
+
+
+def _steering_pw_to_odometry_angle_deg(steer_pw):
+    """Map the actual steering pulse width to the physical wheel angle used by odometry."""
+    center_pw = float(CarSystem.STEER_CENTER_PW)
+    left_pw = float(CarSystem.STEER_LEFT_PW)
+    right_pw = float(CarSystem.STEER_RIGHT_PW)
+    pw = _safe_float(steer_pw, center_pw)
+    delta = pw - center_pw
+
+    if delta >= 0.0:
+        span = max(1.0, right_pw - center_pw)
+    else:
+        span = max(1.0, center_pw - left_pw)
+
+    steering_fraction = delta / span
+    steering_deg = steering_fraction * _ODOMETRY_STEER_MAX_DEG
+    return max(-_ODOMETRY_STEER_MAX_DEG, min(_ODOMETRY_STEER_MAX_DEG, steering_deg))
 
 # --- GEAR RPM RANGES (min_rpm, max_rpm) ---
 # Each gear defines a target RPM band.  The physics loop ramps
@@ -2146,6 +2182,13 @@ GPIO.setwarnings(False)
 try:
     pico_reader = init_pico_reader('/dev/ttyS0')
     print("✅ Pico sensor bridge initialized (UART)")
+    if getattr(pico_reader, "_running", False):
+        car_system.send_steering_only(angle=0)
+        print(
+            "✅ [Steering] Centered from Pi calibration: "
+            f"{CarSystem.STEER_CENTER_PW}us "
+            f"[{CarSystem.STEER_LEFT_PW}..{CarSystem.STEER_RIGHT_PW}]"
+        )
 except Exception as e:
     pico_reader = None
     print(f"⚠️  Pico sensor bridge initialization error: {e}")
@@ -2209,6 +2252,10 @@ autopilot = AutoPilot(
 _return_to_start_nav = ReturnToStartNavigator(
     car_system, odometry_get_position, odometry_get_heading_deg,
     _trail_recorder, _obstacle_memory,
+    get_sensor_packet=pico_get_sensor_packet,
+    get_linear_velocity=odometry_get_linear_velocity,
+    get_angular_velocity=odometry_get_angular_velocity,
+    log_dir=os.path.join(PROJECT_ROOT, "rover_logs"),
 )
 
 # Store a copy of the original class-level defaults (immutable reference for reset)
@@ -2343,6 +2390,8 @@ car_state = {
     "odometry_v_linear": 0.0,            # Linear velocity (m/s)
     "odometry_v_angular": 0.0,           # Angular velocity (rad/s)
     "odometry_active": False,            # True when odometry is initialized and running
+    "odometry_error_count": 0,           # Consecutive odometry update failures
+    "odometry_steer_pw": CarSystem.STEER_CENTER_PW,  # Last actual steering pulse sent to Pico
     # 🛡️ Odometry-aware navigation state
     "stuck_detected": False,             # True when stuck (high cmd, no motion)
     "slip_detected": False,              # True when wheel slip detected
@@ -2789,6 +2838,10 @@ def restore_gear_after_ebrake():
 
 _GAMEPAD_JOY_CENTER = 128
 _GAMEPAD_JOY_DEADZONE = 15
+_GAMEPAD_AXIS_PROFILES = build_default_axis_profiles(
+    center=_GAMEPAD_JOY_CENTER,
+    deadzone=_GAMEPAD_JOY_DEADZONE,
+)
 
 # Gear → max throttle %  (matches gamepad.py GEAR configuration)
 _GAMEPAD_GEAR_MAP = {
@@ -2818,6 +2871,20 @@ _GAMEPAD_KNOWN_USB_IDS = [
     ("054c", "05c4"),  # Sony DualShock 4 (Wireless Controller mode)
     ("054c", "09cc"),  # Sony DualShock 4 v2
 ]
+
+
+def _refresh_gamepad_axis_profiles():
+    """Probe the connected controller and capture its real axis ranges."""
+    global _GAMEPAD_AXIS_PROFILES
+    profiles, source_path = load_inputs_axis_profiles(_GAMEPAD_AXIS_PROFILES)
+    _GAMEPAD_AXIS_PROFILES = profiles
+
+    if source_path:
+        summary = ", ".join(
+            describe_axis_profile(axis_code, _GAMEPAD_AXIS_PROFILES[axis_code])
+            for axis_code in ("ABS_Y", "ABS_Z")
+        )
+        print(f"🎮 [Gamepad] Axis calibration from {source_path}: {summary}")
 
 
 def _gamepad_find_usb_device_path():
@@ -2967,6 +3034,7 @@ def _gamepad_reader_thread():
             if not car_state["gamepad_connected"]:
                 car_state["gamepad_connected"] = True
                 print("🎮 [Gamepad] Controller connected!")
+                _refresh_gamepad_axis_profiles()
                 # Auto hot-start on first gamepad connect (event / headless mode)
                 if _auto_start_pending:
                     _auto_start_pending = False
@@ -2977,20 +3045,23 @@ def _gamepad_reader_thread():
                 # --- Left Stick Y → Throttle ---
                 if event.code == 'ABS_Y':
                     val = event.state
-                    if abs(val - _GAMEPAD_JOY_CENTER) < _GAMEPAD_JOY_DEADZONE:
-                        car_state["gamepad_throttle"] = 0.0
-                    else:
-                        gp_gear = car_state["gamepad_gear"]
-                        max_speed = _GAMEPAD_GEAR_MAP.get(gp_gear, 35.0)
-                        car_state["gamepad_throttle"] = ((_GAMEPAD_JOY_CENTER - val) / 128.0) * max_speed
+                    gp_gear = car_state["gamepad_gear"]
+                    max_speed = _GAMEPAD_GEAR_MAP.get(gp_gear, 35.0)
+                    car_state["gamepad_throttle"] = normalize_centered_axis(
+                        val,
+                        _GAMEPAD_AXIS_PROFILES["ABS_Y"],
+                        output_scale=max_speed,
+                        invert=True,
+                    )
 
                 # --- Right Stick X → Steering ---
                 elif event.code == 'ABS_Z':
                     val = event.state
-                    if abs(val - _GAMEPAD_JOY_CENTER) < _GAMEPAD_JOY_DEADZONE:
-                        car_state["gamepad_steering"] = 0.0
-                    else:
-                        car_state["gamepad_steering"] = ((val - _GAMEPAD_JOY_CENTER) / 128.0) * 100.0
+                    car_state["gamepad_steering"] = normalize_centered_axis(
+                        val,
+                        _GAMEPAD_AXIS_PROFILES["ABS_Z"],
+                        output_scale=100.0,
+                    )
 
                 # --- Face buttons → Gear (with Select combos) ---
                 elif event.code in ('BTN_SOUTH', 'BTN_A') and event.state == 1:
@@ -3775,14 +3846,24 @@ def physics_loop():
                         # feedforward doesn't spike and overshoot.  The PID
                         # tracks the slowly rising target continuously, matching
                         # rpm_test.py's proven approach.
-                        if target_rpm < float(max_rpm):
-                            target_rpm += ACCEL_RATE * 5  # RPM accel (~10 RPM/tick, 500 RPM/s)
-                        target_rpm = min(target_rpm, float(max_rpm))
+                        # For reverse gear (R), target_rpm must be NEGATIVE
+                        if gear == "R":
+                            if target_rpm > float(-max_rpm):
+                                target_rpm -= ACCEL_RATE * 5  # RPM accel (ramp toward negative)
+                            target_rpm = max(target_rpm, float(-max_rpm))
+                        else:
+                            if target_rpm < float(max_rpm):
+                                target_rpm += ACCEL_RATE * 5  # RPM accel (~10 RPM/tick, 500 RPM/s)
+                            target_rpm = min(target_rpm, float(max_rpm))
                     else:
                         # No throttle: coast down
                         if target_rpm > 0:
                             target_rpm -= COAST_RATE * 15  # RPM coast (~7.5 RPM/tick)
                             target_rpm = max(0, target_rpm)
+                        elif target_rpm < 0:
+                            # Reverse coast: ramp toward 0 from negative
+                            target_rpm += COAST_RATE * 15
+                            target_rpm = min(0, target_rpm)
 
                         # ── FRICTION COAST TIMEOUT ──
                         # When gas is released, allow max 2 seconds of friction
@@ -3866,9 +3947,9 @@ def physics_loop():
             car_state["is_braking"] = False
             was_autonomous = False
 
-        # Ackermann steering: angle is applied to the servo directly.
-        # Dual independent PID controls per-wheel PWM for matched speed.
-        steer_angle = angle  # from gamepad/UI, ±100 range mapped later
+        # Ackermann steering: angle is already expressed in servo degrees
+        # on the shared -50..+50 control scale used by UI and gamepad.
+        steer_angle = angle
 
         # --- 4. APPLY TO MOTORS (Ackermann + Dual Independent PID) ---
         # Send per-wheel PWM + steering angle to Pico via UART ML command.
@@ -3883,10 +3964,14 @@ def physics_loop():
                 _pid_pwm_r = 0.0
             else:
                 is_forward = (gear != "R")
-                # Map steer_angle from gamepad range (±100) to servo degrees (±50°)
-                servo_angle = max(-50, min(50, steer_angle * 0.5))
+                servo_angle = max(-50, min(50, steer_angle))
                 car_system._apply_steering(current, servo_angle, forward=is_forward,
                                            speed_l=_pid_pwm_l, speed_r=_pid_pwm_r)
+            car_state["odometry_steer_pw"] = getattr(
+                car_system,
+                "_steering_pw",
+                CarSystem.STEER_CENTER_PW,
+            )
         except Exception as e:
             print(f"❌ [Physics] Motor GPIO error: {e}")
 
@@ -4402,6 +4487,9 @@ def http_engine_stop():
     car_state["is_braking"] = True
     car_state["current_pwm"] = 0
     car_state["obstacle_state"] = "IDLE"
+    if _return_to_start_nav and _return_to_start_nav.active:
+        _return_to_start_nav.stop()
+        car_state["return_to_start_active"] = False
     try:
         car_system.brake()
     except Exception:
@@ -4717,6 +4805,9 @@ def on_engine_stop(data=None):
     car_state["is_braking"] = True
     car_state["current_pwm"] = 0
     car_state["obstacle_state"] = "IDLE"
+    if _return_to_start_nav and _return_to_start_nav.active:
+        _return_to_start_nav.stop()
+        car_state["return_to_start_active"] = False
     try:
         car_system.brake()
     except Exception:
@@ -5355,10 +5446,15 @@ def on_return_to_start(data):
         car_state["return_to_start_active"] = False
         print("🛑 [RTH] Return-to-start cancelled")
     else:
+        if not car_state.get("engine_running", False):
+            print("⚠️  [RTH] Engine must be ON to start return-to-start")
+            return
         # Disable any active autonomous mode first
         if car_state["autonomous_mode"]:
             car_state["autonomous_mode"] = False
             autopilot.stop()
+        if car_state["hunter_mode"]:
+            car_state["hunter_mode"] = False
         _return_to_start_nav.start()
         car_state["return_to_start_active"] = True
         print("🔙 [RTH] Return-to-start activated")
@@ -6131,17 +6227,22 @@ except Exception as _enc_err:
     print(f"⚠️  [Encoder] Failed to init Pico encoder proxies: {_enc_err}")
 
 def encoder_and_power_thread():
-    """Read RPM from Pico (calculated on-device) every 50ms, battery/current every 1s."""
-    interval = 0.05  # 50ms for RPM (20 Hz) — matches Pico's 50 Hz output
-    power_counter = 0  # count intervals; read power every 20th (= 1s)
+    """Read Pico odometry data at 50 Hz and battery/current roughly once per second."""
+    interval = 0.02  # 20ms for RPM / odometry (50 Hz), matching diagnostics/odometry.py
+    power_counter = 0  # count intervals; read power every 50th (= ~1s)
 
     while True:
         try:
             time.sleep(interval)
 
-            # ── Read RPM directly from Pico (calculated on-device at 50 Hz) ──
-            # Always read RPM from Pico packet — independent of encoder proxy availability
-            rpm_l, rpm_r = get_pico_rpm()
+            # ── Read the latest Pico packet once per tick ──────────────────
+            pico_pkt = pico_get_sensor_packet()
+            if pico_pkt is not None:
+                rpm_l = pico_pkt.rpm_left
+                rpm_r = pico_pkt.rpm_right
+            else:
+                rpm_l = 0.0
+                rpm_r = 0.0
             avg_rpm = (rpm_l + rpm_r) / 2.0
             speed_mpm = avg_rpm * WHEEL_CIRCUMFERENCE_M
 
@@ -6151,7 +6252,6 @@ def encoder_and_power_thread():
             car_state["encoder_speed_mpm"] = round(speed_mpm, 2)
 
             # --- Pico sensor data (accel, laser, temp) for Grafana telemetry ---
-            pico_pkt = pico_get_sensor_packet()
             if pico_pkt:
                 car_state["accel_x"] = pico_pkt.accel_x
                 car_state["accel_y"] = pico_pkt.accel_y
@@ -6159,80 +6259,82 @@ def encoder_and_power_thread():
                 car_state["laser_mm"] = pico_pkt.laser_mm if pico_pkt.laser_mm > 0 else 0
                 car_state["imu_temp_c"] = round(pico_pkt.temp_c, 1)
 
-            # --- FUSED ODOMETRY UPDATE (UKF sensor fusion @ 20 Hz) ---
-            try:
-                rpm_l_odom = car_state.get("encoder_rpm_left", 0.0)
-                rpm_r_odom = car_state.get("encoder_rpm_right", 0.0)
+            # --- FUSED ODOMETRY UPDATE (aligned with diagnostics/odometry.py) ---
+            if pico_pkt is None:
+                car_state["odometry_active"] = False
+            else:
+                try:
+                    compass_odom = _compute_compass_heading_deg(pico_pkt.mag_x, pico_pkt.mag_y)
+                    if compass_odom is not None:
+                        car_state["compass_heading"] = round(compass_odom, 1)
 
-                # PWM-based RPM fallback when encoders report 0 but motors are active
-                # Calibrated from max_rpm_test: ~285 RPM at duty=100, dead zone ~35
-                if abs(rpm_l_odom) < 0.5 and abs(rpm_r_odom) < 0.5:
-                    pwm_l = abs(car_state.get("current_pwm_l", 0.0))
-                    pwm_r = abs(car_state.get("current_pwm_r", 0.0))
-                    PWM_DEAD_ZONE = 20.0
-                    PWM_TO_RPM = 3.5  # ~285 RPM at pwm=100 → 2.85, with margin
-                    if pwm_l > PWM_DEAD_ZONE or pwm_r > PWM_DEAD_ZONE:
-                        direction_sign = -1.0 if car_state.get("direction") == "backward" else 1.0
-                        rpm_l_odom = max(0.0, pwm_l - PWM_DEAD_ZONE) * PWM_TO_RPM * direction_sign
-                        rpm_r_odom = max(0.0, pwm_r - PWM_DEAD_ZONE) * PWM_TO_RPM * direction_sign
+                    steer_pw_odom = car_state.get("odometry_steer_pw", CarSystem.STEER_CENTER_PW)
+                    steer_odom = _steering_pw_to_odometry_angle_deg(steer_pw_odom)
 
-                gyro_z_odom = car_state.get("gyro_z", 0.0)
-                steer_odom = car_state.get("steer_angle", 0.0)
-                compass_odom = car_state.get("compass_heading", None)
-                accel_x_odom = car_state.get("accel_x", 0.0)
+                    update_odometry(
+                        rpm_left=pico_pkt.rpm_left,
+                        rpm_right=pico_pkt.rpm_right,
+                        gyro_z_deg_s=pico_pkt.gyro_z,
+                        mag_heading_deg=compass_odom,
+                        steering_angle_deg=steer_odom,
+                        accel_x=pico_pkt.accel_x,
+                    )
 
-                odom_state = update_odometry(
-                    rpm_left=rpm_l_odom,
-                    rpm_right=rpm_r_odom,
-                    gyro_z_deg_s=gyro_z_odom,
-                    mag_heading_deg=compass_odom,
-                    steering_angle_deg=steer_odom,
-                    accel_x=accel_x_odom,
-                )
-                if odom_state is not None:
-                    car_state["odometry_x_m"] = round(odom_state.x, 4)
-                    car_state["odometry_y_m"] = round(odom_state.y, 4)
-                    car_state["odometry_heading_deg"] = round(math.degrees(odom_state.theta), 1)
-                    car_state["odometry_v_linear"] = round(odom_state.v_linear, 3)
-                    car_state["odometry_v_angular"] = round(odom_state.v_angular, 3)
+                    x_m, y_m = odometry_get_position()
+                    heading_deg = odometry_get_heading_deg()
+                    v_linear = odometry_get_linear_velocity()
+                    v_angular = odometry_get_angular_velocity()
+
+                    car_state["odometry_x_m"] = round(x_m, 4)
+                    car_state["odometry_y_m"] = round(y_m, 4)
+                    car_state["odometry_heading_deg"] = round(heading_deg, 1)
+                    car_state["odometry_v_linear"] = round(v_linear, 3)
+                    car_state["odometry_v_angular"] = round(v_angular, 3)
                     car_state["odometry_active"] = True
+                    car_state["odometry_error_count"] = 0
 
                     # --- ODOM-NAV: trail recorder, obstacle memory, stuck/slip ---
-                    _trail_recorder.update(odom_state.x, odom_state.y)
+                    _trail_recorder.update(x_m, y_m)
 
-                    # Project laser hit into world frame for obstacle memory
-                    laser_m = car_state.get("laser_mm", 0) / 1000.0
+                    laser_m = pico_pkt.laser_mm / 1000.0
                     if 0.02 < laser_m < 2.0:
                         _obstacle_memory.add_laser_hit(
-                            odom_state.x, odom_state.y, odom_state.theta,
+                            x_m, y_m, math.radians(heading_deg),
                             laser_m, laser_angle_rad=0.0,
                         )
 
-                    # Stuck / slip detection
                     cmd_pwm = max(
                         abs(car_state.get("current_pwm_l", 0)),
                         abs(car_state.get("current_pwm_r", 0)),
                     )
                     _stuck_slip_detector.update(
-                        cmd_pwm, odom_state.v_linear,
-                        rpm_l_odom, rpm_r_odom,
+                        cmd_pwm, v_linear,
+                        pico_pkt.rpm_left, pico_pkt.rpm_right,
                     )
                     car_state["stuck_detected"] = _stuck_slip_detector.stuck
                     car_state["slip_detected"] = _stuck_slip_detector.slip
-            except Exception as odom_err:
-                if not hasattr(encoder_and_power_thread, '_odom_err_count'):
-                    encoder_and_power_thread._odom_err_count = 0
-                encoder_and_power_thread._odom_err_count += 1
-                # Log first error with full traceback, then every 100th
-                if encoder_and_power_thread._odom_err_count == 1:
-                    logging.warning("[Odometry] Update error (#1): %s", odom_err, exc_info=True)
-                elif encoder_and_power_thread._odom_err_count % 100 == 0:
-                    logging.warning("[Odometry] Update error (count=%d): %s",
-                                    encoder_and_power_thread._odom_err_count, odom_err)
+                except Exception as odom_err:
+                    err_count = int(car_state.get("odometry_error_count", 0) or 0) + 1
+                    car_state["odometry_error_count"] = err_count
+                    car_state["odometry_active"] = False
+                    if err_count == 1 or err_count % 50 == 0:
+                        logging.warning("[Odometry] Update error (#%d): %s", err_count, odom_err, exc_info=(err_count == 1))
+                    if err_count >= 10:
+                        try:
+                            odometry_reset_pose(0, 0, 0)
+                            _trail_recorder.clear()
+                            _obstacle_memory.clear()
+                            _stuck_slip_detector.reset()
+                            car_state["stuck_detected"] = False
+                            car_state["slip_detected"] = False
+                            car_state["odometry_error_count"] = 0
+                            logging.warning("[Odometry] Filter reset after consecutive update failures")
+                        except Exception:
+                            pass
 
             # --- Battery / Current from Pico ADC (every ~1s) ---
             power_counter += 1
-            if power_counter >= 20:  # 20 × 50ms = 1s
+            if power_counter >= 50:  # 50 × 20ms = ~1s
                 power_counter = 0
                 try:
                     batt_v = pico_get_battery_voltage()
@@ -6277,7 +6379,100 @@ def encoder_and_power_thread():
 # Start encoder + power thread
 encoder_thread = threading.Thread(target=encoder_and_power_thread, daemon=True)
 encoder_thread.start()
-print("🔄 [Encoder] ✅ Encoder + power telemetry thread started (100ms interval)")
+print("🔄 [Encoder] ✅ Encoder + power telemetry thread started (20ms interval)")
+
+# High-frequency RPM-only broadcast thread
+def rpm_broadcast():
+    """Broadcast RPM-only telemetry to all connected clients at 50Hz."""
+    interval = 0.02  # 20ms = 50Hz
+    while True:
+        try:
+            if car_state["encoder_available"]:
+                pico_pkt = pico_get_sensor_packet()
+                if pico_pkt is not None:
+                    rpm_left = round(pico_pkt.rpm_left, 1)
+                    rpm_right = round(pico_pkt.rpm_right, 1)
+                else:
+                    rpm_left = round(float(car_state.get("encoder_rpm_left", 0.0) or 0.0), 1)
+                    rpm_right = round(float(car_state.get("encoder_rpm_right", 0.0) or 0.0), 1)
+                rpm_avg = round((rpm_left + rpm_right) / 2.0, 1)
+            else:
+                rpm_avg = round(float(car_state.get("current_pwm", 0.0) or 0.0) * 2.2, 1)
+                rpm_left = rpm_avg
+                rpm_right = rpm_avg
+
+            socketio.emit('rpm_update', {
+                "rpm": rpm_avg,
+                "rpm_left": rpm_left,
+                "rpm_right": rpm_right,
+                "target_rpm": round(float(car_state.get("current_target_rpm", 0.0) or 0.0), 1),
+                "engine_running": car_state["engine_running"],
+                "timestamp_ms": int(time.time() * 1000),
+            })
+            time.sleep(interval)
+        except Exception as e:
+            print(f"❌ RPM broadcast error: {e}")
+            time.sleep(interval)
+
+# ──────────────────────────────────────────────────────────────────
+# CRITICAL PATH: Fast Motor Control Loop (100+ Hz, SCHED_FIFO priority)
+# ──────────────────────────────────────────────────────────────────
+def fast_motor_control_loop():
+    """
+    CRITICAL PATH (100+ Hz, SCHED_FIFO priority)
+    Directly reads fresh Pico data and controls motors.
+    Independent of telemetry/UI delays.
+    Ensures RPM limits are always respected.
+    """
+    from pico_sensor_reader import send_lr_pwm
+    
+    interval = 0.01  # 10ms = 100Hz
+    
+    while True:
+        try:
+            time.sleep(interval)
+            
+            # Read FRESH Pico packet directly (not from car_state)
+            pico_pkt = pico_get_sensor_packet()
+            if pico_pkt is None:
+                continue
+            
+            # Get current target RPM from car_state (updated by UI/gamepad)
+            target_rpm = car_state.get("current_target_rpm", 0.0)
+            gear = normalize_gear_label(car_state.get("gear", "N"))
+            
+            # Call motor PID with fresh RPM data (returns computed PWM)
+            pwm_l, pwm_r = car_system.rpm_pid_tick(target_rpm)
+            
+            # Preserve the live steering pulse so the ML command also carries
+            # an explicit direction flag; otherwise the Pico defaults bare
+            # ML:<left>,<right> packets to forward and reverse gets cancelled.
+            steer_pw = int(getattr(car_system, "_steering_pw", CarSystem.STEER_CENTER_PW))
+            send_lr_pwm(int(pwm_l), int(pwm_r), steer_pw, forward=(gear != "R"))
+            
+        except Exception as e:
+            print(f"❌ Fast motor control error: {e}")
+            time.sleep(interval)
+
+# Start high-frequency RPM broadcaster
+rpm_thread = threading.Thread(target=rpm_broadcast, daemon=True)
+rpm_thread.start()
+print("🔄 [Telemetry] ✅ RPM broadcast thread started (20ms interval)")
+
+# Start motor control thread (critical path, independent of telemetry)
+motor_thread = threading.Thread(target=fast_motor_control_loop, daemon=True)
+motor_thread.start()
+print("🚀 [Control] Fast motor control loop started (100Hz, SCHED_FIFO eligible)")
+
+# Attempt to set realtime priority (requires sudo)
+try:
+    import os
+    os.sched_setscheduler(os.getpid(), os.SCHED_FIFO, os.sched_param(50))
+    print("✅ [Control] Motor thread set to SCHED_FIFO priority 50")
+except PermissionError:
+    print("⚠️  [Control] Need sudo for realtime priority. Run with: sudo python main.py")
+except Exception as e:
+    print(f"⚠️  [Control] Could not set realtime priority: {e}")
 
 # Telemetry broadcast thread
 def telemetry_broadcast():
@@ -6430,6 +6625,7 @@ def telemetry_broadcast():
                 "return_to_start_active": _return_to_start_nav.active if _return_to_start_nav else False,
             }
             
+            telemetry_data["timestamp_ms"] = int(time.time() * 1000)
             socketio.emit('telemetry_update', telemetry_data)
             time.sleep(0.05)  # 20Hz = 50ms
         except Exception as e:

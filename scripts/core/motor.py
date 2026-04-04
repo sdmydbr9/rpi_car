@@ -16,8 +16,90 @@ Provides a clean API for the AutoPilot and manual control:
   - cleanup()              Center steering and stop motors
 """
 
+import json
+import os
 import time
 import threading
+
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+STEERING_CONFIG_FILE = os.path.join(_PROJECT_ROOT, ".steering_config.json")
+STEERING_SERVO_ABSOLUTE_MIN_PW = 500
+STEERING_SERVO_ABSOLUTE_MAX_PW = 2500
+_DEFAULT_STEERING_CALIBRATION = {
+    "center_pw": 1440,
+    "left_pw": 940,
+    "right_pw": 2150,
+}
+
+
+def default_steering_calibration() -> dict:
+    """Return the built-in steering calibration used when no file exists."""
+    return dict(_DEFAULT_STEERING_CALIBRATION)
+
+
+def _coerce_int(value, fallback):
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return int(fallback)
+
+
+def sanitize_steering_calibration(calibration) -> dict:
+    """Validate and normalize steering pulse widths loaded from disk/UI."""
+    calibration = calibration or {}
+    sanitized = {
+        "left_pw": _coerce_int(
+            calibration.get("left_pw"),
+            _DEFAULT_STEERING_CALIBRATION["left_pw"],
+        ),
+        "center_pw": _coerce_int(
+            calibration.get("center_pw"),
+            _DEFAULT_STEERING_CALIBRATION["center_pw"],
+        ),
+        "right_pw": _coerce_int(
+            calibration.get("right_pw"),
+            _DEFAULT_STEERING_CALIBRATION["right_pw"],
+        ),
+    }
+
+    left = sanitized["left_pw"]
+    center = sanitized["center_pw"]
+    right = sanitized["right_pw"]
+
+    if not (
+        STEERING_SERVO_ABSOLUTE_MIN_PW <= left < center < right <= STEERING_SERVO_ABSOLUTE_MAX_PW
+    ):
+        raise ValueError(
+            "Steering calibration must satisfy "
+            f"{STEERING_SERVO_ABSOLUTE_MIN_PW} <= left < center < right <= "
+            f"{STEERING_SERVO_ABSOLUTE_MAX_PW}"
+        )
+
+    return sanitized
+
+
+def load_steering_calibration(path: str = STEERING_CONFIG_FILE) -> dict:
+    """Load steering calibration from disk, falling back to tested defaults."""
+    defaults = default_steering_calibration()
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as handle:
+                calibration = sanitize_steering_calibration(json.load(handle))
+            print(f"✅ [Steering Config] Loaded persisted config: {calibration}")
+            return calibration
+    except Exception as exc:
+        print(f"⚠️  [Steering Config] Failed to load {path}: {exc}")
+    return defaults
+
+
+def save_steering_calibration(calibration, path: str = STEERING_CONFIG_FILE) -> dict:
+    """Persist a validated steering calibration to disk."""
+    sanitized = sanitize_steering_calibration(calibration)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(sanitized, handle, indent=2)
+    print(f"💾 [Steering Config] Saved to {path}")
+    return sanitized
 
 
 # ──────────────────────────────────────────────
@@ -262,18 +344,37 @@ class CarSystem:
     All motor and steering commands are sent to the Pico W over UART.
     The Pico handles PWM ramping, direction changes, and servo control.
 
-    Steering servo limits (from physically tested steering.py):
-        CENTER = 1440µs, LEFT = 940µs, RIGHT = 2150µs
-        Exceeding these limits risks mechanical damage!
+    Steering calibration is owned on the Pi side and converted into
+    pulse widths before UART commands are sent. The Pico only keeps a
+    broad servo-safe clamp so steering can be recalibrated without
+    reflashing firmware.
 
     Steering angle convention:
-        -50° = full left (940µs), 0° = straight (1440µs), +50° = full right (2150µs)
+        -50° = full left, 0° = straight, +50° = full right
     """
 
-    # Steering servo pulse width limits (µs) — LOCKED, do not change!
-    STEER_CENTER_PW = 1440
-    STEER_LEFT_PW   = 940
-    STEER_RIGHT_PW  = 2150
+    STEER_SERVO_MIN_PW = STEERING_SERVO_ABSOLUTE_MIN_PW
+    STEER_SERVO_MAX_PW = STEERING_SERVO_ABSOLUTE_MAX_PW
+    STEER_CENTER_PW = _DEFAULT_STEERING_CALIBRATION["center_pw"]
+    STEER_LEFT_PW = _DEFAULT_STEERING_CALIBRATION["left_pw"]
+    STEER_RIGHT_PW = _DEFAULT_STEERING_CALIBRATION["right_pw"]
+
+    @classmethod
+    def get_steering_calibration(cls) -> dict:
+        return {
+            "left_pw": int(cls.STEER_LEFT_PW),
+            "center_pw": int(cls.STEER_CENTER_PW),
+            "right_pw": int(cls.STEER_RIGHT_PW),
+        }
+
+    @classmethod
+    def apply_steering_calibration(cls, calibration) -> dict:
+        """Update the active steering calibration used for pulse mapping."""
+        sanitized = sanitize_steering_calibration(calibration)
+        cls.STEER_LEFT_PW = sanitized["left_pw"]
+        cls.STEER_CENTER_PW = sanitized["center_pw"]
+        cls.STEER_RIGHT_PW = sanitized["right_pw"]
+        return dict(sanitized)
 
     def __init__(self):
         # Internal bookkeeping
@@ -355,6 +456,17 @@ class CarSystem:
         else:
             pw = self.STEER_CENTER_PW + (angle / 50.0) * (self.STEER_RIGHT_PW - self.STEER_CENTER_PW)
         return max(self.STEER_LEFT_PW, min(self.STEER_RIGHT_PW, int(pw)))
+
+    def _pw_to_angle(self, pw):
+        """Approximate a steering angle from the active pulse-width calibration."""
+        pw = max(self.STEER_LEFT_PW, min(self.STEER_RIGHT_PW, int(pw)))
+        if pw < self.STEER_CENTER_PW:
+            span = max(1.0, self.STEER_CENTER_PW - self.STEER_LEFT_PW)
+            angle = -50.0 * (self.STEER_CENTER_PW - pw) / span
+        else:
+            span = max(1.0, self.STEER_RIGHT_PW - self.STEER_CENTER_PW)
+            angle = 50.0 * (pw - self.STEER_CENTER_PW) / span
+        return int(round(max(-50.0, min(50.0, angle))))
 
     def _send_drive(self, speed, steer_pw, forward=True):
         """Send motor + steering command to Pico via UART.
@@ -470,8 +582,8 @@ class CarSystem:
         self._rpm_right = alpha * rpm_r_raw + (1.0 - alpha) * self._rpm_right
         self._rpm_actual = (self._rpm_left + self._rpm_right) / 2.0
 
-        if target_rpm <= 0:
-            # Target is zero — reset PID state, keep _rpm_actual live
+        if target_rpm == 0:
+            # Target is exactly zero — reset PID state, keep _rpm_actual live
             # so is_car_moving() can detect coasting wheels
             self._rpm_integral_l = 0.0
             self._rpm_integral_r = 0.0
@@ -488,12 +600,18 @@ class CarSystem:
             return (0.0, 0.0)
 
         # ── Feedforward: deadband + linear gain (matched to rpm_test.py) ──
-        base_pwm = self._rpm_deadband + (target_rpm * self._rpm_ff_gain)
+        # For reverse (negative target_rpm), use absolute value for PWM calculation
+        # The forward flag at _apply_steering level controls motor direction
+        is_reverse = target_rpm < 0
+        abs_target = abs(target_rpm)
+        base_pwm = self._rpm_deadband + (abs_target * self._rpm_ff_gain)
 
         duty_cap = self.power_limiter.max_safe_duty
 
         # ── PID LEFT ──
-        error_l = target_rpm - self._rpm_left
+        # For reverse, negate actual RPM for error calculation (reverse wheels have negative RPM)
+        left_actual = -self._rpm_left if is_reverse else self._rpm_left
+        error_l = abs_target - left_actual
         self._rpm_integral_l += error_l * dt
         self._rpm_integral_l = max(-1000, min(1000, self._rpm_integral_l))
         deriv_l = (error_l - self._rpm_prev_error_l) / dt if dt > 0 else 0.0
@@ -502,14 +620,15 @@ class CarSystem:
         pwm_l = base_pwm + (self._rpm_kp * error_l +
                              self._rpm_ki * self._rpm_integral_l +
                              self._rpm_kd * deriv_l)
-        floor_l = self._rpm_deadband if target_rpm > 0 else 0.0
-        pwm_l = max(floor_l, min(duty_cap, pwm_l))
+        pwm_l = max(self._rpm_deadband, min(duty_cap, pwm_l))
         # Anti-windup: if clamped at floor, don't let integral wind down
-        if pwm_l == floor_l and error_l < 0:
+        if pwm_l == self._rpm_deadband and error_l < 0:
             self._rpm_integral_l -= error_l * dt
 
         # ── PID RIGHT ──
-        error_r = target_rpm - self._rpm_right
+        # For reverse, negate actual RPM for error calculation
+        right_actual = -self._rpm_right if is_reverse else self._rpm_right
+        error_r = abs_target - right_actual
         self._rpm_integral_r += error_r * dt
         self._rpm_integral_r = max(-1000, min(1000, self._rpm_integral_r))
         deriv_r = (error_r - self._rpm_prev_error_r) / dt if dt > 0 else 0.0
@@ -518,10 +637,9 @@ class CarSystem:
         pwm_r = base_pwm + (self._rpm_kp * error_r +
                              self._rpm_ki * self._rpm_integral_r +
                              self._rpm_kd * deriv_r)
-        floor_r = self._rpm_deadband if target_rpm > 0 else 0.0
-        pwm_r = max(floor_r, min(duty_cap, pwm_r))
+        pwm_r = max(self._rpm_deadband, min(duty_cap, pwm_r))
         # Anti-windup: if clamped at floor, don't let integral wind down
-        if pwm_r == floor_r and error_r < 0:
+        if pwm_r == self._rpm_deadband and error_r < 0:
             self._rpm_integral_r -= error_r * dt
 
         # ── Stall detection + dynamic power escalation ──
@@ -624,6 +742,37 @@ class CarSystem:
         self._current_speed = speed
         self._is_forward = True
         self._send_drive(speed, self._steering_pw, forward=True)
+
+    def send_steering_only(self, angle=None, pulse_width=None):
+        """Move steering while stationary without commanding wheel motion."""
+        from pico_sensor_reader import send_steering_pw
+
+        if pulse_width is not None:
+            self._steering_pw = max(
+                self.STEER_SERVO_MIN_PW,
+                min(self.STEER_SERVO_MAX_PW, int(pulse_width)),
+            )
+            self._steering_angle = self._pw_to_angle(self._steering_pw)
+        else:
+            if angle is not None:
+                self._steering_angle = max(-50, min(50, angle))
+            self._steering_pw = self._angle_to_pw(self._steering_angle)
+
+        send_steering_pw(self._steering_pw)
+        return self._steering_pw
+
+    def update_steering_calibration(self, calibration, persist=False, send_now=False):
+        """Swap in a new steering calibration and optionally persist/apply it."""
+        sanitized = type(self).apply_steering_calibration(calibration)
+        if persist:
+            save_steering_calibration(sanitized)
+
+        self._steering_pw = self._angle_to_pw(self._steering_angle)
+        if self._current_speed > 0:
+            self._send_drive(self._current_speed, self._steering_pw, forward=self._is_forward)
+        elif send_now:
+            self.send_steering_only()
+        return sanitized
 
     def set_steering(self, angle):
         """Set steering angle (-50 to +50). Negative = left, positive = right.

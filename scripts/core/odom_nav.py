@@ -9,11 +9,13 @@ Provides:
   - Trail recording for the web UI mini-map
 """
 
+import csv
 import math
+import os
 import time
 import threading
 from collections import deque
-from typing import Optional, Tuple, List, Dict
+from typing import Callable, Optional, Tuple, List, Dict
 
 # ---------------------------------------------------------------------------
 # Obstacle Memory (project laser hits into world frame, keep 1-2 s)
@@ -237,49 +239,99 @@ def _wrap_angle_deg(angle: float) -> float:
 # ---------------------------------------------------------------------------
 
 class ReturnToStartNavigator:
-    """Simple return-to-start using odometry pose.
+    """Standalone-style return-to-start navigator used by the main app."""
 
-    Strategy: backtrack along the full recorded trail (reversed),
-    thinned to ~10 cm waypoint spacing for smooth driving.
-    Final waypoint is always (0, 0) — the start position.
-    """
+    WAYPOINT_SPACING_M = 0.30
+    ARRIVE_DIST_M = 0.20
+    FINAL_ARRIVE_M = 0.10
+    NAV_SPEED = 50
+    SLOW_SPEED = 40
+    STEER_GAIN = 1.8
+    MAX_STEER = 35
+    OBSTACLE_DIST_MM = 200
+    OBSTACLE_CLEAR_MM = 300
+    STUCK_WINDOW_S = 2.0
+    STUCK_DIST_M = 0.015
+    MAX_STUCK_COUNT = 3
+    UTURN_THRESHOLD_DEG = 90
+    BREAKAWAY_STEP = 5
+    BREAKAWAY_MAX = 90
+    RPM_MOVING = 3.0
+    PHYSICAL_STEER_MAX_DEG = 30.0
+    SERVO_STEER_MAX_DEG = 50.0
 
-    WAYPOINT_SPACING_M = 0.10  # thin trail to ~10 cm between waypoints
-    ARRIVE_DIST_M = 0.08       # 8 cm arrival tolerance per waypoint
-    FINAL_ARRIVE_M = 0.05      # 5 cm for the final origin waypoint
-    NAV_SPEED = 35              # PWM % for RTH driving
-    STEER_GAIN = 1.8            # heading error → steering angle gain
-    MAX_STEER = 35              # max steering angle (degrees)
-
-    def __init__(self, car_system, get_position, get_heading_deg,
-                 trail_recorder: TrailRecorder, obstacle_memory: ObstacleMemory):
+    def __init__(
+        self,
+        car_system,
+        get_position,
+        get_heading_deg,
+        trail_recorder: TrailRecorder,
+        obstacle_memory: ObstacleMemory,
+        get_sensor_packet: Optional[Callable[[], object]] = None,
+        get_linear_velocity: Optional[Callable[[], float]] = None,
+        get_angular_velocity: Optional[Callable[[], float]] = None,
+        log_dir: Optional[str] = None,
+    ):
         self._car = car_system
         self._get_pos = get_position
         self._get_hdg = get_heading_deg
         self._trail = trail_recorder
         self._obstacles = obstacle_memory
+        self._get_sensor_packet = get_sensor_packet or (lambda: None)
+        self._get_linear_velocity = get_linear_velocity or (lambda: 0.0)
+        self._get_angular_velocity = get_angular_velocity or (lambda: 0.0)
+        self._log_dir = log_dir
         self._active = False
         self._thread: Optional[threading.Thread] = None
+        self._status = "idle"
+        self._waypoints: List[Tuple[float, float]] = []
+        self._current_wp = 0
+        self._total_wp = 0
+        self._applied_pwm = 0
+        self._wheels_spinning = False
+        self._state_lock = threading.Lock()
 
     @property
     def active(self):
         return self._active
 
+    @property
+    def status(self):
+        return self._status
+
+    @property
+    def current_waypoint(self):
+        return self._current_wp
+
+    @property
+    def total_waypoints(self):
+        return self._total_wp
+
+    def get_waypoints(self) -> List[Tuple[float, float]]:
+        with self._state_lock:
+            return list(self._waypoints)
+
     def start(self):
         if self._active:
             return
         self._active = True
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._status = "navigating"
+        self._thread = threading.Thread(target=self._run, daemon=True, name="rth-nav")
         self._thread.start()
 
     def stop(self):
         self._active = False
+        self._status = "cancelled"
+        self._reset_drive_state()
+        try:
+            self._car.brake()
+        except Exception:
+            pass
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
 
     def _thin_waypoints(self, points: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
-        """Reduce dense trail to waypoints spaced ~WAYPOINT_SPACING_M apart."""
         if not points:
             return []
         result = [points[0]]
@@ -290,80 +342,308 @@ class ReturnToStartNavigator:
                 result.append((x, y))
         return result
 
+    def _physical_to_servo_angle(self, angle_deg: float) -> float:
+        angle_deg = max(-self.MAX_STEER, min(self.MAX_STEER, float(angle_deg)))
+        servo = angle_deg * (self.SERVO_STEER_MAX_DEG / self.PHYSICAL_STEER_MAX_DEG)
+        return max(-self.SERVO_STEER_MAX_DEG, min(self.SERVO_STEER_MAX_DEG, servo))
+
+    def _drive(self, target_pwm: float, steer_deg: float, forward: bool = True) -> int:
+        packet = self._get_sensor_packet()
+        avg_rpm = 0.0
+        if packet is not None:
+            avg_rpm = (abs(packet.rpm_left) + abs(packet.rpm_right)) / 2.0
+
+        if avg_rpm >= self.RPM_MOVING:
+            self._wheels_spinning = True
+            if self._applied_pwm > target_pwm:
+                self._applied_pwm = max(int(target_pwm), self._applied_pwm - 3)
+            else:
+                self._applied_pwm = int(target_pwm)
+        else:
+            self._wheels_spinning = False
+            if self._applied_pwm < target_pwm:
+                self._applied_pwm = int(target_pwm)
+            self._applied_pwm = min(self.BREAKAWAY_MAX, self._applied_pwm + self.BREAKAWAY_STEP)
+
+        pwm = int(max(0, min(100, self._applied_pwm)))
+        servo_angle = self._physical_to_servo_angle(steer_deg)
+        self._car._apply_steering(
+            pwm,
+            servo_angle,
+            forward=forward,
+            speed_l=pwm,
+            speed_r=pwm,
+        )
+        return pwm
+
+    def _reset_drive_state(self):
+        self._applied_pwm = 0
+        self._wheels_spinning = False
+
+    def _open_log(self):
+        if not self._log_dir:
+            return None, None
+        try:
+            os.makedirs(self._log_dir, exist_ok=True)
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            log_path = os.path.join(self._log_dir, f"rth_log_{timestamp}.csv")
+            csv_file = open(log_path, "w", newline="", buffering=1)
+            writer = csv.writer(csv_file)
+            writer.writerow([
+                "elapsed_s", "event", "wp_idx", "wp_total",
+                "target_x", "target_y", "pos_x", "pos_y", "heading_deg",
+                "v_linear", "v_angular", "dist_m", "desired_deg", "error_deg",
+                "steer_deg", "cmd_pwm", "laser_mm", "rpm_left", "rpm_right", "note",
+            ])
+            return csv_file, writer
+        except Exception:
+            return None, None
+
+    def _log(self, writer, start_time: float, event: str, wp_idx: int = 0,
+             target_x: float = 0.0, target_y: float = 0.0, dist_m: float = 0.0,
+             desired_deg: float = 0.0, error_deg: float = 0.0,
+             steer_deg: float = 0.0, cmd_pwm: float = 0.0,
+             packet=None, note: str = ""):
+        if writer is None:
+            return
+        pos_x, pos_y = self._get_pos()
+        heading_deg = self._get_hdg()
+        v_linear = self._get_linear_velocity()
+        v_angular = self._get_angular_velocity()
+        laser_mm = packet.laser_mm if packet is not None else 0
+        rpm_left = packet.rpm_left if packet is not None else 0.0
+        rpm_right = packet.rpm_right if packet is not None else 0.0
+        writer.writerow([
+            f"{time.monotonic() - start_time:.3f}",
+            event,
+            wp_idx,
+            self._total_wp,
+            f"{target_x:.4f}",
+            f"{target_y:.4f}",
+            f"{pos_x:.4f}",
+            f"{pos_y:.4f}",
+            f"{heading_deg:.1f}",
+            f"{v_linear:.4f}",
+            f"{v_angular:.4f}",
+            f"{dist_m:.4f}",
+            f"{desired_deg:.1f}",
+            f"{error_deg:.1f}",
+            f"{steer_deg:.1f}",
+            int(cmd_pwm),
+            laser_mm,
+            f"{rpm_left:.1f}",
+            f"{rpm_right:.1f}",
+            note,
+        ])
+
     def _run(self):
-        """Backtrack along full recorded path, then drive to origin."""
         import logging
+
+        csv_file, writer = self._open_log()
+        started_at = time.monotonic()
+
         try:
             logging.info("[RTH] Starting return-to-start navigation")
+            trail_points = self._trail.get_full_path()
 
-            # Get full trail and reverse it for backtracking
-            full_trail = self._trail.get_full_path()
-
-            if len(full_trail) < 2:
-                # No meaningful trail — drive directly to origin
-                logging.info("[RTH] No trail recorded, driving directly to origin")
+            if len(trail_points) < 2:
                 waypoints = [(0.0, 0.0)]
+                logging.info("[RTH] No trail recorded, driving directly to origin")
             else:
-                # Reverse trail (backtrack from current position toward start)
-                full_trail.reverse()
-                # Thin to manageable waypoint spacing
-                waypoints = self._thin_waypoints(full_trail)
-                # Always end at exact origin
-                lx, ly = waypoints[-1] if waypoints else (1.0, 1.0)
-                if math.sqrt(lx * lx + ly * ly) > self.FINAL_ARRIVE_M:
+                trail_points.reverse()
+                waypoints = self._thin_waypoints(trail_points)
+                last_x, last_y = waypoints[-1] if waypoints else (1.0, 1.0)
+                if math.sqrt(last_x * last_x + last_y * last_y) > self.FINAL_ARRIVE_M:
                     waypoints.append((0.0, 0.0))
 
+            with self._state_lock:
+                self._waypoints = waypoints
+                self._current_wp = 0
+                self._total_wp = len(waypoints)
+
             logging.info("[RTH] Following %d waypoints back to start", len(waypoints))
+            self._log(writer, started_at, "INIT", note=f"trail_points={len(trail_points)}")
+            self._reset_drive_state()
 
-            for i, (wx, wy) in enumerate(waypoints):
+            wp_idx = 0
+            while wp_idx < len(waypoints):
                 if not self._active:
-                    logging.info("[RTH] Cancelled by user at waypoint %d/%d", i, len(waypoints))
+                    self._status = "cancelled"
                     break
-                is_final = (i == len(waypoints) - 1)
-                arrive_dist = self.FINAL_ARRIVE_M if is_final else self.ARRIVE_DIST_M
-                self._navigate_to(wx, wy, arrive_dist)
 
-            # Arrived (or cancelled) — stop motors
+                target_x, target_y = waypoints[wp_idx]
+                is_final = (wp_idx == len(waypoints) - 1)
+                arrive_dist = self.FINAL_ARRIVE_M if is_final else self.ARRIVE_DIST_M
+                with self._state_lock:
+                    self._current_wp = wp_idx
+
+                if not is_final:
+                    best_skip = wp_idx
+                    pos_x, pos_y = self._get_pos()
+                    for skip_idx in range(wp_idx + 1, len(waypoints)):
+                        skip_x, skip_y = waypoints[skip_idx]
+                        if math.hypot(skip_x - pos_x, skip_y - pos_y) < self.ARRIVE_DIST_M:
+                            best_skip = skip_idx
+                    if best_skip > wp_idx:
+                        logging.info("[RTH] Look-ahead skip wp %d -> %d", wp_idx, best_skip)
+                        self._log(writer, started_at, "LOOKAHEAD_SKIP", wp_idx, target_x, target_y, note=f"skip_to={best_skip}")
+                        wp_idx = best_skip
+                        continue
+
+                pos_x, pos_y = self._get_pos()
+                desired_deg = math.degrees(math.atan2(target_y - pos_y, target_x - pos_x))
+                initial_error = abs(_wrap_angle_deg(desired_deg - self._get_hdg()))
+
+                if is_final and initial_error > self.UTURN_THRESHOLD_DEG and self._active:
+                    logging.info("[RTH] Executing U-turn before final origin approach")
+                    turn_dir = -self.MAX_STEER if _wrap_angle_deg(desired_deg - self._get_hdg()) < 0 else self.MAX_STEER
+                    for _ in range(120):
+                        if not self._active:
+                            break
+                        packet = self._get_sensor_packet()
+                        if packet is not None and 0 < packet.laser_mm < self.OBSTACLE_DIST_MM:
+                            self._car.brake()
+                            self._reset_drive_state()
+                            time.sleep(0.5)
+                            continue
+                        self._drive(self.NAV_SPEED, turn_dir, forward=True)
+                        time.sleep(0.05)
+                        cur_x, cur_y = self._get_pos()
+                        fresh_desired = math.degrees(math.atan2(target_y - cur_y, target_x - cur_x))
+                        if abs(_wrap_angle_deg(fresh_desired - self._get_hdg())) < 45:
+                            break
+                    self._car.brake()
+                    self._reset_drive_state()
+                    time.sleep(0.1)
+
+                max_ticks = 600
+                stuck_count = 0
+                stuck_check_time = time.monotonic()
+                stuck_check_pos = self._get_pos()
+                waypoint_done = False
+
+                for tick in range(max_ticks):
+                    if not self._active:
+                        self._status = "cancelled"
+                        break
+
+                    packet = self._get_sensor_packet()
+                    if packet is not None and 0 < packet.laser_mm < self.OBSTACLE_DIST_MM:
+                        self._status = "obstacle"
+                        self._log(writer, started_at, "OBSTACLE", wp_idx, target_x, target_y, packet=packet, note=f"laser={packet.laser_mm}")
+                        self._car.brake()
+                        self._reset_drive_state()
+                        deadline = time.monotonic() + 10.0
+                        while self._active and time.monotonic() < deadline:
+                            time.sleep(0.1)
+                            packet = self._get_sensor_packet()
+                            if packet is not None and (packet.laser_mm <= 0 or packet.laser_mm >= self.OBSTACLE_CLEAR_MM):
+                                break
+                        self._status = "navigating"
+                        stuck_check_time = time.monotonic()
+                        stuck_check_pos = self._get_pos()
+                        continue
+
+                    pos_x, pos_y = self._get_pos()
+                    dx = target_x - pos_x
+                    dy = target_y - pos_y
+                    dist = math.hypot(dx, dy)
+
+                    if dist < arrive_dist:
+                        self._log(writer, started_at, "WP_ARRIVED", wp_idx, target_x, target_y, dist, packet=packet)
+                        waypoint_done = True
+                        break
+
+                    if not is_final and tick % 5 == 0:
+                        best_skip = wp_idx
+                        for skip_idx in range(wp_idx + 1, len(waypoints)):
+                            skip_x, skip_y = waypoints[skip_idx]
+                            if math.hypot(skip_x - pos_x, skip_y - pos_y) < self.ARRIVE_DIST_M:
+                                best_skip = skip_idx
+                        if best_skip > wp_idx:
+                            logging.info("[RTH] Navigation skip wp %d -> %d", wp_idx, best_skip)
+                            wp_idx = best_skip
+                            waypoint_done = True
+                            break
+
+                    now = time.monotonic()
+                    if now - stuck_check_time >= self.STUCK_WINDOW_S:
+                        start_x, start_y = stuck_check_pos
+                        moved = math.hypot(pos_x - start_x, pos_y - start_y)
+                        if moved < self.STUCK_DIST_M:
+                            stuck_count += 1
+                            logging.warning("[RTH] Stuck near wp %d (%d/%d)", wp_idx, stuck_count, self.MAX_STUCK_COUNT)
+                            self._log(writer, started_at, "STUCK", wp_idx, target_x, target_y, dist, packet=packet, note=f"count={stuck_count}")
+                            if stuck_count >= self.MAX_STUCK_COUNT:
+                                self._car.brake()
+                                self._reset_drive_state()
+                                time.sleep(0.3)
+                                break
+                            self._reset_drive_state()
+                            for _ in range(16):
+                                self._drive(50, 0.0, forward=False)
+                                time.sleep(0.05)
+                            self._car.brake()
+                            self._reset_drive_state()
+                            time.sleep(0.2)
+                        else:
+                            stuck_count = max(0, stuck_count - 1)
+                        stuck_check_time = now
+                        stuck_check_pos = (pos_x, pos_y)
+
+                    desired_deg = math.degrees(math.atan2(dy, dx))
+                    current_deg = self._get_hdg()
+                    error_deg = _wrap_angle_deg(desired_deg - current_deg)
+
+                    if not is_final and abs(error_deg) > 120:
+                        self._log(writer, started_at, "WP_BEHIND_SKIP", wp_idx, target_x, target_y, dist, desired_deg, error_deg, packet=packet)
+                        break
+
+                    speed = self.NAV_SPEED if abs(error_deg) < 30 else self.SLOW_SPEED
+                    steer_deg = max(-self.MAX_STEER, min(self.MAX_STEER, error_deg * self.STEER_GAIN))
+                    applied_pwm = self._drive(speed, steer_deg, forward=True)
+
+                    if tick < 5 or tick % 10 == 0:
+                        self._log(
+                            writer,
+                            started_at,
+                            "NAV",
+                            wp_idx,
+                            target_x,
+                            target_y,
+                            dist,
+                            desired_deg,
+                            error_deg,
+                            steer_deg,
+                            applied_pwm,
+                            packet=packet,
+                            note=f"spinning={self._wheels_spinning}",
+                        )
+                    time.sleep(0.05)
+
+                if not waypoint_done and self._active:
+                    self._log(writer, started_at, "WP_TIMEOUT", wp_idx, target_x, target_y, note=f"stuck={stuck_count}")
+                wp_idx += 1
+
             self._car.brake()
-            logging.info("[RTH] Navigation complete — stopped at (%.2f, %.2f)",
-                         *self._get_pos())
-        except Exception as e:
+            self._reset_drive_state()
+            if self._active:
+                self._status = "arrived"
+                logging.info("[RTH] Arrived near origin at (%.3f, %.3f)", *self._get_pos())
+            else:
+                self._status = "cancelled"
+        except Exception as exc:
             import logging
-            logging.error("[RTH] Navigation error: %s", e, exc_info=True)
-            self._car.brake()
+            self._status = "idle"
+            logging.error("[RTH] Navigation error: %s", exc, exc_info=True)
+            try:
+                self._car.brake()
+            except Exception:
+                pass
+            self._reset_drive_state()
         finally:
             self._active = False
-
-    def _navigate_to(self, target_x: float, target_y: float,
-                     arrive_dist: float = 0.08):
-        """Steer toward target waypoint until within arrive_dist."""
-        MAX_TICKS = 400  # ~8 s at 20 Hz — generous timeout per waypoint
-
-        for _ in range(MAX_TICKS):
-            if not self._active:
-                return
-
-            cx, cy = self._get_pos()
-            dx = target_x - cx
-            dy = target_y - cy
-            dist = math.sqrt(dx * dx + dy * dy)
-
-            if dist < arrive_dist:
-                return
-
-            # Desired heading toward waypoint (math atan2 → angle from +X axis)
-            desired_deg = math.degrees(math.atan2(dy, dx))
-            current_deg = self._get_hdg()
-            error = _wrap_angle_deg(desired_deg - current_deg)
-
-            # If heading error is very large (>90°), slow down
-            speed = self.NAV_SPEED if abs(error) < 60 else max(20, self.NAV_SPEED // 2)
-
-            # Proportional steering
-            steer = max(-self.MAX_STEER, min(self.MAX_STEER, error * self.STEER_GAIN))
-            self._car._apply_steering(speed, steer, forward=True)
-            time.sleep(0.05)
-
-        # Timeout on this waypoint — move on
-        self._car.stop()
-        time.sleep(0.1)
+            with self._state_lock:
+                self._current_wp = 0
+            if csv_file is not None:
+                csv_file.close()

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import ColorThief from "colorthief";
-import { Music, OctagonX, Pause, Play, Power, PowerOff, Radio, SkipBack, SkipForward, Volume2 } from "lucide-react";
+import { Map, Music, OctagonX, Pause, Play, Power, PowerOff, Radio, SkipBack, SkipForward, Volume2 } from "lucide-react";
 
 interface GearShifterProps {
   currentGear: string;
@@ -9,12 +9,14 @@ interface GearShifterProps {
   isAutoMode: boolean;
   isCameraEnabled: boolean;
   isAutopilotEnabled: boolean;
+  isOdometryMapEnabled: boolean;
   eBrakeActive: boolean;
   onEmergencyStop: () => void;
   onAutoMode: () => void;
   onCameraToggle: () => void;
   onTargetOpen: () => void;
   onAutopilotToggle: () => void;
+  onOdometryMapToggle: () => void;
   isEnabled?: boolean;
   isEngineRunning?: boolean;
   onEngineStart?: () => void;
@@ -225,12 +227,14 @@ export const GearShifter = ({
   isAutoMode,
   isCameraEnabled,
   isAutopilotEnabled,
+  isOdometryMapEnabled,
   eBrakeActive,
   onEmergencyStop,
   onAutoMode,
   onCameraToggle,
   onTargetOpen,
   onAutopilotToggle,
+  onOdometryMapToggle,
   isEnabled = true,
   isEngineRunning = false,
   onEngineStart,
@@ -438,7 +442,7 @@ export const GearShifter = ({
         </button>
       </div>
 
-      {/* AUTOPILOT, CAMERA - All in a single horizontal line */}
+      {/* AUTOPILOT, MAP, CAMERA, TARGET - All in a single horizontal line */}
       <div className="flex w-full gap-1 mb-0.5 justify-center items-center flex-shrink-0">
         {/* AUTOPILOT Button */}
         <button
@@ -457,6 +461,22 @@ export const GearShifter = ({
             <path d="m22.375 22.375c14.375-14.375 37.234-15.172 52.562-2.4375l-2.9375 0.1875c-0.85938 0.046875-1.5156 0.79688-1.4688 1.6562 0.046875 0.82812 0.73438 1.4688 1.5625 1.4688h0.09375l6.6094-0.42188c0.078125 0 0.14062-0.046875 0.21875-0.0625 0.10938-0.015625 0.21875-0.046875 0.32812-0.09375s0.1875-0.125 0.28125-0.1875c0.0625-0.046875 0.125-0.0625 0.1875-0.125 0 0 0-0.03125 0.03125-0.046875 0.078125-0.078125 0.125-0.1875 0.1875-0.28125 0.046875-0.078125 0.10938-0.14062 0.14062-0.23438 0.03125-0.078125 0.03125-0.17188 0.046875-0.26562 0.015625-0.10938 0.046875-0.21875 0.046875-0.34375v-0.046875l-0.42188-6.6094c-0.0625-0.85938-0.78125-1.5156-1.6562-1.4688-0.85938 0.046875-1.5156 0.79688-1.4688 1.6562l0.17188 2.7656c-16.531-13.703-41.203-12.828-56.719 2.6875-10.25 10.25-14.484 24.844-11.328 39.016 0.15625 0.73438 0.8125 1.2188 1.5312 1.2188 0.10938 0 0.23438 0 0.34375-0.03125 0.84375-0.1875 1.375-1.0156 1.1875-1.8594-2.9219-13.125 1-26.625 10.5-36.125z" fill="currentColor"/>
             <path d="m91.172 40.828c-0.1875-0.84375-1.0156-1.375-1.8594-1.1875s-1.375 1.0156-1.1875 1.8594c2.9219 13.125-1 26.625-10.5 36.125-14.375 14.375-37.234 15.172-52.562 2.4375l2.9375-0.1875c0.85938-0.046875 1.5156-0.79688 1.4688-1.6562s-0.78125-1.5-1.6562-1.4688l-6.6094 0.42188c-0.078125 0-0.14062 0.046875-0.21875 0.0625-0.10938 0.015625-0.21875 0.046875-0.32812 0.09375s-0.1875 0.125-0.28125 0.1875c-0.0625 0.046875-0.125 0.0625-0.1875 0.125 0 0 0-0.03125-0.03125-0.046875-0.078125 0.078125-0.125-0.1875-0.1875-0.28125-0.046875-0.078125-0.10938-0.14062-0.14062-0.23438-0.03125-0.078125-0.03125-0.17188-0.046875-0.26562-0.015625-0.10938-0.046875-0.21875-0.046875-0.34375v0.046875l0.42188 6.6094c0.046875 0.82812 0.73438 1.4688 1.5625 1.4688h0.09375c0.85938-0.046875 1.5156-0.79688 1.4688-1.6562l-0.17188-2.7656c7.7812 6.4531 17.344 9.7031 26.922 9.7031 10.797 0 21.609-4.1094 29.828-12.344 10.25-10.25 14.484-24.844 11.328-39.016z" fill="currentColor"/>
           </svg>
+        </button>
+
+        {/* ODOMETRY MAP Button */}
+        <button
+          onClick={onOdometryMapToggle}
+          className="w-[clamp(34px,6vw,44px)] h-[clamp(34px,6vw,44px)] rounded-full bg-transparent flex items-center justify-center transition-all duration-100 touch-feedback"
+          style={{
+            outline: 'none',
+            border: '1px solid rgb(20, 184, 166)'
+          }}
+          title={isOdometryMapEnabled ? 'ODOMETRY MAP: ON' : 'ODOMETRY MAP: OFF'}
+        >
+          <Map
+            className="w-[clamp(20px,4vw,28px)] h-[clamp(20px,4vw,28px)]"
+            style={{ color: isOdometryMapEnabled ? 'rgb(20, 184, 166)' : 'rgb(107, 114, 128)' }}
+          />
         </button>
 
         {/* CAMERA Button */}

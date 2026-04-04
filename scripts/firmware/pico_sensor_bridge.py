@@ -180,24 +180,29 @@ print(f"✅ Pan-tilt servos: GP18 (pan:{PAN_MIN}–{PAN_MAX}°), GP19 (tilt:{TIL
 
 # =====================================================
 # ACKERMANN STEERING SERVO (PWM on GP15)
-# CRITICAL: Limits from physically tested steering.py
+# The Pi now owns the chassis-specific left/center/right calibration.
+# Keep only a broad low-level clamp here so future calibration changes
+# do not require reflashing the Pico.
 # =====================================================
 steer_servo = PWM(Pin(15))
 steer_servo.freq(50)
 
-STEER_CENTER_PW = 1440
-STEER_LEFT_PW   = 940
-STEER_RIGHT_PW  = 2150
-_current_steer_pw = STEER_CENTER_PW
+STEER_DEFAULT_CENTER_PW = 1440
+STEER_ABS_MIN_PW = 500
+STEER_ABS_MAX_PW = 2500
+_current_steer_pw = STEER_DEFAULT_CENTER_PW
 
 def set_steering_pw(pw_us):
     global _current_steer_pw
-    pw_us = _servo_clamp(pw_us, STEER_LEFT_PW, STEER_RIGHT_PW)
+    pw_us = _servo_clamp(pw_us, STEER_ABS_MIN_PW, STEER_ABS_MAX_PW)
     _current_steer_pw = pw_us
     steer_servo.duty_ns(pw_us * 1000)
 
-set_steering_pw(STEER_CENTER_PW)
-print(f"✅ Steering servo: GP15 — center {STEER_CENTER_PW}µs [{STEER_LEFT_PW}–{STEER_RIGHT_PW}]")
+set_steering_pw(STEER_DEFAULT_CENTER_PW)
+print(
+    "✅ Steering servo: GP15 — default center "
+    f"{STEER_DEFAULT_CENTER_PW}µs [abs {STEER_ABS_MIN_PW}–{STEER_ABS_MAX_PW}]"
+)
 
 # =====================================================
 # L298N MOTOR DRIVER (2WD rear drive)
