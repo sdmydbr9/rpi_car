@@ -197,9 +197,7 @@ def set_steering_pw(pw_us):
     global _current_steer_pw
     pw_us = _servo_clamp(pw_us, _steer_left_pw, _steer_right_pw)
     _current_steer_pw = pw_us
-    # For 50Hz PWM (20ms period): convert pulse width (µs) to 16-bit duty cycle
-    duty_u16 = int((pw_us / 20000.0) * 65535)
-    steer_servo.duty_u16(duty_u16)
+    steer_servo.duty_ns(pw_us * 1000)
 
 def set_steering_calibration(left_pw, center_pw, right_pw):
     global _steer_left_pw, _steer_center_pw, _steer_right_pw
