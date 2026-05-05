@@ -10,6 +10,16 @@ import time
 from collections import deque
 from dataclasses import dataclass
 
+from steering_calibration import (
+    DEFAULT_STEERING_CALIBRATION,
+    clamp_steering_pw,
+    default_steering_calibration,
+    normalize_steering_calibration,
+)
+
+
+_runtime_steering_calibration = default_steering_calibration()
+
 
 @dataclass
 class SensorPacket:
@@ -71,9 +81,9 @@ class PicoSensorReader:
 
     # Ackermann steering servo limits (Pico GP15)
     # CRITICAL: from physically tested steering.py — do not exceed!
-    STEER_CENTER_PW = 1440   # µs — straight ahead
-    STEER_LEFT_PW   = 940    # µs — max left lock
-    STEER_RIGHT_PW  = 2150   # µs — max right lock
+    STEER_CENTER_PW = DEFAULT_STEERING_CALIBRATION["center_pw"]   # µs — straight ahead
+    STEER_LEFT_PW   = DEFAULT_STEERING_CALIBRATION["left_pw"]     # µs — max left lock
+    STEER_RIGHT_PW  = DEFAULT_STEERING_CALIBRATION["right_pw"]    # µs — max right lock
 
     def __init__(self, port='/dev/ttyS0', baudrate=115200, buffer_size=10):
         self.port = port
@@ -93,6 +103,8 @@ class PicoSensorReader:
         self._consecutive_errors = 0  # Count of parse errors in a row
         self._last_error_time = 0.0  # When last error occurred
         self._error_rate_window = deque(maxlen=100)  # Recent 100 packets (error=True/False)
+        self._steering_calibration = default_steering_calibration()
+        self.set_steering_calibration(_runtime_steering_calibration)
 
         self._connect()
 
@@ -332,13 +344,38 @@ class PicoSensorReader:
 
     # ── Motor / steering UART commands ─────────────────────────
 
+    def get_steering_calibration(self):
+        return dict(self._steering_calibration)
+
+    def set_steering_calibration(self, calibration):
+        normalized = normalize_steering_calibration(calibration)
+        self._steering_calibration = normalized
+        self.STEER_LEFT_PW = normalized["left_pw"]
+        self.STEER_CENTER_PW = normalized["center_pw"]
+        self.STEER_RIGHT_PW = normalized["right_pw"]
+        return dict(normalized)
+
+    def send_steering_calibration(self, calibration):
+        """Send SC:<left>,<center>,<right> to update Pico steering limits."""
+        normalized = self.set_steering_calibration(calibration)
+        if not self._serial or not self._running:
+            return normalized
+        with self._write_lock:
+            try:
+                self._serial.write(
+                    f"SC:{normalized['left_pw']},{normalized['center_pw']},{normalized['right_pw']}\n".encode()
+                )
+            except Exception:
+                pass
+        return dict(normalized)
+
     def send_motor_command(self, speed, steer_pw):
         """Send MC:<speed>,<steer_pw> to drive forward with steering.
         speed: 0-100 (duty %), steer_pw: 940-2150 (µs)."""
         if not self._serial or not self._running:
             return
         speed = max(0, min(100, int(speed)))
-        steer_pw = max(self.STEER_LEFT_PW, min(self.STEER_RIGHT_PW, int(steer_pw)))
+        steer_pw = clamp_steering_pw(steer_pw, self._steering_calibration)
         with self._write_lock:
             try:
                 self._serial.write(f"MC:{speed},{steer_pw}\n".encode())
@@ -351,7 +388,7 @@ class PicoSensorReader:
         if not self._serial or not self._running:
             return
         speed = max(0, min(100, int(speed)))
-        steer_pw = max(self.STEER_LEFT_PW, min(self.STEER_RIGHT_PW, int(steer_pw)))
+        steer_pw = clamp_steering_pw(steer_pw, self._steering_calibration)
         with self._write_lock:
             try:
                 self._serial.write(f"MR:{speed},{steer_pw}\n".encode())
@@ -399,7 +436,7 @@ class PicoSensorReader:
         right_pwm = max(0, min(100, int(right_pwm)))
         cmd = f"ML:{left_pwm},{right_pwm}"
         if steer_pw is not None:
-            steer_pw = max(940, min(2150, int(steer_pw)))
+            steer_pw = clamp_steering_pw(steer_pw, self._steering_calibration)
             direction = 'F' if forward else 'R'
             cmd += f",{steer_pw},{direction}"
         with self._write_lock:
@@ -428,6 +465,26 @@ def init_pico_reader(port='/dev/ttyS0'):
     if _global_reader is None:
         _global_reader = PicoSensorReader(port)
     return _global_reader
+
+
+def get_steering_calibration():
+    return dict(_runtime_steering_calibration)
+
+
+def apply_steering_calibration(calibration):
+    global _runtime_steering_calibration
+    normalized = normalize_steering_calibration(calibration)
+    _runtime_steering_calibration = normalized
+    if _global_reader:
+        _global_reader.set_steering_calibration(normalized)
+    return dict(normalized)
+
+
+def send_steering_calibration(calibration):
+    normalized = apply_steering_calibration(calibration)
+    if _global_reader:
+        _global_reader.send_steering_calibration(normalized)
+    return dict(normalized)
 
 def get_sensor_packet():
     if _global_reader:

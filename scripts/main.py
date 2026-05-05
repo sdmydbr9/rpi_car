@@ -87,6 +87,8 @@ from pico_sensor_reader import (
     get_current_sense as pico_get_current_sense,
     get_sensor_packet as pico_get_sensor_packet,
     get_pico_rpm,
+    apply_steering_calibration as pico_apply_steering_calibration,
+    send_steering_calibration as pico_send_steering_calibration,
 )
 from drive_logger import DriveLogger
 from config import read_thermal_temp_c
@@ -98,6 +100,12 @@ from odometry_integration import (
 )
 from odom_nav import (
     ObstacleMemory, StuckSlipDetector, TrailRecorder, ReturnToStartNavigator,
+)
+from steering_calibration import (
+    SteeringCalibrationError,
+    default_steering_calibration,
+    normalize_steering_calibration,
+    steering_preset_to_pw,
 )
 
 try:
@@ -743,6 +751,159 @@ def _save_engine_sound_config(config):
         print(f"⚠️  [Engine Sound Config] Failed to save: {e}")
 
 _engine_sound_config = _load_engine_sound_config()
+
+# --- STEERING CALIBRATION PERSISTENCE ---
+STEERING_CONFIG_FILE = os.path.join(PROJECT_ROOT, '.steering_config.json')
+
+_STEERING_CONFIG_DEFAULTS = default_steering_calibration()
+
+
+def _load_steering_config():
+    """Load persisted steering pulse widths from JSON file."""
+    try:
+        if os.path.exists(STEERING_CONFIG_FILE):
+            with open(STEERING_CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+            normalized = normalize_steering_calibration(config)
+            print(f"✅ [Steering Config] Loaded persisted config: {normalized}")
+            return normalized
+    except Exception as e:
+        print(f"⚠️  [Steering Config] Failed to load persisted config, using defaults: {e}")
+    return dict(_STEERING_CONFIG_DEFAULTS)
+
+
+def _save_steering_config(config):
+    """Save steering pulse widths to JSON file for persistence."""
+    normalized = normalize_steering_calibration(config)
+    try:
+        with open(STEERING_CONFIG_FILE, 'w') as f:
+            json.dump(normalized, f, indent=2)
+        print(f"💾 [Steering Config] Saved to {STEERING_CONFIG_FILE}")
+    except Exception as e:
+        print(f"⚠️  [Steering Config] Failed to save: {e}")
+    return normalized
+
+
+_steering_config = _load_steering_config()
+_steering_calibration_lock = threading.Lock()
+_steering_calibration_override = {
+    'preset': 'off',
+    'pulse_us': _steering_config['center_pw'],
+}
+
+
+def _get_steering_config():
+    with _steering_calibration_lock:
+        return dict(_steering_config)
+
+
+def _get_steering_calibration_override_state():
+    with _steering_calibration_lock:
+        return dict(_steering_calibration_override)
+
+
+def _set_steering_calibration_override(preset):
+    global _steering_calibration_override
+    preset_name = str(preset or 'off').strip().lower()
+    with _steering_calibration_lock:
+        if preset_name == 'off':
+            _steering_calibration_override = {
+                'preset': 'off',
+                'pulse_us': _steering_config['center_pw'],
+            }
+        else:
+            _steering_calibration_override = {
+                'preset': preset_name,
+                'pulse_us': steering_preset_to_pw(preset_name, _steering_config),
+            }
+        return dict(_steering_calibration_override)
+
+
+def _clear_steering_calibration_override():
+    return _set_steering_calibration_override('off')
+
+
+def _apply_runtime_steering_config(config):
+    """Apply steering calibration to the Pi runtime and future Pico writes."""
+    global _steering_config, _steering_calibration_override
+    normalized = normalize_steering_calibration(config)
+    with _steering_calibration_lock:
+        _steering_config = normalized
+        preset = _steering_calibration_override.get('preset', 'off')
+        _steering_calibration_override = {
+            'preset': preset,
+            'pulse_us': (
+                steering_preset_to_pw(preset, normalized)
+                if preset != 'off' else normalized['center_pw']
+            ),
+        }
+
+    pico_apply_steering_calibration(normalized)
+
+    car = globals().get('car_system')
+    if car is not None:
+        car.set_steering_calibration(normalized)
+
+    return dict(normalized)
+
+
+def _sync_steering_config_to_pico(config=None):
+    """Push the active steering calibration to the Pico bridge."""
+    normalized = normalize_steering_calibration(config or _get_steering_config())
+    try:
+        pico_send_steering_calibration(normalized)
+        print(f"📡 [Steering Config] Synced to Pico: {normalized}")
+        return True
+    except Exception as e:
+        print(f"⚠️  [Steering Config] Failed to sync to Pico: {e}")
+        return False
+
+
+def _reapply_steering_calibration_override_now():
+    """Immediately apply the held calibration preset, if one is active."""
+    override = _get_steering_calibration_override_state()
+    if override.get('preset') == 'off':
+        return
+
+    car = globals().get('car_system')
+    state = globals().get('car_state')
+    if car is None:
+        return
+
+    forward = True
+    if isinstance(state, dict):
+        forward = state.get('gear', 'N') != 'R'
+    car.apply_steering_pulse(override['pulse_us'], forward=forward)
+
+
+def _build_steering_calibration_payload():
+    config = _get_steering_config()
+    override = _get_steering_calibration_override_state()
+    active = override.get('preset') != 'off'
+    return {
+        'calibration': config,
+        'defaults': dict(_STEERING_CONFIG_DEFAULTS),
+        'override_active': active,
+        'override_preset': override.get('preset', 'off'),
+        'override_pulse_us': override.get('pulse_us') if active else None,
+    }
+
+
+def _steering_calibration_block_reason():
+    state = globals().get('car_state')
+    if not isinstance(state, dict):
+        return None
+    if state.get('autonomous_mode'):
+        return 'autonomous mode is active'
+    if state.get('hunter_mode'):
+        return 'hunter mode is active'
+    rth_nav = globals().get('_return_to_start_nav')
+    if rth_nav is not None and getattr(rth_nav, 'active', False):
+        return 'return-to-start is active'
+    return None
+
+
+_apply_runtime_steering_config(_steering_config)
 
 ELEVENLABS_DEFAULT_VOICE_ID = 'JBFqnCBsd6RMkjVDRZzb'
 
@@ -2137,6 +2298,7 @@ def generate_h264_fmp4():
 # or GPIO.setup() on motor pins here.
 
 car_system = CarSystem()
+_apply_runtime_steering_config(_get_steering_config())
 
 # GPIO mode is now set by CarSystem; sensor pins are set up below.
 GPIO.setmode(GPIO.BCM)
@@ -2145,6 +2307,7 @@ GPIO.setwarnings(False)
 # Initialize Pico Sensor Bridge (UART)
 try:
     pico_reader = init_pico_reader('/dev/ttyS0')
+    _sync_steering_config_to_pico()
     print("✅ Pico sensor bridge initialized (UART)")
 except Exception as e:
     pico_reader = None
@@ -2990,7 +3153,12 @@ def _gamepad_reader_thread():
                     if abs(val - _GAMEPAD_JOY_CENTER) < _GAMEPAD_JOY_DEADZONE:
                         car_state["gamepad_steering"] = 0.0
                     else:
-                        car_state["gamepad_steering"] = ((val - _GAMEPAD_JOY_CENTER) / 128.0) * 100.0
+                        # Normalize 0-255 to -100 to +100 with proper scaling for full range
+                        # Left: 0-128 maps to -100 to 0, Right: 128-255 maps to 0 to +100
+                        if val < _GAMEPAD_JOY_CENTER:
+                            car_state["gamepad_steering"] = ((val - _GAMEPAD_JOY_CENTER) / 128.0) * 100.0
+                        else:
+                            car_state["gamepad_steering"] = ((val - _GAMEPAD_JOY_CENTER) / 127.0) * 100.0
 
                 # --- Face buttons → Gear (with Select combos) ---
                 elif event.code in ('BTN_SOUTH', 'BTN_A') and event.state == 1:
@@ -3702,11 +3870,23 @@ def physics_loop():
         
         # Get the current steering angle (either from avoidance or user input)
         angle = car_state["steer_angle"]
+        steering_calibration_override = _get_steering_calibration_override_state()
+        steering_calibration_active = steering_calibration_override.get("preset") != "off"
         
         # --- NORMAL THROTTLE PHYSICS (when not in obstacle avoidance) ---
         if obstacle_state == "IDLE":
+            if steering_calibration_active and not (car_state["autonomous_mode"] or car_state["hunter_mode"]):
+                _coast_start_time = None
+                car_state["current_target_rpm"] = 0.0
+                car_state["current_pwm"] = 0.0
+                car_state["current_pwm_l"] = 0.0
+                car_state["current_pwm_r"] = 0.0
+                car_state["is_braking"] = False
+                _pid_pwm_l = 0.0
+                _pid_pwm_r = 0.0
+                car_system.rpm_pid_tick(0.0)
             # Check if autonomous mode is active
-            if car_state["autonomous_mode"] or car_state["hunter_mode"]:
+            elif car_state["autonomous_mode"] or car_state["hunter_mode"]:
                 # Even in autopilot/hunter, the emergency brake must override everything
                 if car_state["emergency_brake_active"]:
                     car_state["current_pwm"] = 0
@@ -3876,15 +4056,20 @@ def physics_loop():
         current = car_state["current_pwm"]
         try:
             car_system.set_gear(gear)
+            is_forward = (gear != "R")
 
-            if car_state["is_braking"]:
+            if steering_calibration_active:
+                car_system.apply_steering_pulse(
+                    steering_calibration_override["pulse_us"],
+                    forward=is_forward,
+                )
+            elif car_state["is_braking"]:
                 car_system.brake()
                 _pid_pwm_l = 0.0
                 _pid_pwm_r = 0.0
             else:
-                is_forward = (gear != "R")
-                # Map steer_angle from gamepad range (±100) to servo degrees (±50°)
-                servo_angle = max(-50, min(50, steer_angle * 0.5))
+                # steer_angle is already in ±50 degree range from gamepad_drive_thread
+                servo_angle = max(-50, min(50, steer_angle))
                 car_system._apply_steering(current, servo_angle, forward=is_forward,
                                            speed_l=_pid_pwm_l, speed_r=_pid_pwm_r)
         except Exception as e:
@@ -4185,6 +4370,83 @@ def api_odometry_reset():
 def api_now_playing():
     """Return integrated AirPlay now-playing metadata."""
     return jsonify(_build_now_playing_response())
+
+@app.route("/api/steering/calibration")
+def api_steering_calibration():
+    """Return active steering calibration and test-override state."""
+    return jsonify(_build_steering_calibration_payload())
+
+
+@app.route("/api/steering/calibration", methods=["POST"])
+def api_steering_calibration_update():
+    """Update and persist steering pulse-width calibration."""
+    block_reason = _steering_calibration_block_reason()
+    if block_reason:
+        return jsonify({
+            "status": "error",
+            "message": f"Cannot update steering calibration while {block_reason}",
+        }), 409
+
+    data = request.get_json(silent=True) or {}
+    try:
+        normalized = normalize_steering_calibration(data)
+    except SteeringCalibrationError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+    normalized = _apply_runtime_steering_config(normalized)
+    _save_steering_config(normalized)
+    synced = _sync_steering_config_to_pico(normalized)
+    _reapply_steering_calibration_override_now()
+    payload = _build_steering_calibration_payload()
+    payload.update({"status": "ok", "synced_to_pico": synced})
+    return jsonify(payload)
+
+
+@app.route("/api/steering/calibration/test", methods=["POST"])
+def api_steering_calibration_test():
+    """Hold a left/center/right steering preset through the physics loop."""
+    block_reason = _steering_calibration_block_reason()
+    if block_reason:
+        return jsonify({
+            "status": "error",
+            "message": f"Cannot test steering calibration while {block_reason}",
+        }), 409
+
+    data = request.get_json(silent=True) or {}
+    preset = str(data.get("preset", "off")).strip().lower()
+    try:
+        override = _set_steering_calibration_override(preset)
+    except SteeringCalibrationError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+    if override["preset"] == "off":
+        car_system.apply_steering_pulse(_get_steering_config()["center_pw"])
+    else:
+        _reapply_steering_calibration_override_now()
+
+    payload = _build_steering_calibration_payload()
+    payload.update({"status": "ok"})
+    return jsonify(payload)
+
+
+@app.route("/api/steering/calibration/reset", methods=["POST"])
+def api_steering_calibration_reset():
+    """Restore default steering pulse widths and center the steering servo."""
+    block_reason = _steering_calibration_block_reason()
+    if block_reason:
+        return jsonify({
+            "status": "error",
+            "message": f"Cannot reset steering calibration while {block_reason}",
+        }), 409
+
+    _clear_steering_calibration_override()
+    normalized = _apply_runtime_steering_config(_STEERING_CONFIG_DEFAULTS)
+    _save_steering_config(normalized)
+    synced = _sync_steering_config_to_pico(normalized)
+    car_system.apply_steering_pulse(normalized["center_pw"])
+    payload = _build_steering_calibration_payload()
+    payload.update({"status": "ok", "synced_to_pico": synced})
+    return jsonify(payload)
 
 # Catch-all for React files (vite.svg, etc.)
 @app.route('/<path:filename>')

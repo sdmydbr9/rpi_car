@@ -188,16 +188,33 @@ steer_servo.freq(50)
 STEER_CENTER_PW = 1440
 STEER_LEFT_PW   = 940
 STEER_RIGHT_PW  = 2150
-_current_steer_pw = STEER_CENTER_PW
+_steer_center_pw = STEER_CENTER_PW
+_steer_left_pw = STEER_LEFT_PW
+_steer_right_pw = STEER_RIGHT_PW
+_current_steer_pw = _steer_center_pw
 
 def set_steering_pw(pw_us):
     global _current_steer_pw
-    pw_us = _servo_clamp(pw_us, STEER_LEFT_PW, STEER_RIGHT_PW)
+    pw_us = _servo_clamp(pw_us, _steer_left_pw, _steer_right_pw)
     _current_steer_pw = pw_us
-    steer_servo.duty_ns(pw_us * 1000)
+    # For 50Hz PWM (20ms period): convert pulse width (µs) to 16-bit duty cycle
+    duty_u16 = int((pw_us / 20000.0) * 65535)
+    steer_servo.duty_u16(duty_u16)
 
-set_steering_pw(STEER_CENTER_PW)
-print(f"✅ Steering servo: GP15 — center {STEER_CENTER_PW}µs [{STEER_LEFT_PW}–{STEER_RIGHT_PW}]")
+def set_steering_calibration(left_pw, center_pw, right_pw):
+    global _steer_left_pw, _steer_center_pw, _steer_right_pw
+    if not (500 <= left_pw <= 2500 and 500 <= center_pw <= 2500 and 500 <= right_pw <= 2500):
+        return False
+    if not (left_pw < center_pw < right_pw):
+        return False
+    _steer_left_pw = left_pw
+    _steer_center_pw = center_pw
+    _steer_right_pw = right_pw
+    set_steering_pw(_steer_center_pw)
+    return True
+
+set_steering_pw(_steer_center_pw)
+print(f"✅ Steering servo: GP15 — center {_steer_center_pw}µs [{_steer_left_pw}–{_steer_right_pw}]")
 
 # =====================================================
 # L298N MOTOR DRIVER (2WD rear drive)
@@ -350,6 +367,7 @@ print("✅ L298N motors: L(ENA=GP10,IN1=GP17,IN2=GP12) R(ENB=GP16,IN3=GP13,IN4=G
 # PT:<pan>,<tilt>\n        — Pan-tilt control (pan: 0-180°, tilt: 45-135°)
 # PC\n                     — Pan-tilt center (90°, 90°)
 # ER\n                     — Encoder reset
+# SC:<left>,<center>,<right>\n — Runtime steering calibration update
 # =====================================================
 _uart_buf = ""
 
@@ -422,6 +440,13 @@ def _check_uart_commands():
             elif line == "ER":
                 enc_left.reset_position()
                 enc_right.reset_position()
+            elif line.startswith("SC:"):
+                try:
+                    parts = line[3:].split(",")
+                    if len(parts) == 3:
+                        set_steering_calibration(int(parts[0]), int(parts[1]), int(parts[2]))
+                except Exception:
+                    pass
         else:
             _uart_buf += ch
             if len(_uart_buf) > 64:

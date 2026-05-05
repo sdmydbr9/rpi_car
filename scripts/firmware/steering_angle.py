@@ -55,7 +55,9 @@ def pulse_to_display_deg(pw_us):
 def apply_steering(pw_us):
     global current_pw
     current_pw = clamp(pw_us, SERVO_MIN_PW, SERVO_MAX_PW)
-    steer_servo.duty_ns(current_pw * 1000)
+    # For 50Hz PWM (20ms period): convert pulse width (µs) to 16-bit duty cycle
+    duty_u16 = int((current_pw / 20000.0) * 65535)
+    steer_servo.duty_u16(duty_u16)
     return current_pw
 
 

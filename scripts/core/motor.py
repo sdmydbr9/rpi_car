@@ -19,6 +19,14 @@ Provides a clean API for the AutoPilot and manual control:
 import time
 import threading
 
+from steering_calibration import (
+    DEFAULT_STEERING_CALIBRATION,
+    clamp_steering_pw,
+    default_steering_calibration,
+    normalize_steering_calibration,
+    steering_angle_to_pw,
+)
+
 
 # ──────────────────────────────────────────────
 # Voltage-based PWM hard limit  (legacy static fallback)
@@ -271,16 +279,18 @@ class CarSystem:
     """
 
     # Steering servo pulse width limits (µs) — LOCKED, do not change!
-    STEER_CENTER_PW = 1440
-    STEER_LEFT_PW   = 940
-    STEER_RIGHT_PW  = 2150
+    STEER_CENTER_PW = DEFAULT_STEERING_CALIBRATION["center_pw"]
+    STEER_LEFT_PW   = DEFAULT_STEERING_CALIBRATION["left_pw"]
+    STEER_RIGHT_PW  = DEFAULT_STEERING_CALIBRATION["right_pw"]
 
     def __init__(self):
         # Internal bookkeeping
         self._current_speed = 0
         self._steering_angle = 0
-        self._steering_pw = self.STEER_CENTER_PW
         self._is_forward = True
+        self._steering_calibration = default_steering_calibration()
+        self._steering_pw = self._steering_calibration["center_pw"]
+        self.set_steering_calibration(self._steering_calibration)
 
         # Adaptive voltage-aware power limiter (still useful for gear-based speed caps)
         self.power_limiter = PowerLimiter()
@@ -349,12 +359,21 @@ class CarSystem:
 
     def _angle_to_pw(self, angle):
         """Convert steering angle (-50..+50) to servo pulse width (940..2150µs)."""
-        angle = max(-50, min(50, angle))
-        if angle < 0:
-            pw = self.STEER_CENTER_PW + (angle / 50.0) * (self.STEER_CENTER_PW - self.STEER_LEFT_PW)
-        else:
-            pw = self.STEER_CENTER_PW + (angle / 50.0) * (self.STEER_RIGHT_PW - self.STEER_CENTER_PW)
-        return max(self.STEER_LEFT_PW, min(self.STEER_RIGHT_PW, int(pw)))
+        return steering_angle_to_pw(angle, self._steering_calibration)
+
+    def get_steering_calibration(self) -> dict:
+        """Return the active steering pulse calibration."""
+        return dict(self._steering_calibration)
+
+    def set_steering_calibration(self, calibration) -> dict:
+        """Apply runtime steering pulse-width calibration."""
+        normalized = normalize_steering_calibration(calibration)
+        self._steering_calibration = normalized
+        self.STEER_LEFT_PW = normalized["left_pw"]
+        self.STEER_CENTER_PW = normalized["center_pw"]
+        self.STEER_RIGHT_PW = normalized["right_pw"]
+        self._steering_pw = self._angle_to_pw(self._steering_angle)
+        return dict(normalized)
 
     def _send_drive(self, speed, steer_pw, forward=True):
         """Send motor + steering command to Pico via UART.
@@ -362,8 +381,21 @@ class CarSystem:
         from pico_sensor_reader import send_lr_pwm
         duty_cap = self.power_limiter.max_safe_duty
         speed = max(0, min(duty_cap, speed))
-        steer_pw = max(self.STEER_LEFT_PW, min(self.STEER_RIGHT_PW, int(steer_pw)))
+        steer_pw = clamp_steering_pw(steer_pw, self._steering_calibration)
         send_lr_pwm(int(speed), int(speed), steer_pw, forward=forward)
+
+    def apply_steering_pulse(self, pw_us, forward=None):
+        """Apply an exact steering pulse width without changing the public angle API."""
+        from pico_sensor_reader import send_lr_pwm
+
+        if forward is None:
+            forward = self._is_forward
+        pulse = clamp_steering_pw(pw_us, self._steering_calibration)
+        self._current_speed = 0
+        self._is_forward = bool(forward)
+        self._steering_pw = pulse
+        send_lr_pwm(0, 0, pulse, forward=self._is_forward)
+        return pulse
 
     def attach_wheel_sync(self, encoder_left, encoder_right):
         """Attach raw encoder objects for direct step-based RPM reading.
@@ -599,6 +631,7 @@ class CarSystem:
         (from dual PID). Otherwise, sends unified speed to both wheels.
         """
         from pico_sensor_reader import send_lr_pwm
+        self._steering_angle = angle
         self._steering_pw = self._angle_to_pw(angle)
         duty_cap = self.power_limiter.max_safe_duty
         if speed_l is not None and speed_r is not None:
