@@ -138,6 +138,30 @@ RC_BATTERY_DIVIDER_RATIO=4.7 python3 main.py --battery
 
 The Pico sends no periodic data. It replies only to `PING` and `BAT?`.
 
+## Direct servo and motor test
+
+Stop `main.py`, lift both drive wheels, and run:
+
+```bash
+python3 hardware_test.py
+```
+
+The script first requires typing `LIFTED`, verifies that the Pico answers
+`PING`, and clears the e-stop latch left by a normal `main.py` shutdown. It
+then moves the steering center/left/center/right/center and runs both motors
+forward and reverse at 15% requested throttle for one second each.
+
+To isolate one output or select another UART:
+
+```bash
+python3 hardware_test.py --servo-only
+python3 hardware_test.py --motor-only
+python3 hardware_test.py --port /dev/serial0
+```
+
+Motor throttle is deliberately limited to 30% in this diagnostic. The script
+always sends zero motor output and centers the steering before closing UART.
+
 ## Test
 
 Run the hardware-free tests:
