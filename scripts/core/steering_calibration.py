@@ -1,9 +1,4 @@
-"""
-steering_calibration.py - Shared Ackermann steering calibration helpers.
-
-Keeps steering pulse-width validation and angle mapping in one place so the
-Pi runtime, diagnostics tools, and Pico bridge all agree on the same limits.
-"""
+"""Shared validation and mapping for the manual steering servo."""
 
 from __future__ import annotations
 
@@ -19,9 +14,6 @@ DEFAULT_STEERING_CALIBRATION = {
     "center_pw": 1440,
     "right_pw": 2150,
 }
-
-VALID_STEERING_PRESETS = ("left", "center", "right", "off")
-
 
 class SteeringCalibrationError(ValueError):
     """Raised when a steering calibration payload is invalid."""
@@ -101,18 +93,3 @@ def steering_angle_to_pw(angle, calibration: Mapping[str, object]) -> int:
             (angle_value / 50.0) * (normalized["right_pw"] - normalized["center_pw"])
         )
     return clamp_steering_pw(int(pulse), normalized)
-
-
-def steering_preset_to_pw(preset: str, calibration: Mapping[str, object]) -> int:
-    """Resolve a preset name into an exact pulse width."""
-    normalized = normalize_steering_calibration(calibration)
-    preset_name = str(preset or "").strip().lower()
-    if preset_name not in VALID_STEERING_PRESETS:
-        raise SteeringCalibrationError(
-            f"preset must be one of: {', '.join(VALID_STEERING_PRESETS)}"
-        )
-    if preset_name == "left":
-        return normalized["left_pw"]
-    if preset_name == "right":
-        return normalized["right_pw"]
-    return normalized["center_pw"]

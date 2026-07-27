@@ -21,6 +21,7 @@ __pycache__/*
 *.pyd
 .Python
 *.egg-info/
+.steering_config.json*
 
 # Editor directories and files
 .vscode/*
@@ -32,10 +33,3 @@ __pycache__/*
 *.njsproj
 *.sln
 *.sw?
-.models/*
-
-# Camera & Narration config (contains API keys)
-.camera_config.json
-.narration_config.json
-snap.jpg
-.startup_config.json
