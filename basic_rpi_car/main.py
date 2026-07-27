@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping
 
 UART_BAUD = 115200
 DEFAULT_PICO_PORT = "/dev/ttyS0"
+STEERING_GPIO = 12
 MAX_PWM_DUTY = 95
 GAMEPAD_DEADZONE = 0.08
 KEEPALIVE_INTERVAL_S = 0.10
@@ -314,16 +315,132 @@ class PicoController:
                     pass
 
 
+class PiSteeringController:
+    """Drive the steering servo directly from Raspberry Pi GPIO12.
+
+    ``pigpio`` provides stable 50 Hz servo pulses through the already-running
+    ``pigpiod`` daemon.  It is imported lazily so UART-only diagnostics remain
+    usable on development machines.
+    """
+
+    def __init__(
+        self,
+        calibration: Mapping[str, Any] | None = None,
+        gpio: int = STEERING_GPIO,
+        pigpio_factory: Callable[[], Any] | None = None,
+    ):
+        self.calibration = normalize_calibration(
+            calibration or DEFAULT_STEERING_CALIBRATION
+        )
+        self.gpio = gpio
+        self._pigpio_factory = pigpio_factory
+        self._client: Any | None = None
+        self._lock = threading.RLock()
+        self._last_pulse: int | None = None
+        self.last_error = ""
+
+    @property
+    def connected(self) -> bool:
+        return self._client is not None and bool(
+            getattr(self._client, "connected", True)
+        )
+
+    def _get_factory(self) -> Callable[[], Any] | None:
+        if self._pigpio_factory is not None:
+            return self._pigpio_factory
+        try:
+            import pigpio
+        except ImportError:
+            self.last_error = (
+                "pigpio is not installed; install it and enable pigpiod"
+            )
+            return None
+        self._pigpio_factory = pigpio.pi
+        return self._pigpio_factory
+
+    def connect(self) -> bool:
+        with self._lock:
+            if self.connected:
+                return True
+            factory = self._get_factory()
+            if factory is None:
+                return False
+            client: Any | None = None
+            try:
+                client = factory()
+                if not bool(getattr(client, "connected", True)):
+                    raise RuntimeError("cannot connect to the pigpiod daemon")
+                self._client = client
+                self._last_pulse = None
+                if not self.set_steering(0):
+                    raise RuntimeError(self.last_error or "cannot center steering")
+                self.last_error = ""
+                return True
+            except Exception as exc:
+                if client is not None:
+                    try:
+                        client.stop()
+                    except Exception:
+                        pass
+                self._client = None
+                self._last_pulse = None
+                self.last_error = str(exc)
+                return False
+
+    def set_steering(self, angle: Any) -> bool:
+        with self._lock:
+            if not self.connected and not self.connect():
+                return False
+            client = self._client
+            if client is None:
+                self.last_error = "pigpio connection was not opened"
+                return False
+            pulse = steering_to_pulse(angle, self.calibration)
+            if pulse == self._last_pulse:
+                return True
+            try:
+                result = client.set_servo_pulsewidth(self.gpio, pulse)
+                if result not in (None, 0):
+                    raise RuntimeError(f"pigpio error {result}")
+                self._last_pulse = pulse
+                self.last_error = ""
+                return True
+            except Exception as exc:
+                self.last_error = str(exc)
+                return False
+
+    def center(self) -> bool:
+        return self.set_steering(0)
+
+    def close(self) -> None:
+        with self._lock:
+            client = self._client
+            self._client = None
+            self._last_pulse = None
+            if client is None:
+                return
+            try:
+                client.set_servo_pulsewidth(self.gpio, 0)
+            except Exception:
+                pass
+            try:
+                client.stop()
+            except Exception:
+                pass
+
+
 class CarController:
     """Gamepad state machine, safety rules, and Pico dispatch."""
 
     def __init__(
         self,
         pico: PicoController,
+        pi_steering: PiSteeringController | None = None,
         log: Callable[[str], None] = print,
         now_fn: Callable[[], float] = time.monotonic,
     ):
         self.pico = pico
+        self.pi_steering = pi_steering
         self.log = log
         self._now = now_fn
         self._lock = threading.RLock()
@@ -360,6 +477,21 @@ class CarController:
             f"{self.pico.last_error or 'UART unavailable'}"
         )
 
+    def _apply_pi_steering_locked(self) -> bool:
+        if self.pi_steering is None:
+            return True
+        if self.pi_steering.set_steering(self.steering):
+            return True
+        self.armed = False
+        self._applied_direction = "N"
+        self._applied_throttle = 0
+        self.pico.stop()
+        self.log(
+            "Pi steering command failed; car disarmed: "
+            f"{self.pi_steering.last_error or 'GPIO12 unavailable'}"
+        )
+        return False
+
     def set_gamepad_connected(self, connected: bool) -> None:
         with self._lock:
             connected = bool(connected)
@@ -369,6 +501,11 @@ class CarController:
             self._reset_gamepad_state_locked()
             self._applied_direction = "N"
             self._applied_throttle = 0
+            if self.pi_steering is not None and not self.pi_steering.center():
+                self.log(
+                    "Could not center Pi steering: "
+                    f"{self.pi_steering.last_error or 'GPIO12 unavailable'}"
+                )
             sent = (
                 self.pico.emergency_stop()
                 if self.estop
@@ -399,6 +536,8 @@ class CarController:
                 return False
             if not self.pico.connect():
                 self._mark_write_failure_locked("connection")
+                return False
+            if not self._apply_pi_steering_locked():
                 return False
             self.armed = True
             self._applied_direction = "N"
@@ -462,6 +601,8 @@ class CarController:
 
     def _send_current_locked(self) -> bool:
         if not self.armed or self.estop:
+            return False
+        if not self._apply_pi_steering_locked():
             return False
         if self.brake:
             if not self.pico.brake():
@@ -579,6 +720,9 @@ class CarController:
             self.estop = True
             self.pico.emergency_stop()
             self.pico.close()
+            if self.pi_steering is not None:
+                self.pi_steering.center()
+                self.pi_steering.close()
             self.log("Controller stopped; emergency stop sent to Pico.")
 
 
@@ -778,8 +922,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Configuration error: {exc}")
             return 2
 
+    pi_steering = PiSteeringController(calibration=calibration)
+    if not pi_steering.connect():
+        print(
+            "Pi steering unavailable on GPIO12 (physical pin 32): "
+            f"{pi_steering.last_error}",
+            flush=True,
+        )
+        return 1
+
     controller = CarController(
         pico,
+        pi_steering=pi_steering,
         log=lambda message: print(message, flush=True),
     )
     runtime = BasicCarRuntime(controller)

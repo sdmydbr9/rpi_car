@@ -71,6 +71,42 @@ class FakePico:
         self.closed = True
 
 
+class FakePigpioClient:
+    def __init__(self):
+        self.connected = 1
+        self.pulses: list[tuple[int, int]] = []
+        self.stopped = False
+
+    def set_servo_pulsewidth(self, gpio, pulse):
+        self.pulses.append((gpio, pulse))
+        return 0
+
+    def stop(self):
+        self.stopped = True
+
+
+class FakePiSteering:
+    def __init__(self):
+        self.last_error = ""
+        self.angles: list[int] = []
+        self.center_calls = 0
+        self.closed = False
+        self.send_ok = True
+
+    def set_steering(self, angle):
+        self.angles.append(angle)
+        if not self.send_ok:
+            self.last_error = "simulated GPIO12 failure"
+        return self.send_ok
+
+    def center(self):
+        self.center_calls += 1
+        return self.set_steering(0)
+
+    def close(self):
+        self.closed = True
+
+
 class MappingTests(unittest.TestCase):
     def test_axis_normalization_and_deadzone(self):
         self.assertEqual(car.normalize_gamepad_axis(128), 0.0)
@@ -144,6 +180,22 @@ class PicoTransportTests(unittest.TestCase):
         serial_instance.writes.clear()
         self.assertEqual(pico.read_battery_adc_mv(), 2250.0)
         self.assertEqual(serial_instance.writes, [b"BAT?\n"])
+
+
+class PiSteeringTests(unittest.TestCase):
+    def test_gpio12_uses_calibrated_servo_pulses(self):
+        client = FakePigpioClient()
+        steering = car.PiSteeringController(
+            pigpio_factory=lambda: client
+        )
+        self.assertTrue(steering.connect())
+        self.assertTrue(steering.set_steering(-50))
+        self.assertTrue(steering.set_steering(50))
+        steering.close()
+        self.assertEqual(
+            client.pulses,
+            [(12, 1440), (12, 940), (12, 2150), (12, 0)],
+        )
 
 
 class ControllerTests(unittest.TestCase):
@@ -264,6 +316,36 @@ class ControllerTests(unittest.TestCase):
         self.controller.shutdown()
         self.assertEqual(self.pico.commands[-1], ("estop",))
         self.assertTrue(self.pico.closed)
+
+    def test_gamepad_steering_is_sent_to_gpio12_driver(self):
+        steering = FakePiSteering()
+        controller = car.CarController(
+            self.pico,
+            pi_steering=steering,
+            log=self.logs.append,
+            now_fn=lambda: self.clock[0],
+        )
+        controller.set_gamepad_connected(True)
+        controller.handle_event("BTN_START", 1)
+        controller.handle_event("ABS_RX", 255)
+        self.assertEqual(steering.angles[-1], 50)
+
+    def test_gpio12_failure_stops_and_disarms_the_car(self):
+        steering = FakePiSteering()
+        controller = car.CarController(
+            self.pico,
+            pi_steering=steering,
+            log=self.logs.append,
+            now_fn=lambda: self.clock[0],
+        )
+        controller.set_gamepad_connected(True)
+        controller.handle_event("BTN_START", 1)
+        self.assertTrue(controller.armed)
+        steering.send_ok = False
+        controller.handle_event("ABS_RX", 255)
+        self.assertFalse(controller.armed)
+        self.assertEqual(self.pico.commands[-1], ("stop",))
+        self.assertTrue(any("Pi steering command failed" in line for line in self.logs))
 
 
 if __name__ == "__main__":

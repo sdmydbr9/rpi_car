@@ -27,9 +27,24 @@ class FakePico:
         return True
 
 
+class FakeSteering:
+    def __init__(self):
+        self.last_error = ""
+        self.angles: list[int] = []
+
+    def set_steering(self, angle):
+        self.angles.append(angle)
+        return True
+
+    def center(self):
+        self.angles.append(0)
+        return True
+
+
 class HardwareTestHelpers(unittest.TestCase):
     def setUp(self):
         self.pico = FakePico()
+        self.steering = FakeSteering()
 
     def test_confirmation_must_match_exact_safety_word(self):
         self.assertTrue(
@@ -53,22 +68,16 @@ class HardwareTestHelpers(unittest.TestCase):
             ],
         )
 
-    def test_servo_sequence_keeps_motors_neutral(self):
+    def test_servo_sequence_uses_the_pi_steering_driver(self):
         hardware_test.run_servo_test(
-            self.pico,
+            self.steering,
             steering_angle=30,
             hold_seconds=0,
             sleep_fn=lambda _duration: None,
         )
         self.assertEqual(
-            self.pico.commands,
-            [
-                ("drive", "N", 0, 0),
-                ("drive", "N", 0, -30),
-                ("drive", "N", 0, 0),
-                ("drive", "N", 0, 30),
-                ("drive", "N", 0, 0),
-            ],
+            self.steering.angles,
+            [0, -30, 0, 30, 0],
         )
 
     def test_motor_sequence_runs_both_directions_and_stops(self):
@@ -89,11 +98,12 @@ class HardwareTestHelpers(unittest.TestCase):
         )
 
     def test_cleanup_stops_and_centers(self):
-        hardware_test.safe_stop_and_center(self.pico)
+        hardware_test.safe_stop_and_center(self.pico, self.steering)
         self.assertEqual(
             self.pico.commands,
             [("stop",), ("drive", "N", 0, 0)],
         )
+        self.assertEqual(self.steering.angles, [0])
 
 
 if __name__ == "__main__":

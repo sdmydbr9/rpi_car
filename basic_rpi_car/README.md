@@ -4,12 +4,12 @@
 Raspberry Pi car. It has no web server, network controller, camera,
 autonomous driving, or telemetry stream.
 
-The Raspberry Pi reads the connected Linux gamepad and sends command packets
-over UART to the Pico. The Pico directly controls the two motors and Ackermann
-steering servo.
+The Raspberry Pi reads the connected Linux gamepad, sends motor commands over
+UART to the Pico, and drives the Ackermann steering servo directly.
 
 ```text
-Gamepad -> Raspberry Pi main.py -> UART -> Pico -> motors and steering
+Gamepad -> Raspberry Pi main.py -> UART -> Pico -> motors
+                                -> GPIO12 -> steering servo
 ```
 
 The car starts disarmed. Always perform the first tests with the drive wheels
@@ -22,11 +22,11 @@ lifted clear of the ground.
 | Pi UART TX/RX | Pico GP1 RX / GP0 TX, 115200 baud |
 | Left motor PWM/direction | GP10 / GP17 / GP12 |
 | Right motor PWM/direction | GP16 / GP13 / GP14 |
-| Steering servo | GP15 |
+| Steering servo signal | Pi GPIO12, physical pin 32 |
 | ADS1115 battery input | I2C GP8 SDA / GP9 SCL, address `0x48`, A0 |
 
 The motor PWM frequency is 1 kHz and output is capped at 95%. The default
-steering pulses are 940 us left, 1440 us center, and 2150 us right.
+Pi GPIO12 steering pulses are 940 us left, 1440 us center, and 2150 us right.
 
 ## Install the Pico firmware
 
@@ -35,9 +35,10 @@ steering pulses are 940 us left, 1440 us center, and 2150 us right.
 3. Save the file on the Pico as `main.py`.
 4. Power-cycle the Pico.
 
-The firmware immediately coasts the motors and centers the steering at boot.
-It independently stops motor output if an active drive/brake command is not
-refreshed within 300 ms.
+The firmware immediately coasts the motors at boot and independently stops
+motor output if an active drive/brake command is not refreshed within 300 ms.
+Its former GP15 steering output is unused; moving steering to Pi GPIO12 does
+not require reflashing the Pico.
 
 ## Install on the Raspberry Pi
 
@@ -47,6 +48,13 @@ From this directory:
 python3 -m venv venv
 source venv/bin/activate
 python3 -m pip install -r requirements.txt
+```
+
+Install and start the Pi's hardware-timed servo daemon once:
+
+```bash
+sudo apt install pigpio
+sudo systemctl enable --now pigpiod
 ```
 
 Enable the Pi UART, disable the serial login console, and give the current
@@ -146,10 +154,11 @@ Stop `main.py`, lift both drive wheels, and run:
 python3 hardware_test.py
 ```
 
-The script first requires typing `LIFTED`, verifies that the Pico answers
-`PING`, and clears the e-stop latch left by a normal `main.py` shutdown. It
-then moves the steering center/left/center/right/center and runs both motors
-forward and reverse at 15% requested throttle for one second each.
+The script first requires typing `LIFTED`, then tests steering directly through
+Pi GPIO12 (physical pin 32). For motor tests it also verifies that the Pico
+answers `PING` and clears the e-stop latch left by a normal `main.py` shutdown.
+It moves steering center/left/center/right/center and runs both motors forward
+and reverse at 15% requested throttle for one second each.
 
 To isolate one output or select another UART:
 

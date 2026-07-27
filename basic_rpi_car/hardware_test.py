@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Direct, guarded servo and motor test for ``basic_rpi_car``.
 
-This script bypasses the gamepad controller and talks to the Pico over UART.
-It must only be used with both drive wheels lifted clear of the ground.
+This script bypasses the gamepad controller. It drives steering from Raspberry
+Pi GPIO12 and tests the motors through the Pico UART.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import sys
 import time
 from typing import Callable
 
-from main import PicoController, load_calibration
+from main import PiSteeringController, PicoController, load_calibration
 
 
 COMMAND_REFRESH_S = 0.10
@@ -44,18 +44,27 @@ def send_drive(
         )
 
 
-def safe_stop_and_center(pico: PicoController) -> None:
+def safe_stop_and_center(
+    pico: PicoController | None,
+    steering: PiSteeringController | None,
+) -> None:
     """Best-effort cleanup that leaves PWM at zero and steering centered."""
-    if not pico.stop():
+    if pico is not None and not pico.stop():
         print(
             f"WARNING: could not send stop: "
             f"{pico.last_error or 'UART unavailable'}",
             file=sys.stderr,
         )
-    if not pico.drive("N", 0, 0):
+    if pico is not None and not pico.drive("N", 0, 0):
         print(
-            f"WARNING: could not center steering: "
+            f"WARNING: could not send neutral motor command: "
             f"{pico.last_error or 'UART unavailable'}",
+            file=sys.stderr,
+        )
+    if steering is not None and not steering.center():
+        print(
+            f"WARNING: could not center GPIO12 steering: "
+            f"{steering.last_error or 'GPIO12 unavailable'}",
             file=sys.stderr,
         )
 
@@ -95,7 +104,7 @@ def hold_motor(
 
 
 def run_servo_test(
-    pico: PicoController,
+    steering: PiSteeringController,
     steering_angle: int,
     hold_seconds: float,
     sleep_fn: Callable[[float], None] = time.sleep,
@@ -110,7 +119,10 @@ def run_servo_test(
     print("\nServo test: watch the front wheels.")
     for label, angle in positions:
         print(f"  Steering {label} ({angle:+d})")
-        send_drive(pico, "N", 0, angle)
+        if not steering.set_steering(angle):
+            raise RuntimeError(
+                steering.last_error or "failed to set GPIO12 steering"
+            )
         sleep_fn(hold_seconds)
 
 
@@ -156,7 +168,7 @@ def positive_float(value: str) -> float:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Directly test the Pico steering servo and motors with the "
+            "Directly test GPIO12 steering and Pico motors with the "
             "wheels lifted."
         )
     )
@@ -227,47 +239,52 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     calibration = load_calibration(args.calibration)
-    pico = PicoController(port=args.port, calibration=calibration)
-    if not pico.connect():
-        print(
-            f"ERROR: cannot open Pico UART {args.port}: {pico.last_error}",
-            file=sys.stderr,
-        )
-        return 1
+    pico: PicoController | None = None
+    steering: PiSteeringController | None = None
 
     try:
-        print(f"Opened Pico UART: {args.port} at 115200 baud")
-        print(
-            "Checking for the basic_rpi_car Pico firmware...",
-            flush=True,
-        )
-        if not pico.ping():
-            print(
-                "ERROR: Pico did not answer PING. Check that pico_firmware.py "
-                "was saved on the Pico as main.py, verify TX/RX crossover and "
-                f"common ground, and confirm the UART device. ({pico.last_error})",
-                file=sys.stderr,
-            )
-            return 1
-        print("Pico PING: OK")
-
         if not require_wheels_lifted():
             print("Confirmation not received; no movement test was run.")
             return 2
 
-        print(
-            "\nClearing the emergency-stop latch left by the stopped "
-            "controller..."
-        )
-        clear_stale_estop(pico)
-
         if not args.motor_only:
+            steering = PiSteeringController(calibration=calibration)
+            if not steering.connect():
+                print(
+                    "ERROR: cannot connect to pigpiod for GPIO12 steering: "
+                    f"{steering.last_error}",
+                    file=sys.stderr,
+                )
+                return 1
+            print("GPIO12 steering: connected")
             run_servo_test(
-                pico,
+                steering,
                 args.steering_angle,
                 args.steering_seconds,
             )
+
         if not args.servo_only:
+            pico = PicoController(port=args.port, calibration=calibration)
+            if not pico.connect():
+                print(
+                    f"ERROR: cannot open Pico UART {args.port}: "
+                    f"{pico.last_error}",
+                    file=sys.stderr,
+                )
+                return 1
+            print(f"Opened Pico UART: {args.port} at 115200 baud")
+            print("Checking for the basic_rpi_car Pico firmware...", flush=True)
+            if not pico.ping():
+                print(
+                    "ERROR: Pico did not answer PING. Check pico firmware, "
+                    "TX/RX crossover, common ground, and the UART device. "
+                    f"({pico.last_error})",
+                    file=sys.stderr,
+                )
+                return 1
+            print("Pico PING: OK")
+            print("Clearing the emergency-stop latch left by the controller...")
+            clear_stale_estop(pico)
             run_motor_test(
                 pico,
                 args.throttle,
@@ -283,8 +300,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nERROR: {exc}", file=sys.stderr)
         return 1
     finally:
-        safe_stop_and_center(pico)
-        pico.close()
+        safe_stop_and_center(pico, steering)
+        if pico is not None:
+            pico.close()
+        if steering is not None:
+            steering.close()
 
 
 if __name__ == "__main__":
