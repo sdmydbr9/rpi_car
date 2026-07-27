@@ -17,6 +17,8 @@
 - [ ] Run `npm test`, `npm run lint`, and `npm run build`.
 - [ ] Run `cd app && npm run typecheck`.
 - [ ] Run `python scripts/diagnostics/manual_control_smoke.py`.
+- [ ] Run `python scripts/diagnostics/interactive_control_test.py` for the
+      server-mediated steering and motor checks.
 - [ ] Confirm `PING` succeeds and battery voltage is plausible.
 - [ ] Confirm steering centers and never exceeds the calibrated mechanical limits.
 - [ ] Run the smoke utility with `--allow-motor-test`.

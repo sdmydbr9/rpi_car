@@ -176,3 +176,13 @@ python scripts/diagnostics/manual_control_smoke.py --allow-motor-test
 
 The second command requires a typed confirmation and must be run with the
 drive wheels lifted clear.
+
+For interactive server-mediated checks without opening the UART separately:
+
+```bash
+python scripts/diagnostics/interactive_control_test.py
+```
+
+It offers status, manual battery refresh, centering/sweeping steering, and a
+guarded motor pulse. The motor option requires typing `LIFTED`, is capped at
+20% throttle for two seconds, and always sends neutral/disarm on exit.
