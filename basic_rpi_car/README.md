@@ -102,8 +102,10 @@ through zero output, and the Pico adds a 150 ms direction dwell.
 
 At connection time, `main.py` reads the gamepad's real Linux axis ranges
 instead of guessing from individual events. Steering uses exactly one axis:
-`ABS_RX` when available, otherwise a centered `ABS_Z`. This prevents a
-controller trigger reported as `ABS_Z` from forcing the wheels to one side.
+`ABS_RX` when available, otherwise `ABS_Z`. If the fallback axis has a stale
+off-center startup value, the controller waits for one centered live event
+before it can arm. This supports generic pads that expose a dummy `ABS_RX`
+axis while preventing an unconfirmed trigger-like value from steering.
 For an unusual controller whose right stick really is `ABS_Z`, override the
 automatic choice:
 

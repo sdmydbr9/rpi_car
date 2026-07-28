@@ -173,7 +173,7 @@ class MappingTests(unittest.TestCase):
             0.0,
         )
 
-    def test_axis_selection_prefers_rx_and_only_safely_falls_back(self):
+    def test_axis_selection_prefers_rx_and_falls_back_to_z(self):
         rx = car.AxisInfo("ABS_RX", -32768, 32767, 0)
         centered_z = car.AxisInfo("ABS_Z", 0, 255, 128)
         trigger_z = car.AxisInfo("ABS_Z", 0, 255, 0)
@@ -187,8 +187,10 @@ class MappingTests(unittest.TestCase):
             car.select_steering_axis({"ABS_Z": centered_z}),
             centered_z,
         )
-        with self.assertRaisesRegex(ValueError, "likely a trigger"):
-            car.select_steering_axis({"ABS_Z": trigger_z})
+        self.assertIs(
+            car.select_steering_axis({"ABS_Z": trigger_z}),
+            trigger_z,
+        )
 
     def test_throttle_and_drive_packet_are_clamped(self):
         self.assertEqual(car.throttle_to_pwm(100), 95)
@@ -514,6 +516,36 @@ class RuntimeConfigurationTests(unittest.TestCase):
         self.assertIs(controller.throttle_axis, axes["ABS_Y"])
         self.assertIs(controller.steering_axis, axes["ABS_RX"])
         self.assertEqual(controller.axis_configuration_error, "")
+
+    def test_shanwan_abs_z_waits_for_live_center_then_can_arm(self):
+        pico = FakePico()
+        logs: list[str] = []
+        controller = car.CarController(pico, log=logs.append)
+        runtime = car.BasicCarRuntime(controller)
+        axes = {
+            "ABS_Y": car.AxisInfo("ABS_Y", 0, 255, 128),
+            "ABS_Z": car.AxisInfo("ABS_Z", 0, 255, 0),
+        }
+
+        def axis_reader(_path, code):
+            if code not in axes:
+                raise OSError("axis unavailable")
+            return axes[code]
+
+        with patch.object(car, "read_axis_info", side_effect=axis_reader):
+            runtime._configure_connected_gamepad(FakeGamepadDevice())
+
+        self.assertIs(controller.steering_axis, axes["ABS_Z"])
+        self.assertIn("waiting for", controller.axis_configuration_error)
+        controller.handle_event("BTN_START", 1)
+        self.assertFalse(controller.armed)
+        controller.handle_event("ABS_Z", 128)
+        self.assertEqual(controller.axis_configuration_error, "")
+        controller.handle_event("BTN_START", 1)
+        self.assertTrue(controller.armed)
+        self.assertTrue(
+            any("event=gamepad_steering_confirmed" in line for line in logs)
+        )
 
     def test_axis_configuration_error_prevents_arming(self):
         pico = FakePico()

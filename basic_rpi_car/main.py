@@ -158,7 +158,7 @@ def select_steering_axis(
     axes: Mapping[str, AxisInfo],
     preference: str = "auto",
 ) -> AxisInfo:
-    """Select exactly one steering stick without mistaking a trigger."""
+    """Select exactly one steering axis; live input confirms ABS_Z later."""
     if preference not in STEERING_AXIS_CHOICES:
         raise ValueError(f"unsupported steering axis preference: {preference}")
     if preference != "auto":
@@ -172,14 +172,9 @@ def select_steering_axis(
     if "ABS_RX" in axes:
         return axes["ABS_RX"]
     fallback = axes.get("ABS_Z")
-    if fallback is not None and fallback.is_centered():
-        return fallback
     if fallback is not None:
-        raise ValueError(
-            "ABS_Z is not centered and is likely a trigger; "
-            "use --steering-axis only after verifying the controller mapping"
-        )
-    raise ValueError("gamepad exposes neither ABS_RX nor a safe ABS_Z stick")
+        return fallback
+    raise ValueError("gamepad exposes neither ABS_RX nor ABS_Z steering")
 
 
 def configure_logging(log_file: Path, debug: bool = False) -> logging.Logger:
@@ -733,6 +728,7 @@ class CarController:
         self.gamepad_path = ""
         self.throttle_axis: AxisInfo | None = None
         self.steering_axis: AxisInfo | None = None
+        self._steering_axis_center_confirmed = False
         self.axis_configuration_error = (
             "gamepad axis metadata has not been configured"
         )
@@ -776,6 +772,7 @@ class CarController:
             self.gamepad_path = device_path
             self.throttle_axis = throttle_axis
             self.steering_axis = steering_axis
+            self._steering_axis_center_confirmed = False
             self.axis_configuration_error = error
             if error:
                 self._emit(
@@ -804,9 +801,26 @@ class CarController:
             else:
                 self.direction = "N"
             self.throttle = round(abs(signed_throttle) * 100)
-            self.steering = round(
-                steering_axis.normalize(steering_axis.current) * 50
+            needs_live_center = (
+                steering_axis.code == "ABS_Z"
+                and not steering_axis.is_centered()
             )
+            if needs_live_center:
+                self.steering = 0
+                self.axis_configuration_error = (
+                    "waiting for a centered live ABS_Z steering event"
+                )
+                self._emit(
+                    logging.WARNING,
+                    "event=gamepad_steering_pending code=ABS_Z "
+                    f"startup_raw={steering_axis.current} "
+                    "action='center the right stick before arming'",
+                )
+            else:
+                self.steering = round(
+                    steering_axis.normalize(steering_axis.current) * 50
+                )
+                self._steering_axis_center_confirmed = True
             self._emit(
                 logging.INFO,
                 "event=gamepad_axes_ready "
@@ -882,6 +896,7 @@ class CarController:
             self._reset_gamepad_state_locked()
             self._applied_direction = "N"
             self._applied_throttle = 0
+            self._steering_axis_center_confirmed = False
             if self.pi_steering is not None and not self.pi_steering.center():
                 self._emit(
                     logging.ERROR,
@@ -899,6 +914,7 @@ class CarController:
                 self.gamepad_path = ""
                 self.throttle_axis = None
                 self.steering_axis = None
+                self._steering_axis_center_confirmed = False
                 self.axis_configuration_error = (
                     "gamepad axis metadata has not been configured"
                 )
@@ -1171,6 +1187,23 @@ class CarController:
                     pulse if pulse is not None else "-",
                     event_time,
                 )
+                if not self._steering_axis_center_confirmed:
+                    if normalized != 0.0:
+                        self.logger.debug(
+                            "event=gamepad_steering_pending code=%s raw=%r "
+                            "normalized=%.6f status=waiting_for_center",
+                            code,
+                            state,
+                            normalized,
+                        )
+                        return
+                    self._steering_axis_center_confirmed = True
+                    self.axis_configuration_error = ""
+                    self._emit(
+                        logging.INFO,
+                        "event=gamepad_steering_confirmed code="
+                        f"{code} raw={state!r} result=ready_to_arm",
+                    )
                 send_state = True
             elif code in {"ABS_RX", "ABS_Z"}:
                 self.logger.debug(
