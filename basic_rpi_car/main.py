@@ -4,10 +4,16 @@
 from __future__ import annotations
 
 import argparse
+from array import array
+from dataclasses import dataclass
+import fcntl
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import signal
+import sys
 import threading
 import time
 from typing import Any, Callable, Mapping
@@ -19,8 +25,21 @@ STEERING_GPIO = 12
 MAX_PWM_DUTY = 95
 GAMEPAD_DEADZONE = 0.08
 KEEPALIVE_INTERVAL_S = 0.10
+STEERING_HEALTH_INTERVAL_S = 1.0
 SELECT_DOUBLE_PRESS_S = 0.60
 ESTOP_RESET_DELAY_S = 0.20
+LOG_MAX_BYTES = 5 * 1024 * 1024
+LOG_BACKUP_COUNT = 3
+
+LOGGER = logging.getLogger("basic_rpi_car")
+LOGGER.addHandler(logging.NullHandler())
+
+ABSOLUTE_AXIS_CODES = {
+    "ABS_Y": 0x01,
+    "ABS_Z": 0x02,
+    "ABS_RX": 0x03,
+}
+STEERING_AXIS_CHOICES = ("auto", "ABS_RX", "ABS_Z")
 
 DEFAULT_STEERING_CALIBRATION = {
     "left_pw": 940,
@@ -29,23 +48,182 @@ DEFAULT_STEERING_CALIBRATION = {
 }
 
 
+@dataclass(frozen=True)
+class AxisInfo:
+    """Linux absolute-axis metadata used for safe normalization."""
+
+    code: str
+    minimum: int
+    maximum: int
+    current: int
+    flat: int = 0
+
+    def __post_init__(self) -> None:
+        if self.maximum <= self.minimum:
+            raise ValueError(
+                f"{self.code} has invalid range "
+                f"{self.minimum}..{self.maximum}"
+            )
+
+    @property
+    def center(self) -> float:
+        return (self.minimum + self.maximum) / 2.0
+
+    def normalize(self, value: Any) -> float:
+        return normalize_gamepad_axis(
+            value,
+            self.minimum,
+            self.maximum,
+            self.flat,
+        )
+
+    def is_centered(self) -> bool:
+        return self.normalize(self.current) == 0.0
+
+    def describe(self) -> str:
+        return (
+            f"code={self.code} min={self.minimum} max={self.maximum} "
+            f"center={self.center:g} current={self.current} flat={self.flat}"
+        )
+
+
 def clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
 
 
-def normalize_gamepad_axis(value: Any) -> float:
-    """Normalize the 8-bit or signed 16-bit axes emitted by ``inputs``."""
+def normalize_gamepad_axis(
+    value: Any,
+    minimum: int,
+    maximum: int,
+    flat: int = 0,
+) -> float:
+    """Normalize a raw Linux axis using the device's reported range."""
     try:
         raw = float(value)
     except (TypeError, ValueError):
         return 0.0
 
-    if 0 <= raw <= 255:
-        normalized = (raw - 128.0) / 127.0
+    if maximum <= minimum:
+        raise ValueError("axis maximum must be greater than minimum")
+    center = (minimum + maximum) / 2.0
+    if raw < center:
+        span = center - minimum
     else:
-        normalized = raw / 32767.0
+        span = maximum - center
+    if span <= 0:
+        return 0.0
+
+    offset = raw - center
+    deadzone = max(float(flat), span * GAMEPAD_DEADZONE)
+    if abs(offset) <= deadzone:
+        return 0.0
+
+    normalized = offset / span
     normalized = clamp(normalized, -1.0, 1.0)
-    return 0.0 if abs(normalized) < GAMEPAD_DEADZONE else normalized
+    return normalized
+
+
+def _eviocgabs(axis_number: int) -> int:
+    """Build Linux's EVIOCGABS ioctl request for ``input_absinfo``."""
+    ioc_read = 2
+    struct_size = 6 * array("i").itemsize
+    return (
+        (ioc_read << 30)
+        | (struct_size << 16)
+        | (ord("E") << 8)
+        | (0x40 + axis_number)
+    )
+
+
+def read_axis_info(device_path: str, code: str) -> AxisInfo:
+    """Read current/min/max/flat values for one evdev absolute axis."""
+    try:
+        axis_number = ABSOLUTE_AXIS_CODES[code]
+    except KeyError as exc:
+        raise ValueError(f"unsupported axis code: {code}") from exc
+
+    values = array("i", [0] * 6)
+    with open(device_path, "rb", buffering=0) as device:
+        fcntl.ioctl(device.fileno(), _eviocgabs(axis_number), values, True)
+    return AxisInfo(
+        code=code,
+        current=values[0],
+        minimum=values[1],
+        maximum=values[2],
+        flat=max(0, values[4]),
+    )
+
+
+def select_steering_axis(
+    axes: Mapping[str, AxisInfo],
+    preference: str = "auto",
+) -> AxisInfo:
+    """Select exactly one steering stick without mistaking a trigger."""
+    if preference not in STEERING_AXIS_CHOICES:
+        raise ValueError(f"unsupported steering axis preference: {preference}")
+    if preference != "auto":
+        try:
+            return axes[preference]
+        except KeyError as exc:
+            raise ValueError(
+                f"requested steering axis {preference} is unavailable"
+            ) from exc
+
+    if "ABS_RX" in axes:
+        return axes["ABS_RX"]
+    fallback = axes.get("ABS_Z")
+    if fallback is not None and fallback.is_centered():
+        return fallback
+    if fallback is not None:
+        raise ValueError(
+            "ABS_Z is not centered and is likely a trigger; "
+            "use --steering-axis only after verifying the controller mapping"
+        )
+    raise ValueError("gamepad exposes neither ABS_RX nor a safe ABS_Z stick")
+
+
+def configure_logging(log_file: Path, debug: bool = False) -> logging.Logger:
+    """Configure concise console output and bounded detailed file logging."""
+    logger = LOGGER
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        if not isinstance(handler, logging.NullHandler):
+            handler.close()
+
+    formatter = logging.Formatter(
+        fmt=(
+            "%(asctime)s.%(msecs)03d %(levelname)s "
+            "thread=%(threadName)s %(message)s"
+        ),
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+    console = logging.StreamHandler(sys.stdout)
+    console.setLevel(logging.DEBUG if debug else logging.INFO)
+    console.setFormatter(formatter)
+    logger.addHandler(console)
+
+    try:
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=LOG_MAX_BYTES,
+            backupCount=LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logger.warning(
+            "event=log_file_unavailable path=%s error=%r "
+            "fallback=console_only",
+            log_file,
+            str(exc),
+        )
+    else:
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        logger.info("event=log_ready path=%s", log_file)
+    return logger
 
 
 def clamp_throttle(value: Any) -> int:
@@ -328,6 +506,7 @@ class PiSteeringController:
         calibration: Mapping[str, Any] | None = None,
         gpio: int = STEERING_GPIO,
         pigpio_factory: Callable[[], Any] | None = None,
+        logger: logging.Logger | None = None,
     ):
         self.calibration = normalize_calibration(
             calibration or DEFAULT_STEERING_CALIBRATION
@@ -337,6 +516,7 @@ class PiSteeringController:
         self._client: Any | None = None
         self._lock = threading.RLock()
         self._last_pulse: int | None = None
+        self.logger = logger or LOGGER
         self.last_error = ""
 
     @property
@@ -349,7 +529,7 @@ class PiSteeringController:
         if self._pigpio_factory is not None:
             return self._pigpio_factory
         try:
-            import pigpio
+            import pigpio  # type: ignore[import-not-found]
         except ImportError:
             self.last_error = (
                 "pigpio is not installed; install it and enable pigpiod"
@@ -387,7 +567,67 @@ class PiSteeringController:
                 self.last_error = str(exc)
                 return False
 
-    def set_steering(self, angle: Any) -> bool:
+    def _read_pulse_locked(self, client: Any) -> int:
+        readback = client.get_servo_pulsewidth(self.gpio)
+        if readback is None or int(readback) < 0:
+            raise RuntimeError(f"pigpio readback error {readback}")
+        return int(readback)
+
+    def _write_verified_locked(
+        self,
+        client: Any,
+        pulse: int,
+        sequence: int | None,
+        reason: str,
+    ) -> bool:
+        last_failure = "unknown pigpio failure"
+        sequence_value = sequence if sequence is not None else "-"
+        for attempt in (1, 2):
+            try:
+                result = client.set_servo_pulsewidth(self.gpio, pulse)
+                if result not in (None, 0):
+                    raise RuntimeError(f"pigpio write error {result}")
+                readback = self._read_pulse_locked(client)
+                self.logger.debug(
+                    "event=steering_apply seq=%s reason=%s attempt=%d "
+                    "gpio=%d requested_us=%d readback_us=%d",
+                    sequence_value,
+                    reason,
+                    attempt,
+                    self.gpio,
+                    pulse,
+                    readback,
+                )
+                if readback == pulse:
+                    self._last_pulse = pulse
+                    self.last_error = ""
+                    return True
+                last_failure = (
+                    f"steering readback mismatch requested={pulse} "
+                    f"actual={readback}"
+                )
+            except Exception as exc:
+                last_failure = str(exc)
+            self.logger.warning(
+                "event=steering_retry seq=%s reason=%s attempt=%d "
+                "gpio=%d requested_us=%d error=%r",
+                sequence_value,
+                reason,
+                attempt,
+                self.gpio,
+                pulse,
+                last_failure,
+            )
+
+        self._last_pulse = None
+        self.last_error = last_failure
+        return False
+
+    def set_steering(
+        self,
+        angle: Any,
+        sequence: int | None = None,
+    ) -> bool:
         with self._lock:
             if not self.connected and not self.connect():
                 return False
@@ -398,16 +638,58 @@ class PiSteeringController:
             pulse = steering_to_pulse(angle, self.calibration)
             if pulse == self._last_pulse:
                 return True
-            try:
-                result = client.set_servo_pulsewidth(self.gpio, pulse)
-                if result not in (None, 0):
-                    raise RuntimeError(f"pigpio error {result}")
-                self._last_pulse = pulse
-                self.last_error = ""
-                return True
-            except Exception as exc:
-                self.last_error = str(exc)
+            return self._write_verified_locked(
+                client,
+                pulse,
+                sequence,
+                "input",
+            )
+
+    def verify_steering(self, angle: Any) -> bool:
+        """Read back GPIO12 and restore the requested pulse if it changed."""
+        with self._lock:
+            if not self.connected and not self.connect():
                 return False
+            client = self._client
+            if client is None:
+                self.last_error = "pigpio connection was not opened"
+                return False
+            pulse = steering_to_pulse(angle, self.calibration)
+            try:
+                readback = self._read_pulse_locked(client)
+                self.logger.debug(
+                    "event=steering_health gpio=%d requested_us=%d "
+                    "readback_us=%d status=%s",
+                    self.gpio,
+                    pulse,
+                    readback,
+                    "ok" if readback == pulse else "mismatch",
+                )
+                if readback == pulse:
+                    self._last_pulse = pulse
+                    self.last_error = ""
+                    return True
+                self.logger.warning(
+                    "event=steering_health_mismatch gpio=%d "
+                    "requested_us=%d readback_us=%d action=correct",
+                    self.gpio,
+                    pulse,
+                    readback,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "event=steering_health_error gpio=%d requested_us=%d "
+                    "error=%r action=correct",
+                    self.gpio,
+                    pulse,
+                    str(exc),
+                )
+            return self._write_verified_locked(
+                client,
+                pulse,
+                None,
+                "health",
+            )
 
     def center(self) -> bool:
         return self.set_steering(0)
@@ -436,15 +718,24 @@ class CarController:
         self,
         pico: PicoController,
         pi_steering: PiSteeringController | None = None,
-        log: Callable[[str], None] = print,
+        log: Callable[[str], None] | None = None,
         now_fn: Callable[[], float] = time.monotonic,
+        logger: logging.Logger | None = None,
     ):
         self.pico = pico
         self.pi_steering = pi_steering
-        self.log = log
+        self.logger = logger or LOGGER
+        self._legacy_log = log
         self._now = now_fn
         self._lock = threading.RLock()
         self.gamepad_connected = False
+        self.gamepad_name = ""
+        self.gamepad_path = ""
+        self.throttle_axis: AxisInfo | None = None
+        self.steering_axis: AxisInfo | None = None
+        self.axis_configuration_error = (
+            "gamepad axis metadata has not been configured"
+        )
         self.armed = False
         self.estop = False
         self.direction = "N"
@@ -457,7 +748,72 @@ class CarController:
         self._estop_at = 0.0
         self._applied_direction = "N"
         self._applied_throttle = 0
+        self._steering_sequence = 0
+        self._last_steering_health_at = 0.0
+        self._last_logged_drive_state: tuple[str, int, int, bool] | None = None
         self._shutdown = False
+
+    def _emit(self, level: int, message: str) -> None:
+        self.logger.log(level, message)
+        if self._legacy_log is not None:
+            self._legacy_log(message)
+
+    def log(self, message: str) -> None:
+        """Compatibility entry point for runtime status messages."""
+        self._emit(logging.INFO, message)
+
+    def configure_gamepad(
+        self,
+        name: str,
+        device_path: str,
+        throttle_axis: AxisInfo | None,
+        steering_axis: AxisInfo | None,
+        error: str = "",
+    ) -> None:
+        """Install one immutable axis profile for this gamepad connection."""
+        with self._lock:
+            self.gamepad_name = name
+            self.gamepad_path = device_path
+            self.throttle_axis = throttle_axis
+            self.steering_axis = steering_axis
+            self.axis_configuration_error = error
+            if error:
+                self._emit(
+                    logging.ERROR,
+                    "event=gamepad_axis_error "
+                    f"name={name!r} path={device_path!r} error={error!r}",
+                )
+                return
+            if throttle_axis is None or steering_axis is None:
+                self.axis_configuration_error = "required axis metadata missing"
+                self._emit(
+                    logging.ERROR,
+                    "event=gamepad_axis_error "
+                    f"name={name!r} path={device_path!r} "
+                    "error='required axis metadata missing'",
+                )
+                return
+
+            signed_throttle = -throttle_axis.normalize(
+                throttle_axis.current
+            )
+            if signed_throttle > 0:
+                self.direction = "F"
+            elif signed_throttle < 0:
+                self.direction = "R"
+            else:
+                self.direction = "N"
+            self.throttle = round(abs(signed_throttle) * 100)
+            self.steering = round(
+                steering_axis.normalize(steering_axis.current) * 50
+            )
+            self._emit(
+                logging.INFO,
+                "event=gamepad_axes_ready "
+                f"name={name!r} path={device_path!r} "
+                f"throttle=({throttle_axis.describe()}) "
+                f"steering=({steering_axis.describe()})",
+            )
 
     def _reset_gamepad_state_locked(self) -> None:
         self.direction = "N"
@@ -467,28 +823,53 @@ class CarController:
         self._brake_buttons.clear()
         self._trigger_buttons.clear()
         self._last_select_at = 0.0
+        self._last_logged_drive_state = None
 
     def _mark_write_failure_locked(self, action: str) -> None:
         self.armed = False
         self._applied_direction = "N"
         self._applied_throttle = 0
-        self.log(
-            f"Pico {action} failed; car disarmed: "
-            f"{self.pico.last_error or 'UART unavailable'}"
+        self._emit(
+            logging.ERROR,
+            "event=pico_failure action="
+            f"{action!r} result=disarmed error="
+            f"{(self.pico.last_error or 'UART unavailable')!r}",
         )
 
     def _apply_pi_steering_locked(self) -> bool:
         if self.pi_steering is None:
             return True
-        if self.pi_steering.set_steering(self.steering):
+        if self.pi_steering.set_steering(
+            self.steering,
+            sequence=self._steering_sequence,
+        ):
             return True
         self.armed = False
         self._applied_direction = "N"
         self._applied_throttle = 0
         self.pico.stop()
-        self.log(
-            "Pi steering command failed; car disarmed: "
-            f"{self.pi_steering.last_error or 'GPIO12 unavailable'}"
+        self._emit(
+            logging.ERROR,
+            "event=steering_failure action=apply result=disarmed "
+            f"seq={self._steering_sequence} angle={self.steering} "
+            f"error={(self.pi_steering.last_error or 'GPIO12 unavailable')!r}",
+        )
+        return False
+
+    def _verify_pi_steering_locked(self) -> bool:
+        if self.pi_steering is None:
+            return True
+        if self.pi_steering.verify_steering(self.steering):
+            return True
+        self.armed = False
+        self._applied_direction = "N"
+        self._applied_throttle = 0
+        self.pico.stop()
+        self._emit(
+            logging.ERROR,
+            "event=steering_failure action=health_check result=disarmed "
+            f"angle={self.steering} "
+            f"error={(self.pi_steering.last_error or 'GPIO12 unavailable')!r}",
         )
         return False
 
@@ -502,9 +883,10 @@ class CarController:
             self._applied_direction = "N"
             self._applied_throttle = 0
             if self.pi_steering is not None and not self.pi_steering.center():
-                self.log(
-                    "Could not center Pi steering: "
-                    f"{self.pi_steering.last_error or 'GPIO12 unavailable'}"
+                self._emit(
+                    logging.ERROR,
+                    "event=steering_center_failure "
+                    f"error={(self.pi_steering.last_error or 'GPIO12 unavailable')!r}",
                 )
             sent = (
                 self.pico.emergency_stop()
@@ -512,27 +894,57 @@ class CarController:
                 else self.pico.stop()
             )
             self.gamepad_connected = connected
-            if not sent:
-                self.log(
-                    "Safety stop could not be written; the Pico watchdog "
-                    f"remains active: {self.pico.last_error or 'UART unavailable'}"
+            if not connected:
+                self.gamepad_name = ""
+                self.gamepad_path = ""
+                self.throttle_axis = None
+                self.steering_axis = None
+                self.axis_configuration_error = (
+                    "gamepad axis metadata has not been configured"
                 )
-            self.log(
-                "Gamepad connected; car is disarmed."
+            if not sent:
+                self._emit(
+                    logging.ERROR,
+                    "event=safety_stop_failure watchdog=active "
+                    f"error={(self.pico.last_error or 'UART unavailable')!r}",
+                )
+            self._emit(
+                logging.INFO,
+                "event=gamepad_connection connected=true result=disarmed"
                 if connected
-                else "Gamepad disconnected; car stopped and disarmed."
+                else (
+                    "event=gamepad_connection connected=false "
+                    "result=stopped_disarmed"
+                ),
             )
 
     def arm(self) -> bool:
         with self._lock:
             if not self.gamepad_connected:
-                self.log("Cannot arm: no gamepad is connected.")
+                self._emit(
+                    logging.WARNING,
+                    "event=arm_rejected reason=no_gamepad",
+                )
+                return False
+            if self.axis_configuration_error:
+                self._emit(
+                    logging.ERROR,
+                    "event=arm_rejected reason=axis_configuration "
+                    f"error={self.axis_configuration_error!r}",
+                )
                 return False
             if self.estop:
-                self.log("Cannot arm: reset the emergency stop first.")
+                self._emit(
+                    logging.WARNING,
+                    "event=arm_rejected reason=emergency_stop",
+                )
                 return False
             if self.throttle or self.brake:
-                self.log("Cannot arm: release throttle and brake first.")
+                self._emit(
+                    logging.WARNING,
+                    "event=arm_rejected reason=controls_not_neutral "
+                    f"throttle={self.throttle} brake={self.brake}",
+                )
                 return False
             if not self.pico.connect():
                 self._mark_write_failure_locked("connection")
@@ -542,10 +954,15 @@ class CarController:
             self.armed = True
             self._applied_direction = "N"
             self._applied_throttle = 0
+            self._last_steering_health_at = self._now()
             if not self.pico.drive("N", 0, self.steering):
                 self._mark_write_failure_locked("neutral command")
                 return False
-            self.log("Car armed.")
+            self._emit(
+                logging.INFO,
+                "event=arm result=armed "
+                f"steering={self.steering} throttle={self.throttle}",
+            )
             return True
 
     def disarm(self, reason: str = "Car disarmed.") -> None:
@@ -559,11 +976,12 @@ class CarController:
                 else self.pico.stop()
             )
             if not sent:
-                self.log(
-                    f"Stop command failed: "
-                    f"{self.pico.last_error or 'UART unavailable'}"
+                self._emit(
+                    logging.ERROR,
+                    "event=stop_failure "
+                    f"error={(self.pico.last_error or 'UART unavailable')!r}",
                 )
-            self.log(reason)
+            self._emit(logging.INFO, f"event=disarm reason={reason!r}")
 
     def emergency_stop(self) -> None:
         with self._lock:
@@ -574,11 +992,15 @@ class CarController:
             self._applied_direction = "N"
             self._applied_throttle = 0
             if sent:
-                self.log("EMERGENCY STOP latched.")
+                self._emit(
+                    logging.CRITICAL,
+                    "event=emergency_stop result=latched",
+                )
             else:
-                self.log(
-                    "EMERGENCY STOP requested but UART failed: "
-                    f"{self.pico.last_error or 'UART unavailable'}"
+                self._emit(
+                    logging.CRITICAL,
+                    "event=emergency_stop result=uart_failed "
+                    f"error={(self.pico.last_error or 'UART unavailable')!r}",
                 )
 
     def reset_emergency_stop(self) -> bool:
@@ -586,17 +1008,26 @@ class CarController:
             if not self.estop:
                 return True
             if self.throttle or self.brake:
-                self.log("Release throttle and brake before resetting e-stop.")
+                self._emit(
+                    logging.WARNING,
+                    "event=estop_reset_rejected reason=controls_not_neutral",
+                )
                 return False
             if self._now() - self._estop_at < ESTOP_RESET_DELAY_S:
-                self.log("Wait for emergency braking to finish before reset.")
+                self._emit(
+                    logging.WARNING,
+                    "event=estop_reset_rejected reason=braking_delay",
+                )
                 return False
             if not self.pico.reset_emergency_stop():
                 self._mark_write_failure_locked("e-stop reset")
                 return False
             self.estop = False
             self._estop_at = 0.0
-            self.log("Emergency stop reset; car remains disarmed.")
+            self._emit(
+                logging.INFO,
+                "event=estop_reset result=reset_disarmed",
+            )
             return True
 
     def _send_current_locked(self) -> bool:
@@ -609,6 +1040,7 @@ class CarController:
                 self._mark_write_failure_locked("brake command")
                 return False
             self._applied_throttle = 0
+            self._log_drive_state_locked()
             return True
 
         requested_direction = self.direction
@@ -627,6 +1059,12 @@ class CarController:
                 return False
             self._applied_direction = "N"
             self._applied_throttle = 0
+            self.logger.debug(
+                "event=drive_direction_dwell requested_direction=%s "
+                "requested_throttle=%d",
+                requested_direction,
+                requested_throttle,
+            )
             return True
 
         if not self.pico.drive(
@@ -638,11 +1076,41 @@ class CarController:
             return False
         self._applied_direction = requested_direction
         self._applied_throttle = requested_throttle
+        self._log_drive_state_locked()
         return True
+
+    def _log_drive_state_locked(self) -> None:
+        state = (
+            self.direction,
+            self.throttle,
+            self.steering,
+            self.brake,
+        )
+        if state == self._last_logged_drive_state:
+            return
+        self._last_logged_drive_state = state
+        self.logger.debug(
+            "event=drive_state direction=%s throttle=%d steering=%d "
+            "brake=%s",
+            self.direction,
+            self.throttle,
+            self.steering,
+            str(self.brake).lower(),
+        )
 
     def refresh_active_command(self) -> None:
         with self._lock:
-            if self.armed and (self.throttle or self.brake):
+            if not self.armed:
+                return
+            now = self._now()
+            if (
+                now - self._last_steering_health_at
+                >= STEERING_HEALTH_INTERVAL_S
+            ):
+                self._last_steering_health_at = now
+                if not self._verify_pi_steering_locked():
+                    return
+            if self.throttle or self.brake:
                 self._send_current_locked()
 
     def handle_event(
@@ -656,8 +1124,9 @@ class CarController:
                 return
             send_state = False
 
-            if code == "ABS_Y":
-                signed_throttle = -normalize_gamepad_axis(state)
+            if code == "ABS_Y" and self.throttle_axis is not None:
+                normalized = self.throttle_axis.normalize(state)
+                signed_throttle = -normalized
                 if signed_throttle > 0:
                     self.direction = "F"
                 elif signed_throttle < 0:
@@ -665,10 +1134,57 @@ class CarController:
                 else:
                     self.direction = "N"
                 self.throttle = round(abs(signed_throttle) * 100)
+                self.logger.debug(
+                    "event=throttle_input code=%s raw=%r normalized=%.6f "
+                    "direction=%s throttle=%d source_ts=%r",
+                    code,
+                    state,
+                    normalized,
+                    self.direction,
+                    self.throttle,
+                    event_time,
+                )
+                send_state = True
+            elif (
+                self.steering_axis is not None
+                and code == self.steering_axis.code
+            ):
+                normalized = self.steering_axis.normalize(state)
+                self.steering = round(normalized * 50)
+                self._steering_sequence += 1
+                pulse = (
+                    steering_to_pulse(
+                        self.steering,
+                        self.pi_steering.calibration,
+                    )
+                    if self.pi_steering is not None
+                    else None
+                )
+                self.logger.debug(
+                    "event=steering_input seq=%d code=%s raw=%r "
+                    "normalized=%.6f angle=%d pulse_us=%s source_ts=%r",
+                    self._steering_sequence,
+                    code,
+                    state,
+                    normalized,
+                    self.steering,
+                    pulse if pulse is not None else "-",
+                    event_time,
+                )
                 send_state = True
             elif code in {"ABS_RX", "ABS_Z"}:
-                self.steering = round(normalize_gamepad_axis(state) * 50)
-                send_state = True
+                self.logger.debug(
+                    "event=axis_ignored code=%s raw=%r selected_steering=%s "
+                    "source_ts=%r",
+                    code,
+                    state,
+                    (
+                        self.steering_axis.code
+                        if self.steering_axis is not None
+                        else "unconfigured"
+                    ),
+                    event_time,
+                )
             elif code in {"BTN_THUMBL", "BTN_THUMBR"}:
                 if bool(state):
                     self._brake_buttons.add(code)
@@ -723,7 +1239,10 @@ class CarController:
             if self.pi_steering is not None:
                 self.pi_steering.center()
                 self.pi_steering.close()
-            self.log("Controller stopped; emergency stop sent to Pico.")
+            self._emit(
+                logging.INFO,
+                "event=shutdown result=pico_estop steering_closed",
+            )
 
 
 class BasicCarRuntime:
@@ -733,20 +1252,79 @@ class BasicCarRuntime:
         self,
         controller: CarController,
         stop_event: threading.Event | None = None,
+        steering_axis_preference: str = "auto",
     ):
         self.controller = controller
         self.stop_event = stop_event or threading.Event()
+        self.steering_axis_preference = steering_axis_preference
         self.exit_code = 0
         self._threads: list[threading.Thread] = []
+        self._last_gamepad_error = ""
 
     def fail(self, message: str) -> None:
-        self.controller.log(message)
+        self.controller._emit(logging.ERROR, message)
         self.exit_code = 1
         self.stop_event.set()
 
+    def _configure_connected_gamepad(self, gamepad: Any) -> None:
+        name = str(getattr(gamepad, "name", "Unknown gamepad"))
+        try:
+            device_path = str(gamepad.get_char_device_path())
+        except Exception:
+            device_path = "unknown"
+
+        axes: dict[str, AxisInfo] = {}
+        discovery_errors: dict[str, str] = {}
+        if device_path != "unknown":
+            for code in ABSOLUTE_AXIS_CODES:
+                try:
+                    axes[code] = read_axis_info(device_path, code)
+                except (OSError, ValueError) as exc:
+                    discovery_errors[code] = str(exc)
+                    self.controller.logger.debug(
+                        "event=axis_unavailable name=%r path=%r "
+                        "code=%s error=%r",
+                        name,
+                        device_path,
+                        code,
+                        str(exc),
+                    )
+
+        throttle_axis = axes.get("ABS_Y")
+        steering_axis: AxisInfo | None = None
+        error = ""
+        if throttle_axis is None:
+            error = (
+                "ABS_Y throttle metadata unavailable: "
+                f"{discovery_errors.get('ABS_Y', 'axis not exposed')}"
+            )
+        else:
+            try:
+                steering_axis = select_steering_axis(
+                    axes,
+                    self.steering_axis_preference,
+                )
+            except ValueError as exc:
+                error = str(exc)
+
+        self.controller.set_gamepad_connected(True)
+        self.controller.configure_gamepad(
+            name,
+            device_path,
+            throttle_axis,
+            steering_axis,
+            error,
+        )
+        if not error:
+            self._last_gamepad_error = ""
+
     def _gamepad_worker(self) -> None:
         try:
-            from inputs import UnpluggedError, devices, get_gamepad
+            from inputs import (  # type: ignore[import-not-found]
+                UnpluggedError,
+                devices,
+                get_gamepad,
+            )
         except ImportError:
             self.fail(
                 "The `inputs` package is not installed; run "
@@ -757,18 +1335,37 @@ class BasicCarRuntime:
         while not self.stop_event.is_set():
             try:
                 if devices.gamepads and not self.controller.gamepad_connected:
-                    self.controller.set_gamepad_connected(True)
+                    self._configure_connected_gamepad(devices.gamepads[0])
                 events = get_gamepad()
                 if not self.controller.gamepad_connected:
-                    self.controller.set_gamepad_connected(True)
+                    self._configure_connected_gamepad(devices.gamepads[0])
                 for event in events:
-                    self.controller.handle_event(event.code, event.state)
-            except (UnpluggedError, OSError, RuntimeError, IndexError):
+                    self.controller.handle_event(
+                        event.code,
+                        event.state,
+                        event_time=getattr(event, "timestamp", None),
+                    )
+            except (
+                UnpluggedError,
+                OSError,
+                RuntimeError,
+                IndexError,
+            ) as exc:
+                error = str(exc)
+                if error != self._last_gamepad_error:
+                    self.controller.logger.warning(
+                        "event=gamepad_reader_unavailable error=%r",
+                        error,
+                    )
+                    self._last_gamepad_error = error
                 self.controller.set_gamepad_connected(False)
                 self.stop_event.wait(1.0)
             except Exception as exc:
                 self.controller.set_gamepad_connected(False)
-                self.controller.log(f"Gamepad reader error: {exc}")
+                self.controller._emit(
+                    logging.ERROR,
+                    f"event=gamepad_reader_error error={str(exc)!r}",
+                )
                 self.stop_event.wait(1.0)
 
     def _refresh_worker(self) -> None:
@@ -780,8 +1377,10 @@ class BasicCarRuntime:
         while not self.stop_event.is_set():
             if not self.controller.pico.connected:
                 if self.controller.pico.connect():
-                    self.controller.log(
-                        f"Pico connected on {self.controller.pico.port}."
+                    self.controller._emit(
+                        logging.INFO,
+                        "event=pico_connection connected=true "
+                        f"port={self.controller.pico.port!r}",
                     )
                     last_error = ""
                 else:
@@ -790,17 +1389,20 @@ class BasicCarRuntime:
                         or "UART unavailable"
                     )
                     if error != last_error:
-                        self.controller.log(
-                            f"Waiting for Pico on "
-                            f"{self.controller.pico.port}: {error}"
+                        self.controller._emit(
+                            logging.WARNING,
+                            "event=pico_connection connected=false "
+                            f"port={self.controller.pico.port!r} "
+                            f"error={error!r}",
                         )
                         last_error = error
             self.stop_event.wait(1.0)
 
     def run(self) -> int:
-        self.controller.log(
-            "basic_rpi_car starting; connect the gamepad and press Start "
-            "while the controls are neutral."
+        self.controller._emit(
+            logging.INFO,
+            "event=startup status=waiting_for_gamepad "
+            "instruction='press Start while controls are neutral'",
         )
         self._threads = [
             threading.Thread(
@@ -860,6 +1462,26 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         help="optional steering calibration JSON file",
     )
+    parser.add_argument(
+        "--steering-axis",
+        choices=STEERING_AXIS_CHOICES,
+        default="auto",
+        help=(
+            "steering input axis; auto prefers ABS_RX and safely falls "
+            "back to ABS_Z (default: auto)"
+        ),
+    )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=Path(__file__).with_name("basic_rpi_car.log"),
+        help="rotating detailed log file (default: beside main.py)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="also show detailed input and GPIO diagnostics on the console",
+    )
     return parser
 
 
@@ -912,7 +1534,8 @@ def run_diagnostic(
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    calibration = load_calibration(args.calibration)
+    logger = configure_logging(args.log_file, args.debug)
+    calibration = load_calibration(args.calibration, log=logger.warning)
     pico = PicoController(port=args.port, calibration=calibration)
 
     if args.ping or args.battery:
@@ -922,21 +1545,28 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Configuration error: {exc}")
             return 2
 
-    pi_steering = PiSteeringController(calibration=calibration)
+    pi_steering = PiSteeringController(
+        calibration=calibration,
+        logger=logger,
+    )
     if not pi_steering.connect():
-        print(
-            "Pi steering unavailable on GPIO12 (physical pin 32): "
-            f"{pi_steering.last_error}",
-            flush=True,
+        logger.error(
+            "event=steering_connection connected=false gpio=%d "
+            "physical_pin=32 error=%r",
+            STEERING_GPIO,
+            pi_steering.last_error,
         )
         return 1
 
     controller = CarController(
         pico,
         pi_steering=pi_steering,
-        log=lambda message: print(message, flush=True),
+        logger=logger,
     )
-    runtime = BasicCarRuntime(controller)
+    runtime = BasicCarRuntime(
+        controller,
+        steering_axis_preference=args.steering_axis,
+    )
 
     def request_shutdown(_signum=None, _frame=None) -> None:
         runtime.stop_event.set()
@@ -949,7 +1579,7 @@ def main(argv: list[str] | None = None) -> int:
         runtime.stop_event.set()
         return 0
     except Exception as exc:
-        print(f"Controller failed: {exc}", flush=True)
+        logger.exception("event=controller_failure error=%r", str(exc))
         return 1
     finally:
         controller.shutdown()

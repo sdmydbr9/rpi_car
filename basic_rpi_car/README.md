@@ -100,10 +100,53 @@ RC_PICO_PORT=/dev/serial0 python3 main.py
 The sticks use an 8% center deadzone. A forward/reverse change is forced
 through zero output, and the Pico adds a 150 ms direction dwell.
 
+At connection time, `main.py` reads the gamepad's real Linux axis ranges
+instead of guessing from individual events. Steering uses exactly one axis:
+`ABS_RX` when available, otherwise a centered `ABS_Z`. This prevents a
+controller trigger reported as `ABS_Z` from forcing the wheels to one side.
+For an unusual controller whose right stick really is `ABS_Z`, override the
+automatic choice:
+
+```bash
+python3 main.py --steering-axis ABS_Z
+```
+
+The car will not arm if the throttle and steering axes cannot be identified
+safely. The startup log records the controller name, device path, selected
+axes, ranges, current values, and deadzones.
+
 Disconnecting the gamepad stops and disarms the car. `Ctrl+C`, `SIGTERM`, and
 normal cleanup send the latched Pico emergency-stop command. After restarting
 the Pi process following an emergency-stop shutdown, use the e-stop combo to
 engage/synchronize the local latch and then repeat it while neutral to reset.
+
+## Diagnostic logging
+
+Normal runs show concise status on the console and write detailed `DEBUG`
+records to `basic_rpi_car.log` beside `main.py`. The log rotates at 5 MB and
+keeps three backups. Use another location or show the detailed records on the
+console with:
+
+```bash
+python3 main.py --log-file /var/log/basic_rpi_car.log
+python3 main.py --debug
+```
+
+Steering records share a sequence number from the raw gamepad event through
+the requested servo pulse and GPIO12 readback. Pigpio output is also checked
+once per second while armed, including when the motors are stationary. A
+mismatch is corrected and verified; if the corrective command and its one
+retry both fail, the motors stop and the car disarms.
+
+Use the records around a failure to narrow down the cause:
+
+- No `event=steering_input` when the stick moves means the problem is in the
+  controller, its selected axis, or the input connection.
+- A steering input without a matching successful `event=steering_apply`
+  means the pigpio daemon or GPIO12 command path failed.
+- A matching `requested_us` and `readback_us` while the wheels do not move
+  means software delivered the pulse; inspect servo power, common ground,
+  signal integrity, and mechanical binding.
 
 ## Steering calibration
 
@@ -192,3 +235,8 @@ Then, with the drive wheels lifted:
 8. Disconnect the Pi-to-Pico UART TX line at low throttle and confirm the Pico
    watchdog removes motor output within 300 ms.
 9. Terminate `main.py` and confirm the motors remain stopped.
+10. While steering, press and release the analog triggers and confirm they do
+    not change the wheel angle.
+11. Repeat the steering sweep at low motor throttle, then inspect
+    `basic_rpi_car.log` for matching `steering_input`, `steering_apply`, and
+    `steering_health` pulse values.

@@ -1,6 +1,8 @@
 from pathlib import Path
 import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -75,11 +77,22 @@ class FakePigpioClient:
     def __init__(self):
         self.connected = 1
         self.pulses: list[tuple[int, int]] = []
+        self.current_pulse = 0
+        self.forced_readback: int | None = None
+        self.readbacks: list[int] = []
         self.stopped = False
 
     def set_servo_pulsewidth(self, gpio, pulse):
         self.pulses.append((gpio, pulse))
+        self.current_pulse = pulse
         return 0
+
+    def get_servo_pulsewidth(self, _gpio):
+        if self.readbacks:
+            return self.readbacks.pop(0)
+        if self.forced_readback is not None:
+            return self.forced_readback
+        return self.current_pulse
 
     def stop(self):
         self.stopped = True
@@ -92,12 +105,21 @@ class FakePiSteering:
         self.center_calls = 0
         self.closed = False
         self.send_ok = True
+        self.verify_ok = True
+        self.verify_calls = 0
+        self.calibration = car.DEFAULT_STEERING_CALIBRATION
 
-    def set_steering(self, angle):
+    def set_steering(self, angle, sequence=None):
         self.angles.append(angle)
         if not self.send_ok:
             self.last_error = "simulated GPIO12 failure"
         return self.send_ok
+
+    def verify_steering(self, _angle):
+        self.verify_calls += 1
+        if not self.verify_ok:
+            self.last_error = "simulated GPIO12 readback failure"
+        return self.verify_ok
 
     def center(self):
         self.center_calls += 1
@@ -107,15 +129,66 @@ class FakePiSteering:
         self.closed = True
 
 
+class FakeGamepadDevice:
+    name = "Generic test pad"
+
+    @staticmethod
+    def get_char_device_path():
+        return "/dev/input/event-test"
+
+
+def configure_test_gamepad(
+    controller,
+    steering_code="ABS_RX",
+    steering_current=128,
+):
+    controller.configure_gamepad(
+        "Test gamepad",
+        "/dev/input/test",
+        car.AxisInfo("ABS_Y", 0, 255, 128),
+        car.AxisInfo(steering_code, 0, 255, steering_current),
+    )
+
+
 class MappingTests(unittest.TestCase):
     def test_axis_normalization_and_deadzone(self):
-        self.assertEqual(car.normalize_gamepad_axis(128), 0.0)
-        self.assertEqual(car.normalize_gamepad_axis(130), 0.0)
-        self.assertEqual(car.normalize_gamepad_axis(0), -1.0)
-        self.assertEqual(car.normalize_gamepad_axis(255), 1.0)
-        self.assertEqual(car.normalize_gamepad_axis(-32768), -1.0)
-        self.assertEqual(car.normalize_gamepad_axis(32767), 1.0)
-        self.assertEqual(car.normalize_gamepad_axis("bad"), 0.0)
+        self.assertEqual(car.normalize_gamepad_axis(128, 0, 255), 0.0)
+        self.assertEqual(car.normalize_gamepad_axis(130, 0, 255), 0.0)
+        self.assertEqual(car.normalize_gamepad_axis(0, 0, 255), -1.0)
+        self.assertEqual(car.normalize_gamepad_axis(255, 0, 255), 1.0)
+        self.assertEqual(
+            car.normalize_gamepad_axis(-32768, -32768, 32767),
+            -1.0,
+        )
+        self.assertEqual(
+            car.normalize_gamepad_axis(32767, -32768, 32767),
+            1.0,
+        )
+        self.assertEqual(
+            car.normalize_gamepad_axis(255, -32768, 32767),
+            0.0,
+        )
+        self.assertEqual(
+            car.normalize_gamepad_axis("bad", 0, 255),
+            0.0,
+        )
+
+    def test_axis_selection_prefers_rx_and_only_safely_falls_back(self):
+        rx = car.AxisInfo("ABS_RX", -32768, 32767, 0)
+        centered_z = car.AxisInfo("ABS_Z", 0, 255, 128)
+        trigger_z = car.AxisInfo("ABS_Z", 0, 255, 0)
+        self.assertIs(
+            car.select_steering_axis(
+                {"ABS_RX": rx, "ABS_Z": trigger_z}
+            ),
+            rx,
+        )
+        self.assertIs(
+            car.select_steering_axis({"ABS_Z": centered_z}),
+            centered_z,
+        )
+        with self.assertRaisesRegex(ValueError, "likely a trigger"):
+            car.select_steering_axis({"ABS_Z": trigger_z})
 
     def test_throttle_and_drive_packet_are_clamped(self):
         self.assertEqual(car.throttle_to_pwm(100), 95)
@@ -197,6 +270,29 @@ class PiSteeringTests(unittest.TestCase):
             [(12, 1440), (12, 940), (12, 2150), (12, 0)],
         )
 
+    def test_transient_readback_mismatch_is_corrected(self):
+        client = FakePigpioClient()
+        steering = car.PiSteeringController(
+            pigpio_factory=lambda: client
+        )
+        self.assertTrue(steering.connect())
+        client.pulses.clear()
+        client.readbacks = [1440, 2150]
+        self.assertTrue(steering.set_steering(50, sequence=6))
+        self.assertEqual(client.pulses, [(12, 2150), (12, 2150)])
+
+    def test_readback_mismatch_retries_once_then_fails(self):
+        client = FakePigpioClient()
+        steering = car.PiSteeringController(
+            pigpio_factory=lambda: client
+        )
+        self.assertTrue(steering.connect())
+        client.pulses.clear()
+        client.forced_readback = 1440
+        self.assertFalse(steering.set_steering(50, sequence=7))
+        self.assertEqual(client.pulses, [(12, 2150), (12, 2150)])
+        self.assertIn("readback mismatch", steering.last_error)
+
 
 class ControllerTests(unittest.TestCase):
     def setUp(self):
@@ -209,6 +305,7 @@ class ControllerTests(unittest.TestCase):
             now_fn=lambda: self.clock[0],
         )
         self.controller.set_gamepad_connected(True)
+        configure_test_gamepad(self.controller)
         self.pico.commands.clear()
 
     def arm(self):
@@ -222,7 +319,7 @@ class ControllerTests(unittest.TestCase):
         self.controller.handle_event("BTN_START", 1)
         self.assertFalse(self.controller.armed)
         self.assertTrue(
-            any("release throttle and brake" in line for line in self.logs)
+            any("controls_not_neutral" in line for line in self.logs)
         )
         self.controller.handle_event("ABS_Y", 128)
         self.controller.handle_event("BTN_START", 1)
@@ -233,6 +330,8 @@ class ControllerTests(unittest.TestCase):
         self.controller.handle_event("ABS_Y", 0)
         self.assertEqual(self.pico.commands[-1], ("drive", "F", 100, 0))
         self.controller.handle_event("ABS_RX", 255)
+        self.assertEqual(self.pico.commands[-1], ("drive", "F", 100, 50))
+        self.controller.refresh_active_command()
         self.assertEqual(self.pico.commands[-1], ("drive", "F", 100, 50))
 
     def test_reverse_passes_through_stop_before_drive(self):
@@ -326,9 +425,51 @@ class ControllerTests(unittest.TestCase):
             now_fn=lambda: self.clock[0],
         )
         controller.set_gamepad_connected(True)
+        configure_test_gamepad(controller)
         controller.handle_event("BTN_START", 1)
         controller.handle_event("ABS_RX", 255)
         self.assertEqual(steering.angles[-1], 50)
+
+    def test_unselected_abs_z_trigger_does_not_change_steering(self):
+        steering = FakePiSteering()
+        controller = car.CarController(
+            self.pico,
+            pi_steering=steering,
+            log=self.logs.append,
+            now_fn=lambda: self.clock[0],
+        )
+        controller.set_gamepad_connected(True)
+        configure_test_gamepad(controller)
+        controller.handle_event("BTN_START", 1)
+        controller.handle_event("ABS_RX", 255)
+        command_count = len(self.pico.commands)
+        angle_count = len(steering.angles)
+        controller.handle_event("ABS_Z", 0)
+        self.assertEqual(controller.steering, 50)
+        self.assertEqual(len(self.pico.commands), command_count)
+        self.assertEqual(len(steering.angles), angle_count)
+
+    def test_stationary_health_failure_stops_and_disarms(self):
+        steering = FakePiSteering()
+        controller = car.CarController(
+            self.pico,
+            pi_steering=steering,
+            log=self.logs.append,
+            now_fn=lambda: self.clock[0],
+        )
+        controller.set_gamepad_connected(True)
+        configure_test_gamepad(controller)
+        controller.handle_event("BTN_START", 1)
+        self.pico.commands.clear()
+        steering.verify_ok = False
+        self.clock[0] += car.STEERING_HEALTH_INTERVAL_S
+        controller.refresh_active_command()
+        self.assertFalse(controller.armed)
+        self.assertEqual(self.pico.commands[-1], ("stop",))
+        self.assertEqual(steering.verify_calls, 1)
+        self.assertTrue(
+            any("action=health_check" in line for line in self.logs)
+        )
 
     def test_gpio12_failure_stops_and_disarms_the_car(self):
         steering = FakePiSteering()
@@ -339,13 +480,92 @@ class ControllerTests(unittest.TestCase):
             now_fn=lambda: self.clock[0],
         )
         controller.set_gamepad_connected(True)
+        configure_test_gamepad(controller)
         controller.handle_event("BTN_START", 1)
         self.assertTrue(controller.armed)
         steering.send_ok = False
         controller.handle_event("ABS_RX", 255)
         self.assertFalse(controller.armed)
         self.assertEqual(self.pico.commands[-1], ("stop",))
-        self.assertTrue(any("Pi steering command failed" in line for line in self.logs))
+        self.assertTrue(
+            any("event=steering_failure" in line for line in self.logs)
+        )
+
+
+class RuntimeConfigurationTests(unittest.TestCase):
+    def test_runtime_discovers_ranges_and_prefers_abs_rx(self):
+        pico = FakePico()
+        logs: list[str] = []
+        controller = car.CarController(pico, log=logs.append)
+        runtime = car.BasicCarRuntime(controller)
+        axes = {
+            "ABS_Y": car.AxisInfo("ABS_Y", -32768, 32767, 0),
+            "ABS_Z": car.AxisInfo("ABS_Z", 0, 255, 0),
+            "ABS_RX": car.AxisInfo("ABS_RX", -32768, 32767, 0),
+        }
+
+        def axis_reader(_path, code):
+            return axes[code]
+
+        with patch.object(car, "read_axis_info", side_effect=axis_reader):
+            runtime._configure_connected_gamepad(FakeGamepadDevice())
+
+        self.assertTrue(controller.gamepad_connected)
+        self.assertIs(controller.throttle_axis, axes["ABS_Y"])
+        self.assertIs(controller.steering_axis, axes["ABS_RX"])
+        self.assertEqual(controller.axis_configuration_error, "")
+
+    def test_axis_configuration_error_prevents_arming(self):
+        pico = FakePico()
+        logs: list[str] = []
+        controller = car.CarController(pico, log=logs.append)
+        controller.set_gamepad_connected(True)
+        controller.configure_gamepad(
+            "Trigger-only pad",
+            "/dev/input/test",
+            car.AxisInfo("ABS_Y", 0, 255, 128),
+            None,
+            "ABS_Z is likely a trigger",
+        )
+        controller.handle_event("BTN_START", 1)
+        self.assertFalse(controller.armed)
+        self.assertTrue(
+            any("reason=axis_configuration" in line for line in logs)
+        )
+
+
+class LoggingTests(unittest.TestCase):
+    def tearDown(self):
+        for handler in list(car.LOGGER.handlers):
+            car.LOGGER.removeHandler(handler)
+            handler.close()
+        car.LOGGER.addHandler(car.logging.NullHandler())
+        car.LOGGER.setLevel(car.logging.NOTSET)
+
+    def test_rotating_log_contains_correlated_steering_readback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "car.log"
+            logger = car.configure_logging(path)
+            client = FakePigpioClient()
+            steering = car.PiSteeringController(
+                pigpio_factory=lambda: client,
+                logger=logger,
+            )
+            self.assertTrue(steering.connect())
+            self.assertTrue(steering.set_steering(50, sequence=42))
+            for handler in logger.handlers:
+                handler.flush()
+            contents = path.read_text(encoding="utf-8")
+            self.assertIn("event=steering_apply seq=42", contents)
+            self.assertIn("requested_us=2150 readback_us=2150", contents)
+            file_handlers = [
+                handler
+                for handler in logger.handlers
+                if isinstance(handler, car.RotatingFileHandler)
+            ]
+            self.assertEqual(len(file_handlers), 1)
+            self.assertEqual(file_handlers[0].maxBytes, 5 * 1024 * 1024)
+            self.assertEqual(file_handlers[0].backupCount, 3)
 
 
 if __name__ == "__main__":
